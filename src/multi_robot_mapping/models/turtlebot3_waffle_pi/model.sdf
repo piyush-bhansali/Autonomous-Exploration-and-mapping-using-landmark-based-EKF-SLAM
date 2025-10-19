@@ -496,6 +496,18 @@
       <child_frame_id>base_footprint</child_frame_id>
       <odom_publisher_frequency>50</odom_publisher_frequency>
 
+      <pose_covariance_diagonal>
+      0.005 0.005 0.001 0.001 0.001 0.02
+      </pose_covariance_diagonal>
+  
+      <!-- Velocity uncertainty -->
+      <twist_covariance_diagonal>
+      0.002 0.002 0.001 0.001 0.001 0.01
+      </twist_covariance_diagonal>
+  
+      <!-- Wheel encoder noise -->
+      <noise>0.015</noise>
+
       <!-- <tf_topic>/tf</tf_topic> -->
 
     </plugin>
