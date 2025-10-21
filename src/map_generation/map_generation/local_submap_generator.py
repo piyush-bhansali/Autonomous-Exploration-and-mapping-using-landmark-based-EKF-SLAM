@@ -37,8 +37,10 @@ class LocalSubmapGenerator(Node):
         self.declare_parameter('min_scans_per_submap', 50)
         self.declare_parameter('save_directory', './submaps')
         self.declare_parameter('voxel_size', 0.05)
-        # New parameter for Open3D visualization
+        # Visualization and GPU parameters
         self.declare_parameter('visualize_open3d', True)
+        self.declare_parameter('use_gpu', True)
+        self.declare_parameter('gpu_device_id', 0)
 
         self.robot_name = self.get_parameter('robot_name').value
         self.use_ekf = self.get_parameter('use_ekf').value
@@ -48,6 +50,8 @@ class LocalSubmapGenerator(Node):
         self.save_dir = self.get_parameter('save_directory').value
         self.voxel_size = self.get_parameter('voxel_size').value
         self.visualize_open3d = self.get_parameter('visualize_open3d').value
+        self.use_gpu = self.get_parameter('use_gpu').value
+        self.gpu_device_id = self.get_parameter('gpu_device_id').value
 
         # Create save directory
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
@@ -61,11 +65,13 @@ class LocalSubmapGenerator(Node):
         else:
             self.ekf = None
 
-        # Initialize stitcher
+        # Initialize stitcher with GPU support
         self.stitcher = SubmapStitcher(
             voxel_size=self.voxel_size,
             icp_max_correspondence_dist=0.5,
-            icp_fitness_threshold=0.2
+            icp_fitness_threshold=0.2,
+            use_gpu=self.use_gpu,
+            gpu_device_id=self.gpu_device_id
         )
 
         # --- Open3D Visualization Setup ---
@@ -111,9 +117,11 @@ class LocalSubmapGenerator(Node):
 
         self.data_lock = Lock()
 
-        self.get_logger().info(f'Started: {self.robot_name} | EKF: {self.use_ekf} | Open3D Vis: {self.visualize_open3d}')
+        self.get_logger().info(f'Started: {self.robot_name} | EKF: {self.use_ekf} | Open3D Vis: {self.visualize_open3d} | GPU: {self.use_gpu}')
         self.get_logger().info(f'Thresholds: distance={self.distance_threshold}m, '
                                f'angle={self.angle_threshold}rad, min_scans={self.min_scans}')
+        if self.use_gpu:
+            self.get_logger().info(f'GPU Device: CUDA:{self.gpu_device_id}')
 
     # ============================================================================
     # OPEN3D VISUALIZATION
