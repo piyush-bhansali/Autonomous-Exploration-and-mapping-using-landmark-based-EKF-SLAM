@@ -260,16 +260,16 @@
         <visual name="visual"><geometry><box><size>0.2 5 1</size></box></geometry><material><diffuse>0.6 0.4 0.2 1</diffuse></material></visual>
       </link>
     </model>
-  
-    <!--<model name="wall_v8">
+
+    <model name="wall_v8">
       <static>true</static>
       <pose>-3 -7 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision"><geometry><box><size>0.2 6 1</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>0.2 6 1</size></box></geometry><material><diffuse>0.6 0.4 0.2 1</diffuse></material></visual>
       </link>
-    </model>-->
-  
+    </model>
+
     <model name="wall_v9">
       <static>true</static>
       <pose>3 -2 0.5 0 0 0</pose>
@@ -300,7 +300,7 @@
 
     <model name="obstacle_3">
       <static>true</static>
-      <pose>2 4 0.5 0 0 0</pose>
+      <pose>6 -8 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision"><geometry><cylinder><radius>0.8</radius><length>1</length></cylinder></geometry></collision>
         <visual name="visual"><geometry><cylinder><radius>0.8</radius><length>1</length></cylinder></geometry><material><diffuse>0.4 0.8 0.4 1</diffuse></material></visual>
