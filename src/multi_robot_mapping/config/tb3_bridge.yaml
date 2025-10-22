@@ -27,6 +27,11 @@
   ros_type_name: "sensor_msgs/msg/LaserScan"
   gz_type_name: "gz.msgs.LaserScan"
   direction: GZ_TO_ROS
+  qos:
+    reliability: best_effort
+    durability: volatile
+    history: keep_last
+    depth: 10
 
 - ros_topic_name: "/{robot_name}/cmd_vel"
   gz_topic_name: "/model/{robot_name}/cmd_vel"
