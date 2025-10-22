@@ -153,8 +153,8 @@ def generate_launch_description():
             '-world', 'maze_world',
             '-name', robot_name,
             '-string', robot_sdf_content,
-            '-x', '-23.0',
-            '-y', '-23.0',
+            '-x', '-12.0',
+            '-y', '-12.0',
             '-z', '0.02',
             '-Y', '0.0'
         ]
