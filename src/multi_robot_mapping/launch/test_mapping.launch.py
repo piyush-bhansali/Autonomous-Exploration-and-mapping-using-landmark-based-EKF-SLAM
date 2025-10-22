@@ -153,8 +153,8 @@ def generate_launch_description():
             '-world', 'maze_world',
             '-name', robot_name,
             '-string', robot_sdf_content,
-            '-x', '-8.0',
-            '-y', '-8.0',
+            '-x', '-23.0',
+            '-y', '-23.0',
             '-z', '0.02',
             '-Y', '0.0'
         ]
@@ -218,7 +218,7 @@ def generate_launch_description():
             'distance_threshold': 2.0,
             'angle_threshold': 0.5,
             'min_scans_per_submap': 50,
-            'save_directory': f'./test_results/{robot_name}/submaps',
+            'save_directory': './test_results/submaps',
             'voxel_size': 0.05,
             'visualize_open3d': LaunchConfiguration('visualize'),
             'use_gpu': LaunchConfiguration('use_gpu'),

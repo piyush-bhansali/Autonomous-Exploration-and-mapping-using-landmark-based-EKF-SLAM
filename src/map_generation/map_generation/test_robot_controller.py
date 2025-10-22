@@ -111,6 +111,8 @@ class TestRobotController(Node):
 
         start_x = self.current_pose['x']
         start_y = self.current_pose['y']
+        start_time = time.time()
+        timeout = (distance / speed) * 5.0  # 5x expected time as timeout
 
         twist = Twist()
         twist.linear.x = speed
@@ -118,7 +120,13 @@ class TestRobotController(Node):
         rate = self.create_rate(10)  # 10 Hz
 
         while rclpy.ok():
+            # Check timeout
+            if time.time() - start_time > timeout:
+                self.get_logger().warn(f'⚠️  Movement timeout after {timeout:.1f}s')
+                break
+
             self.cmd_vel_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.0)  # Process callbacks
 
             dx = self.current_pose['x'] - start_x
             dy = self.current_pose['y'] - start_y
@@ -127,10 +135,10 @@ class TestRobotController(Node):
             if dist_traveled >= distance:
                 break
 
-            rate.sleep()
+            time.sleep(0.1)  # 10 Hz
 
         self.stop()
-        self.get_logger().info(f'Moved forward {distance:.2f}m')
+        self.get_logger().info(f'Moved forward {dist_traveled:.2f}m (target: {distance:.2f}m)')
 
     def rotate(self, angle, speed=None):
         """Rotate by specified angle (radians)"""
@@ -142,6 +150,8 @@ class TestRobotController(Node):
 
         start_theta = self.current_pose['theta']
         target_rotation = abs(angle)
+        start_time = time.time()
+        timeout = (target_rotation / speed) * 5.0  # 5x expected time as timeout
 
         twist = Twist()
         twist.angular.z = speed if angle > 0 else -speed
@@ -149,17 +159,24 @@ class TestRobotController(Node):
         rate = self.create_rate(10)  # 10 Hz
 
         while rclpy.ok():
+            # Check timeout
+            if time.time() - start_time > timeout:
+                self.get_logger().warn(f'⚠️  Rotation timeout after {timeout:.1f}s')
+                break
+
             self.cmd_vel_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.0)  # Process callbacks
 
             angle_diff = abs(self.normalize_angle(self.current_pose['theta'] - start_theta))
 
             if angle_diff >= target_rotation:
                 break
 
-            rate.sleep()
+            time.sleep(0.1)  # 10 Hz
 
         self.stop()
-        self.get_logger().info(f'Rotated {np.degrees(angle):.1f}°')
+        angle_rotated = abs(self.normalize_angle(self.current_pose['theta'] - start_theta))
+        self.get_logger().info(f'Rotated {np.degrees(angle_rotated):.1f}° (target: {np.degrees(angle):.1f}°)')
 
     def stop(self):
         """Stop the robot"""
@@ -223,7 +240,7 @@ class TestRobotController(Node):
 
     def execute_long_corridor(self):
         """
-        Execute long straight path (10m forward, turn, 10m back).
+        Execute long straight path (10m forward only).
         This tests linear drift accumulation.
         """
         self.get_logger().info('\n' + '='*60)
@@ -237,21 +254,13 @@ class TestRobotController(Node):
         self.move_forward(corridor_length)
         time.sleep(1)
 
-        self.get_logger().info('--- Turning around ---')
-        self.rotate(np.pi)  # 180 degrees
-        time.sleep(1)
-
-        self.get_logger().info('--- Returning 10m ---')
-        self.move_forward(corridor_length)
-        time.sleep(1)
-
-        # Report drift
-        drift = self.get_distance_from_start()
+        # Report final position
+        distance_traveled = self.get_distance_from_start()
         self.get_logger().info('\n' + '='*60)
         self.get_logger().info(f'CORRIDOR PATTERN COMPLETED')
         self.get_logger().info(f'Final position: ({self.current_pose["x"]:.3f}, {self.current_pose["y"]:.3f})')
         self.get_logger().info(f'Start position: ({self.start_pose["x"]:.3f}, {self.start_pose["y"]:.3f})')
-        self.get_logger().info(f'Drift from start: {drift:.3f}m')
+        self.get_logger().info(f'Distance traveled: {distance_traveled:.3f}m')
         self.get_logger().info('='*60 + '\n')
 
     def execute_figure_eight(self):
@@ -382,7 +391,45 @@ def main(args=None):
 
     try:
         node.run_test()
-        node.get_logger().info('\n✅ Test completed successfully!')
+        node.get_logger().info('\n' + '='*60)
+        node.get_logger().info('✅ TEST COMPLETED SUCCESSFULLY!')
+        node.get_logger().info('='*60)
+
+        # Display map if it exists
+        map_file = f'./test_results/submaps/{robot_name}/global_map.pcd'
+        import os
+        if os.path.exists(map_file):
+            node.get_logger().info(f'\n📊 Map saved to: {map_file}')
+            node.get_logger().info('🔍 Displaying map statistics and visualization...\n')
+
+            # Display map stats and visualization
+            try:
+                import open3d as o3d
+                import numpy as np
+                pcd = o3d.io.read_point_cloud(map_file)
+                pts = np.asarray(pcd.points)
+
+                print('='*60)
+                print('GLOBAL MAP STATISTICS')
+                print('='*60)
+                print(f'Total points: {len(pts)}')
+                print(f'X range: {pts[:,0].min():.2f} to {pts[:,0].max():.2f} m')
+                print(f'Y range: {pts[:,1].min():.2f} to {pts[:,1].max():.2f} m')
+                print('='*60)
+
+                # Try to visualize (may fail in headless environments)
+                try:
+                    o3d.visualization.draw_geometries([pcd], window_name=f'Global Map - {pattern.name}')
+                except Exception as viz_error:
+                    print(f'Note: Visualization window failed (headless environment): {viz_error}')
+                    print('Map file saved successfully - view it later with Open3D')
+
+            except Exception as e:
+                node.get_logger().error(f'Failed to display map: {e}')
+        else:
+            node.get_logger().warn(f'⚠️  Map file not found: {map_file}')
+            node.get_logger().warn('    Robot may not have moved enough to create submaps (threshold: 2m)')
+
     except KeyboardInterrupt:
         node.get_logger().info('\n⚠️  Test interrupted by user')
     finally:
