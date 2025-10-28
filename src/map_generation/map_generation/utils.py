@@ -5,23 +5,6 @@ import numpy as np
 # ANGLE UTILITIES
 # ============================================================================
 
-def normalize_angle(angle):
-    """
-    Normalize angle to [-pi, pi]
-    
-    Args:
-        angle: Angle in radians
-    
-    Returns:
-        float: Normalized angle in range [-pi, pi]
-    
-    """
-    while angle > np.pi:
-        angle -= 2.0 * np.pi
-    while angle < -np.pi:
-        angle += 2.0 * np.pi
-    return angle
-
 def degrees_to_radians(degrees):
     """Convert degrees to radians"""
     return degrees * np.pi / 180.0

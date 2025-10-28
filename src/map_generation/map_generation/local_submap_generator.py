@@ -8,19 +8,20 @@ Subscribes to laser scans and odometry, generates submaps, and stitches them tog
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, PointCloud2, PointField
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Header
 import numpy as np
 import os
 from threading import Lock
+import struct
 
 from map_generation.submap_stitcher import SubmapStitcher
 from map_generation.ekf_lib import EKF
 from map_generation.utils import (
     quaternion_to_yaw,
     yaw_to_quaternion,
-    normalize_angle,
     quaternion_to_rotation_matrix
 )
 
@@ -33,42 +34,35 @@ class LocalSubmapGenerator(Node):
 
         # Declare parameters
         self.declare_parameter('robot_name', 'tb3_1')
-        self.declare_parameter('use_ekf', True)
-        self.declare_parameter('distance_threshold', 2.0)
-        self.declare_parameter('angle_threshold', 0.5)
-        self.declare_parameter('min_scans_per_submap', 50)
+        self.declare_parameter('scans_per_submap', 250)
+        self.declare_parameter('min_distance_between_submaps', 1.5)
         self.declare_parameter('save_directory', './submaps')
         self.declare_parameter('voxel_size', 0.05)
-        self.declare_parameter('visualize_open3d', False)
-        self.declare_parameter('use_gpu', True)
-        self.declare_parameter('gpu_device_id', 0)
+        self.declare_parameter('feature_method', 'hybrid')
+        self.declare_parameter('enable_loop_closure', False)
 
         # Get parameters
         self.robot_name = self.get_parameter('robot_name').value
-        self.use_ekf = self.get_parameter('use_ekf').value
-        self.distance_threshold = self.get_parameter('distance_threshold').value
-        self.angle_threshold = self.get_parameter('angle_threshold').value
-        self.min_scans = self.get_parameter('min_scans_per_submap').value
+        self.scans_per_submap = self.get_parameter('scans_per_submap').value
+        self.min_distance_between_submaps = self.get_parameter('min_distance_between_submaps').value
         self.save_dir = self.get_parameter('save_directory').value
         self.voxel_size = self.get_parameter('voxel_size').value
-        self.visualize_open3d = self.get_parameter('visualize_open3d').value
-        self.use_gpu = self.get_parameter('use_gpu').value
-        self.gpu_device_id = self.get_parameter('gpu_device_id').value
+        self.feature_method = self.get_parameter('feature_method').value
+        self.enable_loop_closure = self.get_parameter('enable_loop_closure').value
 
         # Create save directory
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
 
-        # Initialize EKF if needed
+        # Initialize EKF (always enabled)
+        self.ekf = EKF()
         self.ekf_initialized = False
-        if self.use_ekf:
-            self.ekf = EKF()
 
-        # Initialize stitcher
+        # Initialize stitcher (GPU always enabled)
         self.stitcher = SubmapStitcher(
             voxel_size=self.voxel_size,
-            use_gpu=self.use_gpu,
-            gpu_device_id=self.gpu_device_id
+            feature_extraction_method=self.feature_method,
+            enable_loop_closure=self.enable_loop_closure
         )
 
         # QoS profiles - match what the bridge publishes
@@ -97,57 +91,90 @@ class LocalSubmapGenerator(Node):
         )
         self.get_logger().info(f'✓ Subscribed to: /{self.robot_name}/odom')
 
-        # Subscribe to IMU if using EKF
-        if self.use_ekf:
-            self.imu_sub = self.create_subscription(
-                Imu,
-                f'/{self.robot_name}/imu',
-                self.imu_callback,
-                10
-            )
-            self.get_logger().info(f'✓ Subscribed to: /{self.robot_name}/imu')
+        # Publishers for visualization (always enabled)
+        self.current_submap_pub = self.create_publisher(
+            PointCloud2,
+            f'/{self.robot_name}/current_submap',
+            10
+        )
+        self.global_map_pub = self.create_publisher(
+            PointCloud2,
+            f'/{self.robot_name}/global_map',
+            10
+        )
+        self.get_logger().info(f'✓ Publishing point clouds to: /{self.robot_name}/current_submap and /{self.robot_name}/global_map')
+
+        # Subscribe to IMU (always enabled for EKF)
+        self.imu_sub = self.create_subscription(
+            Imu,
+            f'/{self.robot_name}/imu',
+            self.imu_callback,
+            10
+        )
+        self.get_logger().info(f'✓ Subscribed to: /{self.robot_name}/imu')
 
         # State variables
         self.current_pose = None
         self.submap_start_pose = None
-        self.current_submap_points = []
+        self.current_submap_points = []  # List of numpy arrays (one per scan)
         self.submap_id = 0
         self.data_lock = Lock()
 
-        # Debug counters
-        self.scan_count = 0
-        self.total_scans_received = 0
+        # Scan counting for submap creation
+        self.scans_in_current_submap = 0
+        self.total_scans_processed = 0
 
-        # Debug timer
-        self.create_timer(5.0, self.debug_callback)
+        # Visualization timer - publish current submap every 2 seconds
+        self.create_timer(2.0, self.publish_current_submap)
 
-        self.get_logger().info('='*60)
-        self.get_logger().info(f'Local Submap Generator Started')
-        self.get_logger().info(f'  Robot: {self.robot_name}')
-        self.get_logger().info(f'  EKF: {self.use_ekf}')
-        self.get_logger().info(f'  Distance threshold: {self.distance_threshold}m')
-        self.get_logger().info(f'  Angle threshold: {self.angle_threshold}rad')
-        self.get_logger().info(f'  Min scans: {self.min_scans}')
-        self.get_logger().info(f'  Save directory: {self.save_dir}')
-        self.get_logger().info(f'  GPU: {self.use_gpu}')
-        self.get_logger().info('='*60)
+        self.get_logger().info(f'Local Submap Generator initialized for {self.robot_name}')
+        self.get_logger().info(f'Scans per submap: {self.scans_per_submap}, Min distance: {self.min_distance_between_submaps}m')
 
-    def debug_callback(self):
-        """Debug timer to monitor scan reception"""
-        self.get_logger().info(
-            f'DEBUG: Scans/5s: {self.scan_count} | '
-            f'Total scans: {self.total_scans_received} | '
-            f'Submap points: {len(self.current_submap_points)} | '
-            f'Pose: {self.current_pose is not None}'
-        )
-        self.scan_count = 0
+    def publish_current_submap(self):
+        """Publish current submap for visualization"""
+        if len(self.current_submap_points) > 0:
+            with self.data_lock:
+                points = np.vstack(self.current_submap_points)  # Stack numpy arrays efficiently
+            pc2_msg = self.numpy_to_pointcloud2(points, 'map', self.get_clock().now().to_msg())
+            self.current_submap_pub.publish(pc2_msg)
+
+    def numpy_to_pointcloud2(self, points, frame_id, stamp):
+        """Convert numpy array to PointCloud2 message"""
+        # Create header
+        header = Header()
+        header.frame_id = frame_id
+        header.stamp = stamp
+
+        # Create PointCloud2 message
+        fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+        ]
+
+        # Pack points into binary data
+        cloud_data = []
+        for point in points:
+            cloud_data.append(struct.pack('fff', point[0], point[1], point[2]))
+
+        msg = PointCloud2()
+        msg.header = header
+        msg.height = 1
+        msg.width = len(points)
+        msg.fields = fields
+        msg.is_bigendian = False
+        msg.point_step = 12  # 3 floats * 4 bytes
+        msg.row_step = msg.point_step * len(points)
+        msg.is_dense = True
+        msg.data = b''.join(cloud_data)
+
+        return msg
 
     def imu_callback(self, msg):
         """IMU callback for EKF"""
-        if not self.use_ekf or not self.ekf_initialized:
+        if not self.ekf_initialized:
             return
 
-        # Get angular velocity
         omega = msg.angular_velocity.z
         self.ekf.predict_imu(omega)
 
@@ -162,22 +189,22 @@ class LocalSubmapGenerator(Node):
         qw = msg.pose.pose.orientation.w
         theta = quaternion_to_yaw(qx, qy, qz, qw)
 
-        if self.use_ekf:
-            vx = msg.twist.twist.linear.x
+        # Update EKF with odometry
+        vx = msg.twist.twist.linear.x
 
-            if not self.ekf_initialized:
-                self.ekf.initialize(x, y, theta, vx, 0.0)
-                self.ekf_initialized = True
-                self.get_logger().info(f'✓ EKF initialized at ({x:.2f}, {y:.2f})')
-            else:
-                self.ekf.update(x, y, theta, vx)
+        if not self.ekf_initialized:
+            self.ekf.initialize(x, y, theta, vx, 0.0)
+            self.ekf_initialized = True
+            self.get_logger().info(f'✓ EKF initialized at ({x:.2f}, {y:.2f})')
+        else:
+            self.ekf.update(x, y, theta, vx)
 
-            # Get state from EKF
-            state = self.ekf.get_state()
-            x = state['x']
-            y = state['y']
-            theta = state['theta']
-            qx, qy, qz, qw = yaw_to_quaternion(theta)
+        # Get state from EKF
+        state = self.ekf.get_state()
+        x = state['x']
+        y = state['y']
+        theta = state['theta']
+        qx, qy, qz, qw = yaw_to_quaternion(theta)
 
         # Update current pose
         with self.data_lock:
@@ -198,31 +225,20 @@ class LocalSubmapGenerator(Node):
 
     def scan_callback(self, msg):
         """Laser scan callback"""
-        self.scan_count += 1
-        self.total_scans_received += 1
-
         if self.current_pose is None:
-            if self.total_scans_received == 1:
-                self.get_logger().warn('⚠ Scan received but no pose yet - waiting for odometry...')
             return
 
         # Convert scan to world points
         points_world = self.scan_to_world_points(msg, self.current_pose)
 
         if len(points_world) == 0:
-            self.get_logger().warn('⚠ No valid points in scan!', throttle_duration_sec=5.0)
             return
 
-        # Add to current submap
+        # Add to current submap (store as numpy array, no conversion)
         with self.data_lock:
-            self.current_submap_points.extend(points_world.tolist())
-
-        # Log progress
-        if self.total_scans_received % 10 == 0:
-            self.get_logger().info(
-                f'Scan #{self.total_scans_received}: {len(points_world)} pts | '
-                f'Submap: {len(self.current_submap_points)} pts'
-            )
+            self.current_submap_points.append(points_world)
+            self.scans_in_current_submap += 1
+            self.total_scans_processed += 1
 
         # Check if we should create a submap
         if self.should_create_submap():
@@ -258,40 +274,25 @@ class LocalSubmapGenerator(Node):
 
     def should_create_submap(self):
         """Check if we should create a new submap"""
-        # Need minimum number of points
-        min_points = self.min_scans * 100  # Assume ~100 points per scan
-        if len(self.current_submap_points) < min_points:
+        # Check scan count requirement
+        if self.scans_in_current_submap < self.scans_per_submap:
             return False
 
+        # Need valid poses
         if self.submap_start_pose is None or self.current_pose is None:
             return False
 
-        # Calculate distance traveled
+        # Calculate distance traveled since submap start
         dx = self.current_pose['x'] - self.submap_start_pose['x']
         dy = self.current_pose['y'] - self.submap_start_pose['y']
         distance = np.sqrt(dx**2 + dy**2)
 
-        # Calculate angle change
-        theta_start = quaternion_to_yaw(
-            self.submap_start_pose['qx'], self.submap_start_pose['qy'],
-            self.submap_start_pose['qz'], self.submap_start_pose['qw']
-        )
-        theta_current = quaternion_to_yaw(
-            self.current_pose['qx'], self.current_pose['qy'],
-            self.current_pose['qz'], self.current_pose['qw']
-        )
-        angle_diff = abs(normalize_angle(theta_current - theta_start))
+        # Check minimum distance requirement
+        if distance < self.min_distance_between_submaps:
+            return False
 
-        # Check thresholds
-        if distance >= self.distance_threshold:
-            self.get_logger().info(f'✓ Distance threshold reached: {distance:.2f}m')
-            return True
-
-        if angle_diff >= self.angle_threshold:
-            self.get_logger().info(f'✓ Angle threshold reached: {angle_diff:.2f}rad')
-            return True
-
-        return False
+        self.get_logger().info(f'Creating submap {self.submap_id}: {self.scans_in_current_submap} scans, {distance:.2f}m')
+        return True
 
     def create_submap(self):
         """Create and stitch submap"""
@@ -299,19 +300,17 @@ class LocalSubmapGenerator(Node):
             return
 
         with self.data_lock:
-            points = np.array(self.current_submap_points)
-
-            self.get_logger().info('='*60)
-            self.get_logger().info(f'Creating Submap {self.submap_id}')
-            self.get_logger().info(f'  Points: {len(points)}')
-            self.get_logger().info(f'  Position: ({self.current_pose["x"]:.2f}, {self.current_pose["y"]:.2f})')
+            points = np.vstack(self.current_submap_points)  # Efficiently stack numpy arrays
+            scan_count = self.scans_in_current_submap
+            end_pose = self.current_pose.copy()  # Capture end pose
 
             # Add to stitcher
             success = self.stitcher.add_and_stitch_submap(
                 points=points,
                 submap_id=self.submap_id,
                 start_pose=self.submap_start_pose,
-                end_pose=self.current_pose
+                end_pose=end_pose,
+                scan_count=scan_count
             )
 
             if success:
@@ -320,20 +319,28 @@ class LocalSubmapGenerator(Node):
                 # Save global map
                 map_file = os.path.join(self.save_dir, 'global_map.pcd')
                 self.stitcher.save_global_map(map_file)
-                self.get_logger().info(f'✓ Saved global map: {map_file}')
 
-            # Reset for next submap
+                # Save individual submaps
+                submaps_dir = os.path.join(self.save_dir, 'submaps')
+                self.stitcher.save_submaps(submaps_dir)
+
+                # Publish global map for visualization
+                global_points = self.stitcher.get_global_map_points()
+                if global_points is not None and len(global_points) > 0:
+                    pc2_msg = self.numpy_to_pointcloud2(global_points, 'map', self.get_clock().now().to_msg())
+                    self.global_map_pub.publish(pc2_msg)
+
+            # Reset for next submap - use same pose as end_pose for continuity
             self.current_submap_points = []
-            self.submap_start_pose = self.current_pose.copy()
-            self.get_logger().info('='*60)
+            self.scans_in_current_submap = 0
+            self.submap_start_pose = end_pose
 
     def shutdown(self):
         """Clean shutdown"""
-        # Save final map
         if self.submap_id > 0:
             map_file = os.path.join(self.save_dir, 'global_map.pcd')
             self.stitcher.save_global_map(map_file)
-            self.get_logger().info(f'✓ Final map saved: {map_file}')
+            self.get_logger().info(f'Final map saved: {map_file}')
 
 
 def main(args=None):

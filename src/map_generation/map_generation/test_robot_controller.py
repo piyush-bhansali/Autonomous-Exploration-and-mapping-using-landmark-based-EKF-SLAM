@@ -15,6 +15,11 @@ from nav_msgs.msg import Odometry
 import numpy as np
 import time
 from enum import Enum
+from map_generation.utils import (
+    quaternion_to_yaw,
+    yaw_to_quaternion,
+    quaternion_to_rotation_matrix
+)
 
 
 class MovementPattern(Enum):
@@ -31,7 +36,7 @@ class TestRobotController(Node):
     Publishes velocity commands and tracks actual position.
     """
 
-    def __init__(self, robot_name='tb3_1', pattern=MovementPattern.SQUARE):
+    def __init__(self, robot_name='tb3_1', pattern=MovementPattern.LONG_CORRIDOR):
         super().__init__('test_robot_controller')
 
         # Parameters
@@ -76,7 +81,7 @@ class TestRobotController(Node):
         self.current_pose = {
             'x': msg.pose.pose.position.x,
             'y': msg.pose.pose.position.y,
-            'theta': self.quaternion_to_yaw(
+            'theta': quaternion_to_yaw(
                 msg.pose.pose.orientation.x,
                 msg.pose.pose.orientation.y,
                 msg.pose.pose.orientation.z,
@@ -94,13 +99,7 @@ class TestRobotController(Node):
             self.start_pose = self.current_pose.copy()
             self.get_logger().info(f'Start position: ({self.current_pose["x"]:.2f}, {self.current_pose["y"]:.2f})')
 
-    @staticmethod
-    def quaternion_to_yaw(x, y, z, w):
-        """Convert quaternion to yaw angle"""
-        siny_cosp = 2 * (w * z + x * y)
-        cosy_cosp = 1 - 2 * (y * y + z * z)
-        return np.arctan2(siny_cosp, cosy_cosp)
-
+    
     def move_forward(self, distance, speed=None):
         """Move forward by specified distance"""
         if speed is None:
@@ -135,7 +134,7 @@ class TestRobotController(Node):
             if dist_traveled >= distance:
                 break
 
-            time.sleep(0.1)  # 10 Hz
+            rate.sleep()  # Maintain consistent 10 Hz loop rate
 
         self.stop()
         self.get_logger().info(f'Moved forward {dist_traveled:.2f}m (target: {distance:.2f}m)')
@@ -167,15 +166,18 @@ class TestRobotController(Node):
             self.cmd_vel_pub.publish(twist)
             rclpy.spin_once(self, timeout_sec=0.0)  # Process callbacks
 
-            angle_diff = abs(self.normalize_angle(self.current_pose['theta'] - start_theta))
+            # Calculate angle difference using atan2 to handle wraparound
+            angle_diff = abs(np.arctan2(np.sin(self.current_pose['theta'] - start_theta),
+                                        np.cos(self.current_pose['theta'] - start_theta)))
 
             if angle_diff >= target_rotation:
                 break
 
-            time.sleep(0.1)  # 10 Hz
+            rate.sleep()  # Maintain consistent 10 Hz loop rate
 
         self.stop()
-        angle_rotated = abs(self.normalize_angle(self.current_pose['theta'] - start_theta))
+        angle_rotated = abs(np.arctan2(np.sin(self.current_pose['theta'] - start_theta),
+                                       np.cos(self.current_pose['theta'] - start_theta)))
         self.get_logger().info(f'Rotated {np.degrees(angle_rotated):.1f}° (target: {np.degrees(angle):.1f}°)')
 
     def stop(self):
@@ -183,15 +185,6 @@ class TestRobotController(Node):
         twist = Twist()
         self.cmd_vel_pub.publish(twist)
         time.sleep(0.5)  # Let it settle
-
-    @staticmethod
-    def normalize_angle(angle):
-        """Normalize angle to [-pi, pi]"""
-        while angle > np.pi:
-            angle -= 2 * np.pi
-        while angle < -np.pi:
-            angle += 2 * np.pi
-        return angle
 
     def get_distance_from_start(self):
         """Calculate distance from starting position"""

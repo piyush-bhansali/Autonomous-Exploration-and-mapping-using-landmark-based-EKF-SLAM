@@ -16,6 +16,7 @@ Usage:
 """
 
 from launch import LaunchDescription
+import launch.conditions
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
@@ -47,26 +48,14 @@ def generate_launch_description():
     # Launch arguments
     pattern_arg = DeclareLaunchArgument(
         'pattern',
-        default_value='square',
+        default_value='long_corridor',
         description='Movement pattern: square, long_corridor, figure_eight, spiral'
     )
 
-    use_ekf_arg = DeclareLaunchArgument(
-        'use_ekf',
+    use_rviz_arg = DeclareLaunchArgument(
+        'use_rviz',
         default_value='true',
-        description='Use EKF for pose estimation'
-    )
-
-    visualize_arg = DeclareLaunchArgument(
-        'visualize',
-        default_value='false',
-        description='Enable Open3D visualization (may fail on Wayland)'
-    )
-
-    use_gpu_arg = DeclareLaunchArgument(
-        'use_gpu',
-        default_value='true',
-        description='Use GPU acceleration'
+        description='Launch RViz2 for real-time visualization'
     )
 
     world_arg = DeclareLaunchArgument(
@@ -91,6 +80,7 @@ def generate_launch_description():
     urdf_file = os.path.join(pkg_multi_robot, 'urdf', 'turtlebot3_waffle_pi.urdf')
     bridge_common_yaml = os.path.join(pkg_multi_robot, 'config', 'tb3_bridge_common.yaml')
     bridge_robot_yaml = os.path.join(pkg_multi_robot, 'config', 'tb3_bridge.yaml')
+    rviz_config_file = os.path.join(pkg_multi_robot, 'rviz', 'mapping_visualization.rviz')
 
     # Read and prepare robot SDF
     with open(robot_sdf, 'r') as f:
@@ -166,7 +156,7 @@ def generate_launch_description():
 
     # Replace placeholders with actual robot name and world name
     config_content = template_content.replace('{robot_name}', robot_name)
-    config_content = config_content.replace('{world_name}', 'maze')
+    config_content = config_content.replace('{world_name}', 'maze_world')
 
     # Write to temporary config file
     temp_config = f'/tmp/{robot_name}_test_bridge.yaml'
@@ -214,15 +204,12 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'robot_name': robot_name,
-            'use_ekf': LaunchConfiguration('use_ekf'),
-            'distance_threshold': 2.0,
-            'angle_threshold': 0.5,
-            'min_scans_per_submap': 50,
+            'scans_per_submap': 250,
+            'min_distance_between_submaps': 1.5,
             'save_directory': './test_results/submaps',
             'voxel_size': 0.05,
-            'visualize_open3d': LaunchConfiguration('visualize'),
-            'use_gpu': LaunchConfiguration('use_gpu'),
-            'gpu_device_id': 0
+            'feature_method': 'hybrid',
+            'enable_loop_closure': False
         }]
     )
 
@@ -232,7 +219,25 @@ def generate_launch_description():
     )
 
     # ============================================================================
-    # 5. TEST ROBOT CONTROLLER (after 10 seconds)
+    # 5. RVIZ2 VISUALIZATION (after 8 seconds)
+    # ============================================================================
+
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        arguments=['-d', rviz_config_file],
+        output='screen',
+        condition=launch.conditions.IfCondition(LaunchConfiguration('use_rviz'))
+    )
+
+    rviz_delayed = TimerAction(
+        period=8.0,
+        actions=[rviz_node]
+    )
+
+    # ============================================================================
+    # 6. TEST ROBOT CONTROLLER (after 10 seconds)
     # ============================================================================
 
     # Wait for everything to start, then begin test
@@ -263,9 +268,7 @@ def generate_launch_description():
     return LaunchDescription([
         # Arguments
         pattern_arg,
-        use_ekf_arg,
-        visualize_arg,
-        use_gpu_arg,
+        use_rviz_arg,
         world_arg,
 
         # Nodes (with timing)
@@ -273,6 +276,7 @@ def generate_launch_description():
         clock_bridge_delayed,
         robot_spawn_delayed,
         submap_generator_delayed,
+        rviz_delayed,
         test_controller_delayed,
 
         # Info
