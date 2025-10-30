@@ -28,6 +28,7 @@ class MovementPattern(Enum):
     LONG_CORRIDOR = 2    # Long straight path (tests linear drift)
     FIGURE_EIGHT = 3     # Figure-8 pattern (tests complex trajectories)
     SPIRAL = 4           # Outward spiral (tests continuous rotation)
+    ROTATE_IN_PLACE = 5  # 360° in-place rotation (tests rotational mapping)
 
 
 class TestRobotController(Node):
@@ -311,6 +312,60 @@ class TestRobotController(Node):
         self.get_logger().info(f'Final distance from start: {drift:.3f}m')
         self.get_logger().info('='*60 + '\n')
 
+    def execute_rotate_in_place(self):
+        """
+        Execute 360° in-place rotation.
+        Tests how mapping handles pure rotation without translation.
+        Should ideally see no drift, just rotating view of surrounding walls.
+        """
+        self.get_logger().info('\n' + '='*60)
+        self.get_logger().info('EXECUTING ROTATE IN PLACE PATTERN')
+        self.get_logger().info('This tests IN-PLACE ROTATIONAL MAPPING')
+        self.get_logger().info('Expected: Zero drift, clean 360° scan coverage')
+        self.get_logger().info('='*60 + '\n')
+
+        # Record starting position for drift analysis
+        start_x = self.current_pose['x']
+        start_y = self.current_pose['y']
+        start_theta = self.current_pose['theta']
+
+        # Perform full 360° rotation (2π radians)
+        rotation_angle = 2 * np.pi  # 360 degrees
+        self.get_logger().info('--- Rotating 360° clockwise ---')
+        self.rotate(rotation_angle)
+        time.sleep(1)
+
+        # Calculate drift (should be minimal for in-place rotation)
+        dx = self.current_pose['x'] - start_x
+        dy = self.current_pose['y'] - start_y
+        drift = np.sqrt(dx**2 + dy**2)
+
+        # Calculate heading error (should return to same orientation)
+        heading_error = abs(np.arctan2(
+            np.sin(self.current_pose['theta'] - start_theta),
+            np.cos(self.current_pose['theta'] - start_theta)
+        ))
+
+        self.get_logger().info('\n' + '='*60)
+        self.get_logger().info(f'ROTATE IN PLACE PATTERN COMPLETED')
+        self.get_logger().info(f'Final position: ({self.current_pose["x"]:.3f}, {self.current_pose["y"]:.3f})')
+        self.get_logger().info(f'Start position: ({start_x:.3f}, {start_y:.3f})')
+        self.get_logger().info(f'Positional drift: {drift:.3f}m')
+        self.get_logger().info(f'Heading error: {np.degrees(heading_error):.1f}°')
+        self.get_logger().info('='*60 + '\n')
+
+        if drift > 0.1:
+            self.get_logger().warn(f'⚠️  UNEXPECTED DRIFT DETECTED: {drift:.3f}m')
+            self.get_logger().warn('⚠️  Robot should not translate during in-place rotation')
+        else:
+            self.get_logger().info(f'✅ Excellent! Drift within tolerance: {drift:.3f}m')
+
+        if heading_error > np.radians(5):  # More than 5 degrees error
+            self.get_logger().warn(f'⚠️  HEADING ERROR: {np.degrees(heading_error):.1f}°')
+            self.get_logger().warn('⚠️  This indicates odometry error during rotation')
+        else:
+            self.get_logger().info(f'✅ Good heading accuracy: {np.degrees(heading_error):.1f}° error')
+
     # ============================================================================
     # MAIN TEST EXECUTION
     # ============================================================================
@@ -336,6 +391,8 @@ class TestRobotController(Node):
             self.execute_figure_eight()
         elif self.pattern == MovementPattern.SPIRAL:
             self.execute_spiral()
+        elif self.pattern == MovementPattern.ROTATE_IN_PLACE:
+            self.execute_rotate_in_place()
 
         self.test_completed = True
         self.save_trajectory()

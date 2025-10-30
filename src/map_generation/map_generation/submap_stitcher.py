@@ -9,14 +9,15 @@ import os
 from map_generation.utils import quaternion_to_yaw
 from map_generation.feature_extractor import FeatureExtractor
 from map_generation.loop_closure_detector import LoopClosureDetector
+from map_generation.geometry_utils import estimate_transform_from_poses
 
 
 class SubmapStitcher:
     
     def __init__(self,
                  voxel_size: float = 0.05,
-                 icp_max_correspondence_dist: float = 0.1,
-                 icp_fitness_threshold: float = 0.3,
+                 icp_max_correspondence_dist: float = 0.3,  # Increased from 0.1 to 0.3 for better matching
+                 icp_fitness_threshold: float = 0.2,  # Reduced from 0.3 to 0.2 for more lenient acceptance
                  feature_extraction_method: str = 'hybrid',
                  enable_loop_closure: bool = False):
 
@@ -60,7 +61,7 @@ class SubmapStitcher:
 
         # GPU-accelerated voxel downsampling and outlier removal
         pcd_tensor = pcd_tensor.voxel_down_sample(voxel_size=self.voxel_size)
-        pcd_tensor, _ = pcd_tensor.remove_statistical_outliers(nb_neighbors=20, std_ratio=2.0)
+        pcd_tensor, _ = pcd_tensor.remove_statistical_outliers(nb_neighbors=20, std_ratio=2.5)
 
         pcd = pcd_tensor.to_legacy()
         print(f"  Submap {submap_id}: {len(points)} → {len(pcd.points)} points")
@@ -108,29 +109,7 @@ class SubmapStitcher:
 
     def estimate_2d_transform(self, pose_from: dict, pose_to: dict) -> np.ndarray:
         """Estimate 2D transformation between poses (in global frame)"""
-        # Extract positions and orientations
-        x_from, y_from = pose_from['x'], pose_from['y']
-        x_to, y_to = pose_to['x'], pose_to['y']
-
-        theta_from = quaternion_to_yaw(pose_from['qx'], pose_from['qy'],
-                                       pose_from['qz'], pose_from['qw'])
-        theta_to = quaternion_to_yaw(pose_to['qx'], pose_to['qy'],
-                                     pose_to['qz'], pose_to['qw'])
-
-        # Build 2D transformation matrices
-        cos_from, sin_from = np.cos(theta_from), np.sin(theta_from)
-        cos_to, sin_to = np.cos(theta_to), np.sin(theta_to)
-
-        T_from = np.eye(4)
-        T_from[0:2, 0:2] = [[cos_from, -sin_from], [sin_from, cos_from]]
-        T_from[0:2, 3] = [x_from, y_from]
-
-        T_to = np.eye(4)
-        T_to[0:2, 0:2] = [[cos_to, -sin_to], [sin_to, cos_to]]
-        T_to[0:2, 3] = [x_to, y_to]
-
-        # Relative transformation: T_rel = T_to @ inv(T_from)
-        return T_to @ np.linalg.inv(T_from)
+        return estimate_transform_from_poses(pose_from, pose_to, quaternion_to_yaw)
 
     def register_icp_2d(self,
                        source: o3d.geometry.PointCloud,
@@ -153,7 +132,7 @@ class SubmapStitcher:
             max_correspondence_distance=self.icp_max_dist,
             init_source_to_target=init_transform,
             estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
-            criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(max_iteration=100)
+            criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(max_iteration=200)
         )
 
         # Constrain transformation to 2D (safety measure)
@@ -201,8 +180,9 @@ class SubmapStitcher:
 
         # First submap: initialize global map
         if submap_id == 0:
+            # Points are already in world frame, just copy to global map
             self.global_map = o3d.geometry.PointCloud(pcd)
-            initial_transform = np.eye(4)
+            initial_transform = np.eye(4)  # Identity (no transform needed for world frame)
 
             # Store submap
             submap_data = {
@@ -228,27 +208,14 @@ class SubmapStitcher:
                     np.array([pose_center['x'], pose_center['y']])
                 )
 
-            print(f"  Submap {submap_id}: Added as first submap")
+            print(f"  Submap {submap_id}: Added as first submap (world frame)")
             return True
 
-        # For subsequent submaps: register and stitch
-        prev_submap = self.submaps[-1]
+        # For subsequent submaps: since points are already in world frame, just merge!
+        # No ICP registration needed - points are already correctly positioned
 
-        # Compute initial global transform from odometry
-        odom_transform = self.estimate_2d_transform(prev_submap['pose_end'], start_pose)
-        initial_global_transform = prev_submap['global_transform'] @ odom_transform
-
-        # ICP registration: align new submap to global map
-        if len(self.global_map.points) > 0:
-            success, final_global_transform, fitness = self.register_icp_2d(
-                source=pcd,
-                target=self.global_map,
-                initial_guess=initial_global_transform
-            )
-            if not success:
-                final_global_transform = initial_global_transform
-        else:
-            final_global_transform = initial_global_transform
+        # Store identity transform (points already in world frame)
+        identity_transform = np.eye(4)
 
         # Store submap
         submap_data = {
@@ -258,14 +225,14 @@ class SubmapStitcher:
             'pose_start': start_pose,
             'pose_end': end_pose,
             'pose_center': pose_center,
-            'global_transform': final_global_transform,
+            'global_transform': identity_transform,  # Identity - no transform needed
             'scan_count': scan_count,
             'bounds': bounds,
             'timestamp_created': time.time()
         }
 
         self.submaps.append(submap_data)
-        self.transforms.append(final_global_transform)
+        self.transforms.append(identity_transform)
 
         # Add to loop closure spatial index
         if self.loop_closure_detector is not None:
@@ -286,18 +253,18 @@ class SubmapStitcher:
                 print(f"  Loop closure detected: submap {submap_id} matches submap {loop_closure['match_id']}")
                 # TODO: Apply loop closure correction to global map
 
-        # Add transformed submap to global map
-        pcd_final = o3d.geometry.PointCloud(pcd)
-        pcd_final.transform(final_global_transform)
-        self.global_map += pcd_final
+        # Add submap directly to global map (no transformation needed - already in world frame)
+        self.global_map += pcd
+        print(f"  Submap {submap_id}: Merged to global map (world frame)")
 
-        # Downsample global map if too large
-        if len(self.global_map.points) > 100000:
-            global_map_tensor = o3d.t.geometry.PointCloud.from_legacy(self.global_map, dtype=o3c.float32, device=self.device)
-            global_map_tensor = global_map_tensor.voxel_down_sample(self.voxel_size)
-            self.global_map = global_map_tensor.to_legacy()
+        # ALWAYS downsample global map after adding new submap to prevent duplicate points
+        # This is critical for maintaining map structure and avoiding ghosting
+        print(f"  Before downsampling: {len(self.global_map.points)} points")
+        global_map_tensor = o3d.t.geometry.PointCloud.from_legacy(self.global_map, dtype=o3c.float32, device=self.device)
+        global_map_tensor = global_map_tensor.voxel_down_sample(self.voxel_size)
+        self.global_map = global_map_tensor.to_legacy()
 
-        print(f"  Submap {submap_id} stitched: {len(self.global_map.points)} total points")
+        print(f"  Submap {submap_id} stitched: {len(self.global_map.points)} total points (after voxel downsample)")
 
         return True
 

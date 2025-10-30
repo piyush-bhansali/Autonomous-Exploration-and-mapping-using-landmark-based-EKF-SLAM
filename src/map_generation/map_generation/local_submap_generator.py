@@ -17,6 +17,11 @@ import os
 from threading import Lock
 import struct
 
+from tf2_ros import Buffer, TransformListener
+from geometry_msgs.msg import TransformStamped
+import tf2_geometry_msgs
+from rclpy.duration import Duration
+
 from map_generation.submap_stitcher import SubmapStitcher
 from map_generation.ekf_lib import EKF
 from map_generation.utils import (
@@ -36,6 +41,7 @@ class LocalSubmapGenerator(Node):
         self.declare_parameter('robot_name', 'tb3_1')
         self.declare_parameter('scans_per_submap', 250)
         self.declare_parameter('min_distance_between_submaps', 1.5)
+        self.declare_parameter('min_rotation_between_submaps', 60.0)  # degrees
         self.declare_parameter('save_directory', './submaps')
         self.declare_parameter('voxel_size', 0.05)
         self.declare_parameter('feature_method', 'hybrid')
@@ -45,6 +51,7 @@ class LocalSubmapGenerator(Node):
         self.robot_name = self.get_parameter('robot_name').value
         self.scans_per_submap = self.get_parameter('scans_per_submap').value
         self.min_distance_between_submaps = self.get_parameter('min_distance_between_submaps').value
+        self.min_rotation_between_submaps = np.radians(self.get_parameter('min_rotation_between_submaps').value)
         self.save_dir = self.get_parameter('save_directory').value
         self.voxel_size = self.get_parameter('voxel_size').value
         self.feature_method = self.get_parameter('feature_method').value
@@ -53,6 +60,11 @@ class LocalSubmapGenerator(Node):
         # Create save directory
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
+
+        # Initialize TF2 for proper coordinate transformations
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.get_logger().info('✓ TF2 listener initialized')
 
         # Initialize EKF (always enabled)
         self.ekf = EKF()
@@ -65,9 +77,10 @@ class LocalSubmapGenerator(Node):
             enable_loop_closure=self.enable_loop_closure
         )
 
-        # QoS profiles - match what the bridge publishes
+        # QoS profiles - match what the Gazebo bridge publishes (BEST_EFFORT)
+        # This prevents message loss due to QoS incompatibility
         sensor_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,  # Changed from RELIABLE to match bridge
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10
@@ -128,15 +141,32 @@ class LocalSubmapGenerator(Node):
         self.create_timer(2.0, self.publish_current_submap)
 
         self.get_logger().info(f'Local Submap Generator initialized for {self.robot_name}')
-        self.get_logger().info(f'Scans per submap: {self.scans_per_submap}, Min distance: {self.min_distance_between_submaps}m')
+        self.get_logger().info(f'Scans per submap: {self.scans_per_submap}, Min distance: {self.min_distance_between_submaps}m, Min rotation: {np.degrees(self.min_rotation_between_submaps):.0f}°')
 
     def publish_current_submap(self):
-        """Publish current submap for visualization"""
-        if len(self.current_submap_points) > 0:
+        """Publish current submap and global map for visualization"""
+        # Publish current submap being built
+        if len(self.current_submap_points) > 0 and self.submap_start_pose is not None:
             with self.data_lock:
-                points = np.vstack(self.current_submap_points)  # Stack numpy arrays efficiently
-            pc2_msg = self.numpy_to_pointcloud2(points, 'map', self.get_clock().now().to_msg())
+                points_world = np.vstack(self.current_submap_points)  # Already in world frame
+
+            # Points are already in world frame (odom), no transformation needed
+            pc2_msg = self.numpy_to_pointcloud2(points_world, 'odom', self.get_clock().now().to_msg())
             self.current_submap_pub.publish(pc2_msg)
+
+        # ALWAYS publish global map if available (not just on submap creation)
+        global_points = self.stitcher.get_global_map_points()
+        if global_points is not None and len(global_points) > 0:
+            pc2_msg = self.numpy_to_pointcloud2(global_points, 'odom', self.get_clock().now().to_msg())
+            self.global_map_pub.publish(pc2_msg)
+        elif len(self.current_submap_points) > 0 and self.submap_id == 0 and self.submap_start_pose is not None:
+            # Fallback: if no global map yet, publish current submap (already in world frame)
+            with self.data_lock:
+                points_world = np.vstack(self.current_submap_points)
+
+            # Points are already in world frame (odom), no transformation needed
+            pc2_msg = self.numpy_to_pointcloud2(points_world, 'odom', self.get_clock().now().to_msg())
+            self.global_map_pub.publish(pc2_msg)
 
     def numpy_to_pointcloud2(self, points, frame_id, stamp):
         """Convert numpy array to PointCloud2 message"""
@@ -212,6 +242,7 @@ class LocalSubmapGenerator(Node):
                 'x': x,
                 'y': y,
                 'z': 0.0,
+                'theta': theta,  # Add theta for rotation-based submap creation
                 'qx': qx,
                 'qy': qy,
                 'qz': qz,
@@ -228,15 +259,16 @@ class LocalSubmapGenerator(Node):
         if self.current_pose is None:
             return
 
-        # Convert scan to world points
-        points_world = self.scan_to_world_points(msg, self.current_pose)
+        # Convert scan to submap-local points (relative to submap start pose)
+        # This ensures all scans within a submap are in a consistent coordinate frame
+        points_submap = self.scan_to_submap_points(msg, self.current_pose, self.submap_start_pose)
 
-        if len(points_world) == 0:
+        if len(points_submap) == 0:
             return
 
         # Add to current submap (store as numpy array, no conversion)
         with self.data_lock:
-            self.current_submap_points.append(points_world)
+            self.current_submap_points.append(points_submap)
             self.scans_in_current_submap += 1
             self.total_scans_processed += 1
 
@@ -244,13 +276,68 @@ class LocalSubmapGenerator(Node):
         if self.should_create_submap():
             self.create_submap()
 
-    def scan_to_world_points(self, scan_msg, pose):
-        """Convert laser scan to points in world frame"""
+    def scan_to_world_points_with_lidar_offset(self, scan_msg, pose):
+        """
+        Convert laser scan to points in world frame, accounting for LiDAR offset
+
+        The LiDAR is offset from the robot's rotation center (base_link):
+        - X: -0.064m (6.4cm backward)
+        - Y: 0m
+        - Z: 0.121m (12.1cm up)
+
+        This offset causes the LiDAR to orbit in a circle during in-place rotation.
+        We must account for this to avoid circular artifacts in the map.
+        """
         angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, len(scan_msg.ranges))
         ranges = np.array(scan_msg.ranges)
 
+        # Use full sensor range
+        max_range = scan_msg.range_max
+
         # Filter valid ranges
-        valid = (ranges >= scan_msg.range_min) & (ranges <= scan_msg.range_max) & np.isfinite(ranges)
+        valid = (ranges >= scan_msg.range_min) & (ranges <= max_range) & np.isfinite(ranges)
+
+        if not np.any(valid):
+            return np.array([])
+
+        valid_angles = angles[valid]
+        valid_ranges = ranges[valid]
+
+        # Convert to Cartesian in LiDAR frame (base_scan)
+        x_scan = valid_ranges * np.cos(valid_angles)
+        y_scan = valid_ranges * np.sin(valid_angles)
+        z_scan = np.zeros_like(x_scan)
+
+        # LiDAR offset from base_link (from model.sdf line 456)
+        lidar_offset_base = np.array([-0.064, 0.0, 0.121])
+
+        # Get robot pose (base_link)
+        R_base = quaternion_to_rotation_matrix(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
+        t_base = np.array([pose['x'], pose['y'], pose['z']])
+
+        # Transform LiDAR offset to world frame (rotates with robot)
+        lidar_offset_world = R_base @ lidar_offset_base
+
+        # Calculate actual LiDAR position in world frame
+        lidar_position_world = t_base + lidar_offset_world
+
+        # Transform scan points from LiDAR frame to world frame
+        # Points are relative to LiDAR, so we use the LiDAR's position and rotation
+        points_scan = np.column_stack((x_scan, y_scan, z_scan))
+        points_world = (R_base @ points_scan.T).T + lidar_position_world
+
+        return points_world
+
+    def scan_to_world_points(self, scan_msg, pose):
+        """Convert laser scan to points in world frame (legacy - not accounting for LiDAR offset)"""
+        angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, len(scan_msg.ranges))
+        ranges = np.array(scan_msg.ranges)
+
+        # Use full sensor range
+        max_range = scan_msg.range_max
+
+        # Filter valid ranges
+        valid = (ranges >= scan_msg.range_min) & (ranges <= max_range) & np.isfinite(ranges)
 
         if not np.any(valid):
             return np.array([])
@@ -272,6 +359,27 @@ class LocalSubmapGenerator(Node):
 
         return points_world
 
+    def scan_to_submap_points(self, scan_msg, current_pose, submap_start_pose):
+        """
+        Convert laser scan to points in WORLD frame with LiDAR offset correction
+
+        IMPORTANT: We manually account for the LiDAR offset from the robot's rotation center.
+        This prevents circular artifacts during in-place rotation.
+
+        The LiDAR is offset by -6.4cm from base_link. Without this correction, during rotation,
+        the LiDAR traces a circle which creates a donut-shaped artifact in the map.
+
+        Args:
+            scan_msg: LaserScan message
+            current_pose: Current robot pose (base_link position)
+            submap_start_pose: Pose at submap start (unused - kept for API compatibility)
+
+        Returns:
+            np.ndarray: Points in WORLD coordinate frame (N x 3)
+        """
+        # Use manual transformation accounting for LiDAR offset
+        return self.scan_to_world_points_with_lidar_offset(scan_msg, current_pose)
+
     def should_create_submap(self):
         """Check if we should create a new submap"""
         # Check scan count requirement
@@ -282,17 +390,29 @@ class LocalSubmapGenerator(Node):
         if self.submap_start_pose is None or self.current_pose is None:
             return False
 
-        # Calculate distance traveled since submap start
+        # Calculate LINEAR distance traveled since submap start
         dx = self.current_pose['x'] - self.submap_start_pose['x']
         dy = self.current_pose['y'] - self.submap_start_pose['y']
         distance = np.sqrt(dx**2 + dy**2)
 
-        # Check minimum distance requirement
-        if distance < self.min_distance_between_submaps:
-            return False
+        # Calculate ANGULAR displacement (rotation) since submap start
+        # Use atan2 to handle angle wraparound correctly
+        dtheta = abs(np.arctan2(
+            np.sin(self.current_pose['theta'] - self.submap_start_pose['theta']),
+            np.cos(self.current_pose['theta'] - self.submap_start_pose['theta'])
+        ))
 
-        self.get_logger().info(f'Creating submap {self.submap_id}: {self.scans_in_current_submap} scans, {distance:.2f}m')
-        return True
+        # Create submap if sufficient scans AND (moved distance OR rotated significantly)
+        # This handles both translation (distance) and rotation (dtheta) cases
+        if distance >= self.min_distance_between_submaps or dtheta >= self.min_rotation_between_submaps:
+            self.get_logger().info(
+                f'Creating submap {self.submap_id}: '
+                f'{self.scans_in_current_submap} scans, '
+                f'{distance:.2f}m, {np.degrees(dtheta):.1f}°'
+            )
+            return True
+
+        return False
 
     def create_submap(self):
         """Create and stitch submap"""
@@ -304,6 +424,10 @@ class LocalSubmapGenerator(Node):
             scan_count = self.scans_in_current_submap
             end_pose = self.current_pose.copy()  # Capture end pose
 
+            self.get_logger().info(f'Creating submap {self.submap_id}: {scan_count} scans, {len(points)} points')
+            self.get_logger().info(f'  Start pose: ({self.submap_start_pose["x"]:.3f}, {self.submap_start_pose["y"]:.3f}, θ={np.degrees(self.submap_start_pose["theta"]):.1f}°)')
+            self.get_logger().info(f'  End pose:   ({end_pose["x"]:.3f}, {end_pose["y"]:.3f}, θ={np.degrees(end_pose["theta"]):.1f}°)')
+
             # Add to stitcher
             success = self.stitcher.add_and_stitch_submap(
                 points=points,
@@ -314,20 +438,23 @@ class LocalSubmapGenerator(Node):
             )
 
             if success:
+                # Get global map statistics
+                global_points = self.stitcher.get_global_map_points()
+                global_size = len(global_points) if global_points is not None else 0
+
+                self.get_logger().info(f'✓ Submap {self.submap_id} stitched! Global map now has {global_size} points')
+
                 self.submap_id += 1
 
-                # Save global map
-                map_file = os.path.join(self.save_dir, 'global_map.pcd')
-                self.stitcher.save_global_map(map_file)
+                # Save global map periodically (every 5 submaps)
+                if self.submap_id % 5 == 0:
+                    map_file = os.path.join(self.save_dir, 'global_map.pcd')
+                    self.stitcher.save_global_map(map_file)
+                    self.get_logger().info(f'Saved global map: {map_file}')
 
-                # Save individual submaps
-                submaps_dir = os.path.join(self.save_dir, 'submaps')
-                self.stitcher.save_submaps(submaps_dir)
-
-                # Publish global map for visualization
-                global_points = self.stitcher.get_global_map_points()
+                # Publish global map for visualization and navigation
                 if global_points is not None and len(global_points) > 0:
-                    pc2_msg = self.numpy_to_pointcloud2(global_points, 'map', self.get_clock().now().to_msg())
+                    pc2_msg = self.numpy_to_pointcloud2(global_points, 'odom', self.get_clock().now().to_msg())
                     self.global_map_pub.publish(pc2_msg)
 
             # Reset for next submap - use same pose as end_pose for continuity

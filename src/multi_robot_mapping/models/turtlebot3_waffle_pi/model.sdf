@@ -150,7 +150,7 @@
           </scan>
           <range>
             <min>0.120000</min>
-            <max>3.5</max>
+            <max>5.0</max>
             <resolution>0.015000</resolution>
           </range>
           <noise>
@@ -488,12 +488,17 @@
       <wheel_radius>0.033</wheel_radius>
 
       <!-- limits -->
+      <max_linear_velocity>0.26</max_linear_velocity>
+      <min_linear_velocity>-0.26</min_linear_velocity>
+      <max_angular_velocity>1.82</max_angular_velocity>
+      <min_angular_velocity>-1.82</min_angular_velocity>
       <max_linear_acceleration>1.0</max_linear_acceleration>
+      <max_angular_acceleration>2.0</max_angular_acceleration>
 
       <!-- <topic>cmd_vel</topic> -->
       <!-- <odom_topic>odom</odom_topic> -->
       <frame_id>odom</frame_id>
-      <child_frame_id>base_footprint</child_frame_id>
+      <child_frame_id>base_link</child_frame_id>
       <odom_publisher_frequency>50</odom_publisher_frequency>
 
       <pose_covariance_diagonal>

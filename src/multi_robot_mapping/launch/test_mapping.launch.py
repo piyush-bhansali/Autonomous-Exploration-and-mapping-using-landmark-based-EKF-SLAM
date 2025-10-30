@@ -13,6 +13,7 @@ Usage:
     ros2 launch multi_robot_mapping test_mapping.launch.py pattern:=long_corridor
     ros2 launch multi_robot_mapping test_mapping.launch.py pattern:=figure_eight
     ros2 launch multi_robot_mapping test_mapping.launch.py pattern:=spiral
+    ros2 launch multi_robot_mapping test_mapping.launch.py pattern:=rotate_in_place
 """
 
 from launch import LaunchDescription
@@ -49,7 +50,7 @@ def generate_launch_description():
     pattern_arg = DeclareLaunchArgument(
         'pattern',
         default_value='long_corridor',
-        description='Movement pattern: square, long_corridor, figure_eight, spiral'
+        description='Movement pattern: square, long_corridor, figure_eight, spiral, rotate_in_place'
     )
 
     use_rviz_arg = DeclareLaunchArgument(
@@ -68,6 +69,10 @@ def generate_launch_description():
     robot_name = 'tb3_1'
     world_name = LaunchConfiguration('world')
     pattern = LaunchConfiguration('pattern')
+
+    # Gazebo world name mapping (for internal Gazebo world names)
+    # Default to maze_world for compatibility
+    gazebo_world_name = 'maze_world'  # Will match the world file's internal name
 
     # File paths
     world_file = PathJoinSubstitution([
@@ -140,12 +145,12 @@ def generate_launch_description():
         name=f'spawn_{robot_name}',
         output='screen',
         arguments=[
-            '-world', 'maze_world',
+            '-world', gazebo_world_name,
             '-name', robot_name,
             '-string', robot_sdf_content,
             '-x', '-12.0',
             '-y', '-12.0',
-            '-z', '0.02',
+            '-z', '0.01',  # Minimal height to avoid ground penetration
             '-Y', '0.0'
         ]
     )
@@ -156,7 +161,7 @@ def generate_launch_description():
 
     # Replace placeholders with actual robot name and world name
     config_content = template_content.replace('{robot_name}', robot_name)
-    config_content = config_content.replace('{world_name}', 'maze_world')
+    config_content = config_content.replace('{world_name}', gazebo_world_name)
 
     # Write to temporary config file
     temp_config = f'/tmp/{robot_name}_test_bridge.yaml'
@@ -204,12 +209,13 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'robot_name': robot_name,
-            'scans_per_submap': 250,
-            'min_distance_between_submaps': 1.5,
+            'scans_per_submap': 30,  # 30 scans @ 10Hz = 3 seconds (optimized for rotation)
+            'min_distance_between_submaps': 0.6,  # 0.6m distance OR 60° rotation
+            'min_rotation_between_submaps': 60.0,  # 60 degrees (π/3 radians)
             'save_directory': './test_results/submaps',
-            'voxel_size': 0.05,
-            'feature_method': 'hybrid',
-            'enable_loop_closure': False
+            'voxel_size': 0.05,  # 5cm voxel size for good detail
+            'feature_method': 'hybrid',  # Use both Scan Context + geometric features
+            'enable_loop_closure': True  # ENABLED for better mapping with loop closure detection
         }]
     )
 

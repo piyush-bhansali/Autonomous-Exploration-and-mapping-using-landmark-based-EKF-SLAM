@@ -4,6 +4,9 @@ import numpy as np
 import open3d as o3d
 from typing import Dict, Tuple
 
+# Import shared geometry utilities
+from map_generation.geometry_utils import match_scan_context, match_geometric_features
+
 
 class FeatureExtractor:
     
@@ -62,68 +65,61 @@ class FeatureExtractor:
             }
 
         elif self.method == 'scan_context':
-            descriptors, metadata = self._extract_scan_context(pcd_down)
-            keypoints = o3d.geometry.PointCloud()
-            keypoint_indices = np.array([])
-
+            # Extract only Scan Context
+            sc_desc, sc_meta = self._extract_scan_context(pcd_down)
             elapsed = time.time() - start_time
-            metadata['computation_time'] = elapsed
 
             return {
-                'method': self.method,
-                'keypoints': keypoints,
-                'keypoint_indices': keypoint_indices,
-                'descriptors': descriptors,
-                'metadata': metadata
+                'method': 'scan_context',
+                'scan_context': sc_desc,
+                'descriptors': sc_desc,
+                'keypoints': o3d.geometry.PointCloud(),
+                'keypoint_indices': np.array([]),
+                'metadata': {
+                    **sc_meta,
+                    'computation_time': elapsed
+                }
             }
 
         elif self.method == 'geometric':
+            # Extract only geometric features
             keypoints, keypoint_indices = self._extract_keypoints_uniform(pcd_down)
-            if len(keypoints.points) == 0:
-                print("⚠ No keypoints found!")
-                return self._empty_result()
-            descriptors, metadata = self._extract_geometric(pcd_down, keypoint_indices)
+            if len(keypoints.points) > 0:
+                geom_desc, geom_meta = self._extract_geometric(pcd_down, keypoint_indices)
+            else:
+                geom_desc = np.array([])
+                geom_meta = {'num_keypoints': 0, 'descriptor_dim': 0}
 
             elapsed = time.time() - start_time
-            metadata['computation_time'] = elapsed
 
             return {
-                'method': self.method,
+                'method': 'geometric',
+                'geometric': geom_desc,
+                'descriptors': geom_desc,
                 'keypoints': keypoints,
                 'keypoint_indices': keypoint_indices,
-                'descriptors': descriptors,
-                'metadata': metadata
+                'metadata': {
+                    **geom_meta,
+                    'computation_time': elapsed
+                }
             }
 
         else:
             raise ValueError(f"Unknown feature method: {self.method}. Use 'hybrid', 'scan_context' or 'geometric'")
 
     def _extract_scan_context(self, pcd: o3d.geometry.PointCloud) -> Tuple[np.ndarray, Dict]:
-        """
-        Extract Scan Context descriptor (global 2D descriptor)
-
-        CRITICAL: Re-centers point cloud to submap center before computing polar coordinates.
-        This ensures Scan Context describes SHAPE independent of world position.
-        """
+        
         points = np.asarray(pcd.points)
-
-        # Convert to 2D (project to XY plane)
         points_2d = points[:, :2]
-
-        # CRITICAL FIX: Compute submap center and re-center point cloud
-        # This makes Scan Context translation-invariant (describes shape, not position)
         center = np.mean(points_2d, axis=0)
         points_centered = points_2d - center
 
-        # Polar coordinates FROM SUBMAP CENTER (not world origin!)
         r = np.sqrt(points_centered[:, 0]**2 + points_centered[:, 1]**2)
         theta = np.arctan2(points_centered[:, 1], points_centered[:, 0])
 
-        # Adaptive max_range: Use actual data extent or configured value
         r_99th = np.percentile(r, 99) if len(r) > 0 else 1.0
         max_range_adaptive = max(r_99th * 1.1, 1.0)  # 10% margin, minimum 1m
 
-        # Use larger of adaptive or configured max_range
         max_range = max(max_range_adaptive, self.sc_params['max_range'])
 
         num_rings = self.sc_params['num_rings']
@@ -169,12 +165,7 @@ class FeatureExtractor:
             'occupancy': float(occupancy)
         }
 
-        print(f"✓ Scan Context: {num_rings}×{num_sectors} = {len(descriptor)}D, "
-              f"range={max_range:.2f}m, center=({center[0]:.2f}, {center[1]:.2f}), "
-              f"used={points_used}/{len(points)} ({100*points_used/len(points):.1f}%), "
-              f"occupancy={occupancy:.1%}")
-
-        return descriptor.reshape(1, -1), metadata  # Return as (1, D) for consistency
+        return descriptor.reshape(1, -1), metadata
 
     def _extract_keypoints_uniform(self, pcd: o3d.geometry.PointCloud,
                                    ratio: float = 0.1) -> Tuple[o3d.geometry.PointCloud, np.ndarray]:
@@ -187,15 +178,10 @@ class FeatureExtractor:
         indices = np.sort(indices)
 
         keypoints = pcd.select_by_index(indices.tolist())
-
-        print(f"✓ Uniform sampling: {len(indices)}/{num_points} keypoints ({100*ratio:.1f}%)")
-
         return keypoints, indices
 
     def _extract_geometric(self, pcd: o3d.geometry.PointCloud,
                           keypoint_indices: np.ndarray) -> Tuple[np.ndarray, Dict]:
-        
-        print("Extracting geometric features...")
 
         points = np.asarray(pcd.points)
         pcd_tree = o3d.geometry.KDTreeFlann(pcd)
@@ -238,8 +224,6 @@ class FeatureExtractor:
             'descriptor_dim': 4
         }
 
-        print(f"✓ Geometric features: {descriptors.shape}")
-
         return descriptors, metadata
 
     def _empty_result(self) -> Dict:
@@ -255,61 +239,6 @@ class FeatureExtractor:
                 'computation_time': 0.0
             }
         }
-
-    @staticmethod
-    def match_scan_context(sc1: np.ndarray, sc2: np.ndarray) -> Tuple[float, int]:
-        
-        num_sectors = sc1.shape[1]
-
-        best_sim = -1
-        best_shift = 0
-
-        # Try all circular shifts
-        for shift in range(num_sectors):
-            sc2_shifted = np.roll(sc2, shift, axis=1)
-
-            # Cosine similarity
-            sc1_flat = sc1.flatten()
-            sc2_flat = sc2_shifted.flatten()
-
-            norm1 = np.linalg.norm(sc1_flat)
-            norm2 = np.linalg.norm(sc2_flat)
-
-            if norm1 > 0 and norm2 > 0:
-                similarity = np.dot(sc1_flat, sc2_flat) / (norm1 * norm2)
-
-                if similarity > best_sim:
-                    best_sim = similarity
-                    best_shift = shift
-
-        return best_sim, best_shift
-
-    @staticmethod
-    def match_features(descriptors1: np.ndarray,
-                      descriptors2: np.ndarray,
-                      max_distance: float = 0.75) -> np.ndarray:
-        
-        from scipy.spatial import KDTree
-
-        if len(descriptors1) == 0 or len(descriptors2) == 0:
-            return np.array([])
-
-        # Build KD-tree for descriptor2
-        tree = KDTree(descriptors2)
-
-        # For each descriptor in set1, find nearest in set2
-        distances, indices = tree.query(descriptors1)
-
-        # Filter by distance threshold
-        valid = distances < max_distance
-
-        matches = np.column_stack([
-            np.arange(len(descriptors1))[valid],
-            indices[valid],
-            distances[valid]
-        ])
-
-        return matches
 
 
 def test_feature_extractor():

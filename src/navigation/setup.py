@@ -24,6 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'navigation_node = navigation.navigation_node:main',
+            'simple_controller = navigation.simple_controller:main',
+            'simple_straight_motion = navigation.simple_straight_motion:main',
         ],
     },
 )

@@ -15,6 +15,23 @@ def radians_to_degrees(radians):
     return radians * 180.0 / np.pi
 
 
+def normalize_angle(angle):
+    """
+    Normalize angle to [-pi, pi]
+
+    Args:
+        angle: Angle in radians
+
+    Returns:
+        float: Normalized angle in range [-pi, pi]
+    """
+    while angle > np.pi:
+        angle -= 2.0 * np.pi
+    while angle < -np.pi:
+        angle += 2.0 * np.pi
+    return angle
+
+
 # ============================================================================
 # QUATERNION OPERATIONS
 # ============================================================================

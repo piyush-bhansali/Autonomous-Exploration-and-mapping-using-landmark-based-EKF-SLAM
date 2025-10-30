@@ -6,6 +6,9 @@ import open3d as o3d
 from typing import List, Optional, Tuple, Dict
 from scipy.spatial import KDTree
 
+# Import shared geometry utilities
+from map_generation.geometry_utils import match_scan_context, match_geometric_features
+
 
 class LoopClosureDetector:
     
@@ -132,7 +135,7 @@ class LoopClosureDetector:
             sc_candidate = candidate['features']['scan_context']
 
             # Rotation-invariant Scan Context matching
-            similarity, best_rotation = self._match_scan_context(sc_current, sc_candidate)
+            similarity, best_rotation = match_scan_context(sc_current, sc_candidate)
 
             if similarity > self.scan_context_threshold:
                 candidates.append({
@@ -180,7 +183,7 @@ class LoopClosureDetector:
             geom_candidate = candidate_features['geometric']
 
             # Match geometric features
-            matches = self._match_geometric_features(geom_current, geom_candidate)
+            matches = match_geometric_features(geom_current, geom_candidate)
 
             if len(matches) < self.min_feature_matches:
                 print(f"    ✗ Too few matches: {len(matches)} < {self.min_feature_matches}")
@@ -255,61 +258,6 @@ class LoopClosureDetector:
                 print(f"    ✗ ICP fitness too low: {fitness:.3f} < {self.icp_fitness_threshold}")
 
         return None
-
-    def _match_scan_context(self, sc1: np.ndarray, sc2: np.ndarray) -> Tuple[float, int]:
-        
-        # Reshape to 2D grid (rings × sectors)
-        num_sectors = 60  # Default from feature extractor
-
-        if sc1.shape[0] == 1:
-            sc1 = sc1.reshape(-1, num_sectors)
-        if sc2.shape[0] == 1:
-            sc2 = sc2.reshape(-1, num_sectors)
-
-        best_sim = -1
-        best_shift = 0
-
-        # Try all circular shifts
-        for shift in range(num_sectors):
-            sc2_shifted = np.roll(sc2, shift, axis=1)
-
-            # Cosine similarity
-            sc1_flat = sc1.flatten()
-            sc2_flat = sc2_shifted.flatten()
-
-            norm1 = np.linalg.norm(sc1_flat)
-            norm2 = np.linalg.norm(sc2_flat)
-
-            if norm1 > 0 and norm2 > 0:
-                similarity = np.dot(sc1_flat, sc2_flat) / (norm1 * norm2)
-
-                if similarity > best_sim:
-                    best_sim = similarity
-                    best_shift = shift
-
-        return best_sim, best_shift
-
-    def _match_geometric_features(self, desc1: np.ndarray, desc2: np.ndarray) -> np.ndarray:
-        
-        if len(desc1) == 0 or len(desc2) == 0:
-            return np.array([])
-
-        # Build KD-tree for descriptor2
-        tree = KDTree(desc2)
-
-        # For each descriptor in set1, find nearest in set2
-        distances, indices = tree.query(desc1)
-
-        # Filter by distance threshold (0.75 for 4D geometric features)
-        valid = distances < 0.75
-
-        matches = np.column_stack([
-            np.arange(len(desc1))[valid],
-            indices[valid],
-            distances[valid]
-        ])
-
-        return matches
 
     def _ransac_2d(self, source_pts: np.ndarray, target_pts: np.ndarray,
                    max_iterations: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
