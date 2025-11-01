@@ -17,11 +17,6 @@ import os
 from threading import Lock
 import struct
 
-from tf2_ros import Buffer, TransformListener
-from geometry_msgs.msg import TransformStamped
-import tf2_geometry_msgs
-from rclpy.duration import Duration
-
 from map_generation.submap_stitcher import SubmapStitcher
 from map_generation.ekf_lib import EKF
 from map_generation.utils import (
@@ -60,11 +55,6 @@ class LocalSubmapGenerator(Node):
         # Create save directory
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
-
-        # Initialize TF2 for proper coordinate transformations
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.get_logger().info('✓ TF2 listener initialized')
 
         # Initialize EKF (always enabled)
         self.ekf = EKF()
@@ -145,28 +135,25 @@ class LocalSubmapGenerator(Node):
 
     def publish_current_submap(self):
         """Publish current submap and global map for visualization"""
-        # Publish current submap being built
-        if len(self.current_submap_points) > 0 and self.submap_start_pose is not None:
-            with self.data_lock:
-                points_world = np.vstack(self.current_submap_points)  # Already in world frame
+        # NOTE: Current submap shows odometry-based positioning (before ICP correction)
+        # This may show drift artifacts. Disable if you only want to see ICP-corrected global map.
 
-            # Points are already in world frame (odom), no transformation needed
-            pc2_msg = self.numpy_to_pointcloud2(points_world, 'odom', self.get_clock().now().to_msg())
-            self.current_submap_pub.publish(pc2_msg)
+        # Publish current submap being built (DISABLED - shows odometry drift)
+        # if len(self.current_submap_points) > 0 and self.submap_start_pose is not None:
+        #     with self.data_lock:
+        #         points_world = np.vstack(self.current_submap_points)  # Already in world frame
+        #
+        #     # Points are already in world frame (odom), no transformation needed
+        #     pc2_msg = self.numpy_to_pointcloud2(points_world, 'odom', self.get_clock().now().to_msg())
+        #     self.current_submap_pub.publish(pc2_msg)
 
         # ALWAYS publish global map if available (not just on submap creation)
+        # Only publish ICP-corrected global map, not pre-ICP submaps
         global_points = self.stitcher.get_global_map_points()
         if global_points is not None and len(global_points) > 0:
             pc2_msg = self.numpy_to_pointcloud2(global_points, 'odom', self.get_clock().now().to_msg())
             self.global_map_pub.publish(pc2_msg)
-        elif len(self.current_submap_points) > 0 and self.submap_id == 0 and self.submap_start_pose is not None:
-            # Fallback: if no global map yet, publish current submap (already in world frame)
-            with self.data_lock:
-                points_world = np.vstack(self.current_submap_points)
-
-            # Points are already in world frame (odom), no transformation needed
-            pc2_msg = self.numpy_to_pointcloud2(points_world, 'odom', self.get_clock().now().to_msg())
-            self.global_map_pub.publish(pc2_msg)
+        # Removed fallback that showed pre-ICP donut artifact
 
     def numpy_to_pointcloud2(self, points, frame_id, stamp):
         """Convert numpy array to PointCloud2 message"""
@@ -257,6 +244,7 @@ class LocalSubmapGenerator(Node):
     def scan_callback(self, msg):
         """Laser scan callback"""
         if self.current_pose is None:
+            self.get_logger().warn('Waiting for odometry to initialize EKF before processing scans...', throttle_duration_sec=5.0)
             return
 
         # Convert scan to submap-local points (relative to submap start pose)
@@ -278,114 +266,92 @@ class LocalSubmapGenerator(Node):
 
     def scan_to_world_points_with_lidar_offset(self, scan_msg, pose):
         """
-        Convert laser scan to points in world frame, accounting for LiDAR offset
+        Convert laser scan to world frame with PROPER LiDAR offset correction
 
-        The LiDAR is offset from the robot's rotation center (base_link):
+        This method works correctly for ALL robot motions:
+        - Straight line motion (translation)
+        - In-place rotation
+        - Curved paths
+        - Any combination
+
+        The LiDAR is physically offset from the robot's rotation center (base_link):
         - X: -0.064m (6.4cm backward)
-        - Y: 0m
+        - Y: 0.0m
         - Z: 0.121m (12.1cm up)
 
-        This offset causes the LiDAR to orbit in a circle during in-place rotation.
-        We must account for this to avoid circular artifacts in the map.
+        Physics: When robot rotates, the LiDAR orbits around base_link.
+        We must transform: LiDAR frame → base_link frame → world frame
+
+        Args:
+            scan_msg: LaserScan message with ranges in LiDAR frame
+            pose: Robot base_link pose in world frame (from odometry/EKF)
+
+        Returns:
+            np.ndarray: Scan points in world frame (N x 3)
         """
         angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, len(scan_msg.ranges))
         ranges = np.array(scan_msg.ranges)
 
-        # Use full sensor range
-        max_range = scan_msg.range_max
-
         # Filter valid ranges
-        valid = (ranges >= scan_msg.range_min) & (ranges <= max_range) & np.isfinite(ranges)
-
+        valid = (ranges >= scan_msg.range_min) & (ranges <= scan_msg.range_max) & np.isfinite(ranges)
         if not np.any(valid):
             return np.array([])
 
         valid_angles = angles[valid]
         valid_ranges = ranges[valid]
 
-        # Convert to Cartesian in LiDAR frame (base_scan)
-        x_scan = valid_ranges * np.cos(valid_angles)
-        y_scan = valid_ranges * np.sin(valid_angles)
-        z_scan = np.zeros_like(x_scan)
+        # Step 1: Convert scan to Cartesian coordinates in LiDAR frame
+        # These are measurements FROM the LiDAR sensor position
+        x_lidar = valid_ranges * np.cos(valid_angles)
+        y_lidar = valid_ranges * np.sin(valid_angles)
+        z_lidar = np.zeros_like(x_lidar)
+        points_lidar_frame = np.column_stack((x_lidar, y_lidar, z_lidar))
 
-        # LiDAR offset from base_link (from model.sdf line 456)
-        lidar_offset_base = np.array([-0.064, 0.0, 0.121])
+        # Step 2: Get robot base_link pose in world frame
+        R_base_to_world = quaternion_to_rotation_matrix(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
+        t_base_world = np.array([pose['x'], pose['y'], pose['z']])
 
-        # Get robot pose (base_link)
-        R_base = quaternion_to_rotation_matrix(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
-        t_base = np.array([pose['x'], pose['y'], pose['z']])
+        # Step 3: LiDAR offset from base_link (constant in base_link frame)
+        # This is the static transform: base_link → base_scan
+        LIDAR_OFFSET_IN_BASE_FRAME = np.array([-0.064, 0.0, 0.121])  # [x, y, z] in meters
 
-        # Transform LiDAR offset to world frame (rotates with robot)
-        lidar_offset_world = R_base @ lidar_offset_base
+        # Step 4: Calculate LiDAR position in world frame
+        # The offset rotates with the robot, so we must rotate it first
+        t_lidar_world = t_base_world + (R_base_to_world @ LIDAR_OFFSET_IN_BASE_FRAME)
 
-        # Calculate actual LiDAR position in world frame
-        lidar_position_world = t_base + lidar_offset_world
-
-        # Transform scan points from LiDAR frame to world frame
-        # Points are relative to LiDAR, so we use the LiDAR's position and rotation
-        points_scan = np.column_stack((x_scan, y_scan, z_scan))
-        points_world = (R_base @ points_scan.T).T + lidar_position_world
-
-        return points_world
-
-    def scan_to_world_points(self, scan_msg, pose):
-        """Convert laser scan to points in world frame (legacy - not accounting for LiDAR offset)"""
-        angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, len(scan_msg.ranges))
-        ranges = np.array(scan_msg.ranges)
-
-        # Use full sensor range
-        max_range = scan_msg.range_max
-
-        # Filter valid ranges
-        valid = (ranges >= scan_msg.range_min) & (ranges <= max_range) & np.isfinite(ranges)
-
-        if not np.any(valid):
-            return np.array([])
-
-        valid_angles = angles[valid]
-        valid_ranges = ranges[valid]
-
-        # Convert to Cartesian in robot frame
-        x_robot = valid_ranges * np.cos(valid_angles)
-        y_robot = valid_ranges * np.sin(valid_angles)
-        z_robot = np.zeros_like(x_robot)
-
-        # Transform to world frame
-        R = quaternion_to_rotation_matrix(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
-        t = np.array([pose['x'], pose['y'], pose['z']])
-
-        points_robot = np.column_stack((x_robot, y_robot, z_robot))
-        points_world = (R @ points_robot.T).T + t
+        # Step 5: Transform scan points from LiDAR frame to world frame
+        # The scan points are measured in the LiDAR frame, so we:
+        # 1. Rotate them by robot orientation (same rotation as base_link)
+        # 2. Translate them to LiDAR's world position (not base_link's position!)
+        points_world = (R_base_to_world @ points_lidar_frame.T).T + t_lidar_world
 
         return points_world
 
     def scan_to_submap_points(self, scan_msg, current_pose, submap_start_pose):
         """
-        Convert laser scan to points in WORLD frame with LiDAR offset correction
+        Convert laser scan to points in WORLD frame using manual transformation
 
-        IMPORTANT: We manually account for the LiDAR offset from the robot's rotation center.
-        This prevents circular artifacts during in-place rotation.
+        Uses odometry pose + hard-coded LiDAR offset to transform scan points.
+        This is more reliable than TF2 for single-robot scenarios.
 
-        The LiDAR is offset by -6.4cm from base_link. Without this correction, during rotation,
-        the LiDAR traces a circle which creates a donut-shaped artifact in the map.
+        The LiDAR is offset from base_link by:
+        - X: -0.064m (6.4cm backward)
+        - Y: 0m
+        - Z: 0.121m (12.1cm up)
 
         Args:
             scan_msg: LaserScan message
-            current_pose: Current robot pose (base_link position)
+            current_pose: Current robot pose from EKF-fused odometry
             submap_start_pose: Pose at submap start (unused - kept for API compatibility)
 
         Returns:
             np.ndarray: Points in WORLD coordinate frame (N x 3)
         """
-        # Use manual transformation accounting for LiDAR offset
+        # Use manual transformation (more reliable than TF2)
         return self.scan_to_world_points_with_lidar_offset(scan_msg, current_pose)
 
     def should_create_submap(self):
         """Check if we should create a new submap"""
-        # Check scan count requirement
-        if self.scans_in_current_submap < self.scans_per_submap:
-            return False
-
         # Need valid poses
         if self.submap_start_pose is None or self.current_pose is None:
             return False
@@ -402,15 +368,25 @@ class LocalSubmapGenerator(Node):
             np.cos(self.current_pose['theta'] - self.submap_start_pose['theta'])
         ))
 
-        # Create submap if sufficient scans AND (moved distance OR rotated significantly)
-        # This handles both translation (distance) and rotation (dtheta) cases
-        if distance >= self.min_distance_between_submaps or dtheta >= self.min_rotation_between_submaps:
+        # IMPROVED LOGIC: Prioritize rotation for in-place rotation scenarios
+        # Case 1: Sufficient rotation with minimum scans (handles in-place rotation)
+        if dtheta >= self.min_rotation_between_submaps and self.scans_in_current_submap >= 30:
             self.get_logger().info(
-                f'Creating submap {self.submap_id}: '
+                f'Creating submap {self.submap_id} (rotation trigger): '
                 f'{self.scans_in_current_submap} scans, '
                 f'{distance:.2f}m, {np.degrees(dtheta):.1f}°'
             )
             return True
+
+        # Case 2: Normal submap creation (translation-based)
+        if self.scans_in_current_submap >= self.scans_per_submap:
+            if distance >= self.min_distance_between_submaps:
+                self.get_logger().info(
+                    f'Creating submap {self.submap_id} (distance trigger): '
+                    f'{self.scans_in_current_submap} scans, '
+                    f'{distance:.2f}m, {np.degrees(dtheta):.1f}°'
+                )
+                return True
 
         return False
 

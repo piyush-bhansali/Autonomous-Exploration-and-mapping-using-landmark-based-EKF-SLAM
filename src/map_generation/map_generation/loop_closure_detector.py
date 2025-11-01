@@ -10,7 +10,7 @@ from scipy.spatial import KDTree
 from map_generation.geometry_utils import match_scan_context, match_geometric_features
 
 
-class LoopClosureDetector:
+class LoopClosureDetector: 
     
 
     def __init__(self,

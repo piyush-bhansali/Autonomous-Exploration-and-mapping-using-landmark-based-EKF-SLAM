@@ -152,7 +152,7 @@ class SubmapStitcher:
                              end_pose: dict,
                              scan_count: int) -> bool:
         
-        print(f"\nProcessing submap {submap_id}")
+        print(f"\nProcessing submap {submap_id}", flush=True)
 
         # Process submap
         pcd = self.process_submap(points, submap_id)
@@ -211,11 +211,35 @@ class SubmapStitcher:
             print(f"  Submap {submap_id}: Added as first submap (world frame)")
             return True
 
-        # For subsequent submaps: since points are already in world frame, just merge!
-        # No ICP registration needed - points are already correctly positioned
+        # For subsequent submaps: use ICP to correct odometry drift
+        # Even though points are in world frame based on odometry, ICP refines alignment
+        print(f"  DEBUG: Submap {submap_id} entering ICP path, global_map has {len(self.global_map.points)} points", flush=True)
 
-        # Store identity transform (points already in world frame)
-        identity_transform = np.eye(4)
+        # Get previous submap transform for initial guess
+        prev_submap = self.submaps[-1]
+        prev_transform = prev_submap['global_transform']
+
+        # Compute odometry-based transform between submaps
+        odom_transform = self.estimate_2d_transform(prev_submap['pose_center'], pose_center)
+
+        # Initial guess: previous transform + odometry change
+        initial_transform = prev_transform @ odom_transform
+
+        # Run ICP registration to correct drift
+        print(f"  Running ICP for submap {submap_id}...", flush=True)
+        success, final_transform, fitness = self.register_icp_2d(
+            source=pcd,
+            target=self.global_map,
+            initial_guess=initial_transform
+        )
+
+        if not success:
+            print(f"  ⚠ ICP failed (fitness={fitness:.3f}), using odometry-based transform")
+            final_transform = initial_transform
+
+        # Transform submap to align with global map
+        pcd_aligned = o3d.geometry.PointCloud(pcd)
+        pcd_aligned.transform(final_transform)
 
         # Store submap
         submap_data = {
@@ -225,14 +249,14 @@ class SubmapStitcher:
             'pose_start': start_pose,
             'pose_end': end_pose,
             'pose_center': pose_center,
-            'global_transform': identity_transform,  # Identity - no transform needed
+            'global_transform': final_transform,
             'scan_count': scan_count,
             'bounds': bounds,
             'timestamp_created': time.time()
         }
 
         self.submaps.append(submap_data)
-        self.transforms.append(identity_transform)
+        self.transforms.append(final_transform)
 
         # Add to loop closure spatial index
         if self.loop_closure_detector is not None:
@@ -253,12 +277,11 @@ class SubmapStitcher:
                 print(f"  Loop closure detected: submap {submap_id} matches submap {loop_closure['match_id']}")
                 # TODO: Apply loop closure correction to global map
 
-        # Add submap directly to global map (no transformation needed - already in world frame)
-        self.global_map += pcd
-        print(f"  Submap {submap_id}: Merged to global map (world frame)")
+        # Add ICP-aligned submap to global map
+        self.global_map += pcd_aligned
+        print(f"  Submap {submap_id}: Merged to global map (ICP-aligned)")
 
         # ALWAYS downsample global map after adding new submap to prevent duplicate points
-        # This is critical for maintaining map structure and avoiding ghosting
         print(f"  Before downsampling: {len(self.global_map.points)} points")
         global_map_tensor = o3d.t.geometry.PointCloud.from_legacy(self.global_map, dtype=o3c.float32, device=self.device)
         global_map_tensor = global_map_tensor.voxel_down_sample(self.voxel_size)

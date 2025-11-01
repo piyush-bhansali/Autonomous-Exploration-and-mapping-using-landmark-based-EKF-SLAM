@@ -37,6 +37,7 @@ from launch_ros.substitutions import FindPackageShare
 from launch.event_handlers import OnProcessStart, OnProcessExit
 import os
 from ament_index_python.packages import get_package_share_directory
+import xacro
 
 
 def generate_launch_description():
@@ -96,6 +97,17 @@ def generate_launch_description():
     robot_sdf_content = robot_sdf_content.replace(
         'package://multi_robot_mapping/meshes',
         f'file://{mesh_path}'
+    )
+
+    # Inject robot-specific frame IDs for multi-robot support
+    # This ensures Gazebo publishes TF with robot name prefix
+    robot_sdf_content = robot_sdf_content.replace(
+        '<gz_frame_id>base_scan</gz_frame_id>',
+        f'<gz_frame_id>{robot_name}/base_scan</gz_frame_id>'
+    )
+    robot_sdf_content = robot_sdf_content.replace(
+        '<child_frame_id>base_link</child_frame_id>',
+        f'<child_frame_id>{robot_name}/base_link</child_frame_id>'
     )
 
     # ============================================================================
@@ -178,15 +190,24 @@ def generate_launch_description():
         }]
     )
 
+    # Process URDF with xacro to replace namespace variable
+    robot_description = xacro.process_file(
+        urdf_file,
+        mappings={'namespace': ''}  # Empty namespace - no prefix needed
+    ).toxml()
+
     # Robot state publisher
+    # NOTE: We use frame_prefix to create robot-specific TF frames for multi-robot support
+    # Gazebo SDF is modified at spawn time to publish TF with same prefix
+    # This creates a unified TF tree: odom -> tb3_1/base_link -> tb3_1/base_scan
     robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
         name=f'{robot_name}_state_publisher',
         output='screen',
         parameters=[{
-            'robot_description': open(urdf_file, 'r').read(),
-            'frame_prefix': f'{robot_name}/'
+            'robot_description': robot_description,
+            'frame_prefix': f'{robot_name}/',  # Add robot name prefix for multi-robot
         }],
         remappings=[
             ('/joint_states', f'/{robot_name}/joint_states'),
