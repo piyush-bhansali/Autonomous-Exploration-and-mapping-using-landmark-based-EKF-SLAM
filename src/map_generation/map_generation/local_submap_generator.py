@@ -265,30 +265,7 @@ class LocalSubmapGenerator(Node):
             self.create_submap()
 
     def scan_to_world_points_with_lidar_offset(self, scan_msg, pose):
-        """
-        Convert laser scan to world frame with PROPER LiDAR offset correction
-
-        This method works correctly for ALL robot motions:
-        - Straight line motion (translation)
-        - In-place rotation
-        - Curved paths
-        - Any combination
-
-        The LiDAR is physically offset from the robot's rotation center (base_link):
-        - X: -0.064m (6.4cm backward)
-        - Y: 0.0m
-        - Z: 0.121m (12.1cm up)
-
-        Physics: When robot rotates, the LiDAR orbits around base_link.
-        We must transform: LiDAR frame → base_link frame → world frame
-
-        Args:
-            scan_msg: LaserScan message with ranges in LiDAR frame
-            pose: Robot base_link pose in world frame (from odometry/EKF)
-
-        Returns:
-            np.ndarray: Scan points in world frame (N x 3)
-        """
+       
         angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, len(scan_msg.ranges))
         ranges = np.array(scan_msg.ranges)
 
@@ -367,6 +344,17 @@ class LocalSubmapGenerator(Node):
             np.sin(self.current_pose['theta'] - self.submap_start_pose['theta']),
             np.cos(self.current_pose['theta'] - self.submap_start_pose['theta'])
         ))
+
+        # Case 0: Initial submap (bootstrap for navigation)
+        # Create first submap after minimal scans even without movement
+        # This allows navigation to start planning from initial position
+        if self.submap_id == 0 and self.scans_in_current_submap >= 30:
+            self.get_logger().info(
+                f'Creating initial submap {self.submap_id} (bootstrap): '
+                f'{self.scans_in_current_submap} scans, '
+                f'{distance:.2f}m, {np.degrees(dtheta):.1f}°'
+            )
+            return True
 
         # IMPROVED LOGIC: Prioritize rotation for in-place rotation scenarios
         # Case 1: Sufficient rotation with minimum scans (handles in-place rotation)
