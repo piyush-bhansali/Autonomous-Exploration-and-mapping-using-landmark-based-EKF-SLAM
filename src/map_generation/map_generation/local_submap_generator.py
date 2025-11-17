@@ -10,7 +10,6 @@ from std_msgs.msg import Header
 import numpy as np
 import os
 from threading import Lock
-import struct
 import open3d as o3d
 import open3d.core as o3c
 
@@ -30,9 +29,8 @@ class LocalSubmapGenerator(Node):
 
         # Declare parameters
         self.declare_parameter('robot_name', 'tb3_1')
-        self.declare_parameter('scans_per_submap', 250)
-        self.declare_parameter('min_distance_between_submaps', 1.5)
-        self.declare_parameter('min_rotation_between_submaps', 60.0)  # degrees
+        self.declare_parameter('scans_per_submap', 50)
+        self.declare_parameter('min_distance_between_submaps', 2.0)  
         self.declare_parameter('save_directory', './submaps')
         self.declare_parameter('voxel_size', 0.05)
         self.declare_parameter('feature_method', 'hybrid')
@@ -43,7 +41,6 @@ class LocalSubmapGenerator(Node):
         self.robot_name = self.get_parameter('robot_name').value
         self.scans_per_submap = self.get_parameter('scans_per_submap').value
         self.min_distance_between_submaps = self.get_parameter('min_distance_between_submaps').value
-        self.min_rotation_between_submaps = np.radians(self.get_parameter('min_rotation_between_submaps').value)
         self.save_dir = self.get_parameter('save_directory').value
         self.voxel_size = self.get_parameter('voxel_size').value
         self.feature_method = self.get_parameter('feature_method').value
@@ -89,7 +86,6 @@ class LocalSubmapGenerator(Node):
             self.scan_callback,
             sensor_qos
         )
-        self.get_logger().info(f'✓ Subscribed to: /{self.robot_name}/scan')
 
         # Subscribe to odometry
         self.odom_sub = self.create_subscription(
@@ -98,7 +94,6 @@ class LocalSubmapGenerator(Node):
             self.odom_callback,
             10
         )
-        self.get_logger().info(f'✓ Subscribed to: /{self.robot_name}/odom')
 
         # Publishers for visualization (always enabled)
         self.current_submap_pub = self.create_publisher(
@@ -111,7 +106,6 @@ class LocalSubmapGenerator(Node):
             f'/{self.robot_name}/global_map',
             10
         )
-        self.get_logger().info(f'✓ Publishing point clouds to: /{self.robot_name}/current_submap and /{self.robot_name}/global_map')
 
         # Subscribe to IMU (always enabled for EKF)
         self.imu_sub = self.create_subscription(
@@ -120,7 +114,6 @@ class LocalSubmapGenerator(Node):
             self.imu_callback,
             10
         )
-        self.get_logger().info(f'✓ Subscribed to: /{self.robot_name}/imu')
 
         # State variables
         self.current_pose = None
@@ -133,37 +126,20 @@ class LocalSubmapGenerator(Node):
         self.scans_in_current_submap = 0
         self.total_scans_processed = 0
 
-        # Visualization timer - publish current submap every 2 seconds
-        self.create_timer(2.0, self.publish_current_submap)
+        # Visualization timer - publish global map every 1 second for real-time navigation
+        self.create_timer(1.0, self.publish_current_submap)
 
-        self.get_logger().info(f'Local Submap Generator initialized for {self.robot_name}')
-        self.get_logger().info(f'Scans per submap: {self.scans_per_submap}, Min distance: {self.min_distance_between_submaps}m, Min rotation: {np.degrees(self.min_rotation_between_submaps):.0f}°')
-        self.get_logger().info(f'Scan-to-map ICP: {"ENABLED" if self.enable_scan_to_map_icp else "DISABLED"}')
+        self.get_logger().info(f'✓ Local Submap Generator initialized ({self.robot_name}): {self.scans_per_submap} scans/submap, ICP: {"ON" if self.enable_scan_to_map_icp else "OFF"}')
 
     def publish_current_submap(self):
-        """Publish current submap and global map for visualization"""
-        # NOTE: Current submap shows odometry-based positioning (before ICP correction)
-        # This may show drift artifacts. Disable if you only want to see ICP-corrected global map.
-
-        # Publish current submap being built (DISABLED - shows odometry drift)
-        # if len(self.current_submap_points) > 0 and self.submap_start_pose is not None:
-        #     with self.data_lock:
-        #         points_world = np.vstack(self.current_submap_points)  # Already in world frame
-        #
-        #     # Points are already in world frame (odom), no transformation needed
-        #     pc2_msg = self.numpy_to_pointcloud2(points_world, 'odom', self.get_clock().now().to_msg())
-        #     self.current_submap_pub.publish(pc2_msg)
-
-        # ALWAYS publish global map if available (not just on submap creation)
-        # Only publish ICP-corrected global map, not pre-ICP submaps
+        
         global_points = self.stitcher.get_global_map_points()
         if global_points is not None and len(global_points) > 0:
             pc2_msg = self.numpy_to_pointcloud2(global_points, 'odom', self.get_clock().now().to_msg())
             self.global_map_pub.publish(pc2_msg)
-        # Removed fallback that showed pre-ICP donut artifact
 
     def numpy_to_pointcloud2(self, points, frame_id, stamp):
-        """Convert numpy array to PointCloud2 message"""
+        """Convert numpy array to PointCloud2 message (vectorized for performance)"""
         # Create header
         header = Header()
         header.frame_id = frame_id
@@ -176,10 +152,10 @@ class LocalSubmapGenerator(Node):
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
         ]
 
-        # Pack points into binary data
-        cloud_data = []
-        for point in points:
-            cloud_data.append(struct.pack('fff', point[0], point[1], point[2]))
+        # Vectorized packing (much faster than Python loop)
+        # Ensure float32 dtype and flatten to 1D array
+        points_flat = points.astype(np.float32).flatten()
+        cloud_data = points_flat.tobytes()
 
         msg = PointCloud2()
         msg.header = header
@@ -190,7 +166,7 @@ class LocalSubmapGenerator(Node):
         msg.point_step = 12  # 3 floats * 4 bytes
         msg.row_step = msg.point_step * len(points)
         msg.is_dense = True
-        msg.data = b''.join(cloud_data)
+        msg.data = cloud_data
 
         return msg
 
@@ -219,7 +195,6 @@ class LocalSubmapGenerator(Node):
         if not self.ekf_initialized:
             self.ekf.initialize(x, y, theta, vx, 0.0)
             self.ekf_initialized = True
-            self.get_logger().info(f'✓ EKF initialized at ({x:.2f}, {y:.2f})')
         else:
             self.ekf.update(x, y, theta, vx)
 
@@ -248,25 +223,29 @@ class LocalSubmapGenerator(Node):
             if self.submap_start_pose is None:
                 self.submap_start_pose = self.current_pose.copy()
 
-    def scan_to_map_icp(self, scan_points: np.ndarray, accumulated_points: np.ndarray) -> np.ndarray:
-        """
-        Perform fast ICP registration of current scan against accumulated submap points
-
-        Args:
-            scan_points: Current scan points (N x 3)
-            accumulated_points: Accumulated submap points (M x 3)
-
-        Returns:
-            Transform matrix (4 x 4) to apply to scan points
-        """
+    def scan_to_map_icp(self, scan_points_world: np.ndarray, accumulated_points_world: np.ndarray,
+                        current_pose: dict) -> tuple:
+       
         # Need at least 50 points for reliable ICP
-        if len(scan_points) < 50 or len(accumulated_points) < 100:
-            return np.eye(4)
+        if len(scan_points_world) < 50 or len(accumulated_points_world) < 100:
+            return scan_points_world, None
 
+        # Run ICP on every scan for best accuracy (GPU memory optimized via downsampling)
         try:
-            # Convert to tensor point clouds for GPU acceleration
-            scan_tensor = o3c.Tensor(scan_points.astype(np.float32), dtype=o3c.float32, device=self.device)
-            accum_tensor = o3c.Tensor(accumulated_points.astype(np.float32), dtype=o3c.float32, device=self.device)
+            # CRITICAL: Downsample BEFORE transferring to GPU to reduce memory
+            # Limit accumulated points to 5000 maximum
+            if len(accumulated_points_world) > 5000:
+                indices = np.random.choice(len(accumulated_points_world), 5000, replace=False)
+                accumulated_points_world = accumulated_points_world[indices]
+
+            # Limit scan points to 2000 maximum (typical scan is ~360 points)
+            if len(scan_points_world) > 2000:
+                indices = np.random.choice(len(scan_points_world), 2000, replace=False)
+                scan_points_world = scan_points_world[indices]
+
+            # Convert to tensor point clouds on GPU
+            scan_tensor = o3c.Tensor(scan_points_world.astype(np.float32), dtype=o3c.float32, device=self.device)
+            accum_tensor = o3c.Tensor(accumulated_points_world.astype(np.float32), dtype=o3c.float32, device=self.device)
 
             source_pcd = o3d.t.geometry.PointCloud(self.device)
             source_pcd.point.positions = scan_tensor
@@ -274,39 +253,60 @@ class LocalSubmapGenerator(Node):
             target_pcd = o3d.t.geometry.PointCloud(self.device)
             target_pcd.point.positions = accum_tensor
 
-            # Quick voxel downsample for speed (use 2x voxel size for scan matching)
-            source_pcd = source_pcd.voxel_down_sample(self.voxel_size * 2)
-            target_pcd = target_pcd.voxel_down_sample(self.voxel_size * 2)
+            # Voxel downsample on GPU (efficient, further reduces points)
+            source_pcd = source_pcd.voxel_down_sample(self.voxel_size * 2.0)
+            target_pcd = target_pcd.voxel_down_sample(self.voxel_size * 2.0)
 
-            # Fast point-to-point ICP with tight convergence
+            # Identity initial guess (both clouds already in world frame)
             init_transform = o3c.Tensor(np.eye(4), dtype=o3c.float32, device=self.device)
 
             reg_result = o3d.t.pipelines.registration.icp(
                 source=source_pcd,
                 target=target_pcd,
-                max_correspondence_distance=0.2,  # 20cm for scan matching
+                max_correspondence_distance=0.3,  # 30cm tolerance for scan matching
                 init_source_to_target=init_transform,
                 estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
                 criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
-                    max_iteration=30  # Fast convergence for real-time
+                    max_iteration=20  # Fast convergence for real-time
                 )
             )
 
             transform = reg_result.transformation.cpu().numpy()
+            fitness = float(reg_result.fitness)
+
+            # CRITICAL: Explicitly delete GPU tensors to free memory
+            del scan_tensor, accum_tensor, source_pcd, target_pcd, init_transform, reg_result
 
             # Constrain to 2D (safety - no vertical movement)
-            transform[2, :] = [0, 0, 1, 0]
-            transform[:, 2] = [0, 0, 1, 0]
+            transform[2, 0:3] = [0, 0, 1]  # No Z translation, preserve rotation
+            transform[2, 3] = 0             # No Z offset
+            transform[0:2, 2] = [0, 0]      # No X,Y coupling with Z axis
 
-            # Only accept if fitness is reasonable (>30%)
-            if reg_result.fitness > 0.3:
-                return transform
+            # Only accept if fitness is reasonable (>35% for downsampled scan-to-map)
+            if fitness > 0.35:
+                # Apply correction to ORIGINAL scan points (not downsampled)
+                points_homogeneous = np.hstack([scan_points_world, np.ones((len(scan_points_world), 1))])
+                points_corrected = (transform @ points_homogeneous.T).T[:, :3]
+
+                # Extract pose correction from transform
+                dx = transform[0, 3]
+                dy = transform[1, 3]
+                dtheta = np.arctan2(transform[1, 0], transform[0, 0])
+
+                pose_correction = {
+                    'dx': dx,
+                    'dy': dy,
+                    'dtheta': dtheta,
+                    'fitness': fitness
+                }
+
+                return points_corrected, pose_correction
             else:
-                return np.eye(4)
+                return scan_points_world, None
 
         except Exception as e:
             self.get_logger().warn(f'Scan-to-map ICP failed: {e}', throttle_duration_sec=5.0)
-            return np.eye(4)
+            return scan_points_world, None
 
     def scan_callback(self, msg):
         """Laser scan callback with scan-to-map ICP correction"""
@@ -326,13 +326,20 @@ class LocalSubmapGenerator(Node):
                 # Stack accumulated points
                 accumulated_points = np.vstack(self.current_submap_points)
 
-                # Perform ICP to get correction transform
-                icp_transform = self.scan_to_map_icp(points_world, accumulated_points)
+                # Perform ICP to get correction transform and pose update
+                points_world, pose_correction = self.scan_to_map_icp(
+                    points_world, accumulated_points, self.current_pose
+                )
 
-                # Apply correction to current scan
-                points_homogeneous = np.hstack([points_world, np.ones((len(points_world), 1))])
-                points_corrected = (icp_transform @ points_homogeneous.T).T[:, :3]
-                points_world = points_corrected
+                # Apply pose correction to current pose estimate
+                if pose_correction is not None:
+                    self.current_pose['x'] += pose_correction['dx']
+                    self.current_pose['y'] += pose_correction['dy']
+                    self.current_pose['theta'] += pose_correction['dtheta']
+                    self.current_pose['theta'] = np.arctan2(
+                        np.sin(self.current_pose['theta']),
+                        np.cos(self.current_pose['theta'])
+                    )  # Normalize angle
 
         # Add to current submap (store as numpy array, no conversion)
         with self.data_lock:
@@ -385,30 +392,12 @@ class LocalSubmapGenerator(Node):
         return points_world
 
     def scan_to_submap_points(self, scan_msg, current_pose, submap_start_pose):
-        """
-        Convert laser scan to points in WORLD frame using manual transformation
-
-        Uses odometry pose + hard-coded LiDAR offset to transform scan points.
-        This is more reliable than TF2 for single-robot scenarios.
-
-        The LiDAR is offset from base_link by:
-        - X: -0.064m (6.4cm backward)
-        - Y: 0m
-        - Z: 0.121m (12.1cm up)
-
-        Args:
-            scan_msg: LaserScan message
-            current_pose: Current robot pose from EKF-fused odometry
-            submap_start_pose: Pose at submap start (unused - kept for API compatibility)
-
-        Returns:
-            np.ndarray: Points in WORLD coordinate frame (N x 3)
-        """
+        
         # Use manual transformation (more reliable than TF2)
         return self.scan_to_world_points_with_lidar_offset(scan_msg, current_pose)
 
     def should_create_submap(self):
-        """Check if we should create a new submap"""
+        
         # Need valid poses
         if self.submap_start_pose is None or self.current_pose is None:
             return False
@@ -418,43 +407,13 @@ class LocalSubmapGenerator(Node):
         dy = self.current_pose['y'] - self.submap_start_pose['y']
         distance = np.sqrt(dx**2 + dy**2)
 
-        # Calculate ANGULAR displacement (rotation) since submap start
-        # Use atan2 to handle angle wraparound correctly
-        dtheta = abs(np.arctan2(
-            np.sin(self.current_pose['theta'] - self.submap_start_pose['theta']),
-            np.cos(self.current_pose['theta'] - self.submap_start_pose['theta'])
-        ))
-
-        # Case 0: Initial submap (bootstrap for navigation)
-        # Create first submap after sufficient scans to build a useful initial map
-        # This allows navigation to start planning from initial position
+        # Case 1: Initial submap (bootstrap for navigation)
         if self.submap_id == 0 and self.scans_in_current_submap >= 100:
-            self.get_logger().info(
-                f'Creating initial submap {self.submap_id} (bootstrap): '
-                f'{self.scans_in_current_submap} scans, '
-                f'{distance:.2f}m, {np.degrees(dtheta):.1f}°'
-            )
             return True
 
-        # IMPROVED LOGIC: Prioritize rotation for in-place rotation scenarios
-        # Case 1: Sufficient rotation with minimum scans (handles in-place rotation)
-        if dtheta >= self.min_rotation_between_submaps and self.scans_in_current_submap >= 30:
-            self.get_logger().info(
-                f'Creating submap {self.submap_id} (rotation trigger): '
-                f'{self.scans_in_current_submap} scans, '
-                f'{distance:.2f}m, {np.degrees(dtheta):.1f}°'
-            )
+        # Case 2: Distance-based submap creation (360° LiDAR)
+        if distance >= self.min_distance_between_submaps and self.scans_in_current_submap >= self.scans_per_submap:
             return True
-
-        # Case 2: Normal submap creation (translation-based)
-        if self.scans_in_current_submap >= self.scans_per_submap:
-            if distance >= self.min_distance_between_submaps:
-                self.get_logger().info(
-                    f'Creating submap {self.submap_id} (distance trigger): '
-                    f'{self.scans_in_current_submap} scans, '
-                    f'{distance:.2f}m, {np.degrees(dtheta):.1f}°'
-                )
-                return True
 
         return False
 
@@ -469,8 +428,6 @@ class LocalSubmapGenerator(Node):
             end_pose = self.current_pose.copy()  # Capture end pose
 
             self.get_logger().info(f'Creating submap {self.submap_id}: {scan_count} scans, {len(points)} points')
-            self.get_logger().info(f'  Start pose: ({self.submap_start_pose["x"]:.3f}, {self.submap_start_pose["y"]:.3f}, θ={np.degrees(self.submap_start_pose["theta"]):.1f}°)')
-            self.get_logger().info(f'  End pose:   ({end_pose["x"]:.3f}, {end_pose["y"]:.3f}, θ={np.degrees(end_pose["theta"]):.1f}°)')
 
             # Add to stitcher
             success = self.stitcher.add_and_stitch_submap(
@@ -494,7 +451,6 @@ class LocalSubmapGenerator(Node):
                 if self.submap_id % 5 == 0:
                     map_file = os.path.join(self.save_dir, 'global_map.pcd')
                     self.stitcher.save_global_map(map_file)
-                    self.get_logger().info(f'Saved global map: {map_file}')
 
                 # Publish global map for visualization and navigation
                 if global_points is not None and len(global_points) > 0:

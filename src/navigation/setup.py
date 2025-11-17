@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'simple_navigation = navigation.simple_navigation:main',
+            'test_straight_line = navigation.test_straight_line:main',
         ],
     },
 )

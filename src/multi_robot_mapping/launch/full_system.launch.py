@@ -202,10 +202,10 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'robot_name': robot_name,
-            'scans_per_submap': 150,  # 150 scans @ 8.5Hz = ~17s = ~3.5m at 0.2 m/s
-            'min_distance_between_submaps': 2.5,  # 2.5m ensures 30-40% overlap for robust ICP
+            'scans_per_submap': 50,  # 50 scans @ 8.5Hz = ~6s = ~1.2m at 0.2 m/s (OPTIMIZED for real-time!)
+            'min_distance_between_submaps': 1.0,  # 1.0m for faster updates
             'save_directory': './submaps',
-            'voxel_size': 0.05,  # 5cm voxel size for good detail
+            'voxel_size': 0.08,  # 8cm voxel - coarser but faster processing
             'feature_method': 'hybrid',
             'enable_loop_closure': True,  # ENABLED for better mapping
             'enable_scan_to_map_icp': True  # Enable real-time scan matching

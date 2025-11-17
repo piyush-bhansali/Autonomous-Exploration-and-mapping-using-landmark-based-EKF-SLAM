@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-Simple Pure Pursuit Controller
-
-Follows a path using the pure pursuit algorithm.
-Returns velocity commands to track waypoints smoothly.
-"""
 
 import numpy as np
 from typing import List, Tuple
@@ -17,12 +11,7 @@ class SimplePurePursuit:
                  lookahead_distance: float = 1.2,
                  linear_velocity: float = 0.2,
                  max_angular_velocity: float = 0.8):
-        """
-        Args:
-            lookahead_distance: How far ahead to look on path (meters)
-            linear_velocity: Forward speed (m/s)
-            max_angular_velocity: Max turning speed (rad/s)
-        """
+        
         self.lookahead = lookahead_distance
         self.v = linear_velocity
         self.max_w = max_angular_velocity
@@ -50,10 +39,30 @@ class SimplePurePursuit:
         # Compute steering angle to lookahead point
         angular_vel = self._compute_steering(robot_pos, robot_yaw, lookahead_point)
 
-        # Clamp angular velocity
-        angular_vel = np.clip(angular_vel, -self.max_w, self.max_w)
+        # Velocity limiting: Scale down linear velocity if angular velocity exceeds limit
+        # This respects kinematic constraints while maintaining path curvature
+        if abs(angular_vel) > self.max_w:
+            # Calculate required curvature
+            distance = np.linalg.norm(lookahead_point - robot_pos)
+            if distance > 0.01:
+                curvature = angular_vel / self.v
+                # Scale linear velocity to respect max angular velocity
+                v_cmd = min(self.v, self.max_w / max(0.001, abs(curvature)))
+                angular_vel = np.clip(v_cmd * curvature, -self.max_w, self.max_w)
+            else:
+                v_cmd = self.v
+                angular_vel = np.clip(angular_vel, -self.max_w, self.max_w)
+        else:
+            v_cmd = self.v
 
-        return self.v, angular_vel
+        # Goal slowdown: Reduce velocity when approaching final waypoint
+        # This reduces overshoot and provides smoother goal arrival
+        dist_to_goal = np.linalg.norm(path[-1] - robot_pos)
+        if dist_to_goal < 2.0:  # Within 2m of goal
+            slowdown_factor = max(0.3, dist_to_goal / 2.0)  # Slow to 30% minimum
+            v_cmd *= slowdown_factor
+
+        return v_cmd, angular_vel
 
     def _find_lookahead_point(self,
                              robot_pos: np.ndarray,
@@ -80,12 +89,7 @@ class SimplePurePursuit:
                          robot_pos: np.ndarray,
                          robot_yaw: float,
                          target_point: np.ndarray) -> float:
-        """
-        Compute angular velocity using pure pursuit formula
-
-        Pure pursuit: curvature = (2 * sin(α)) / L
-        where α is angle to target, L is lookahead distance
-        """
+        
         # Vector from robot to target
         dx = target_point[0] - robot_pos[0]
         dy = target_point[1] - robot_pos[1]

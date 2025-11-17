@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
-"""
-Geometry Utilities for 2D SLAM
-
-Shared geometric functions used across feature extraction, loop closure, and mapping.
-Centralized to avoid code duplication.
-"""
-
 import numpy as np
 from typing import Tuple
 from scipy.spatial import KDTree
 
 
 def match_scan_context(sc1: np.ndarray, sc2: np.ndarray, num_sectors: int = 60) -> Tuple[float, int]:
-    """
-    Match two Scan Context descriptors with rotation search
-
-    Args:
-        sc1: First scan context (1×D or rings×sectors)
-        sc2: Second scan context (1×D or rings×sectors)
-        num_sectors: Number of angular sectors (default: 60)
-
-    Returns:
-        (similarity, best_shift)
-        similarity: Cosine similarity (0-1, higher is better)
-        best_shift: Best circular shift in sectors
-    """
+    
     # Reshape to 2D grid (rings × sectors) if needed
     if sc1.ndim == 1:
         sc1 = sc1.reshape(-1, num_sectors)
@@ -63,18 +44,7 @@ def match_scan_context(sc1: np.ndarray, sc2: np.ndarray, num_sectors: int = 60) 
 def match_geometric_features(descriptors1: np.ndarray,
                              descriptors2: np.ndarray,
                              max_distance: float = 0.75) -> np.ndarray:
-    """
-    Match geometric features between two descriptor sets using nearest neighbor
-
-    Args:
-        descriptors1: First descriptor set (N × D)
-        descriptors2: Second descriptor set (M × D)
-        max_distance: Maximum descriptor distance for valid match
-
-    Returns:
-        matches: Array of (index1, index2, distance) for each match
-        Shape: (num_matches, 3)
-    """
+    
     if len(descriptors1) == 0 or len(descriptors2) == 0:
         return np.array([])
 
@@ -97,19 +67,7 @@ def match_geometric_features(descriptors1: np.ndarray,
 
 
 def estimate_transform_from_points(source: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """
-    Estimate 2D rigid transformation from point correspondences using SVD
-
-    This finds the optimal rotation and translation that aligns source points
-    to target points in the least-squares sense.
-
-    Args:
-        source: Source points (N × 3, where Z is typically 0)
-        target: Target points (N × 3, where Z is typically 0)
-
-    Returns:
-        T: 4×4 homogeneous transformation matrix
-    """
+    
     # Center the points
     source_center = np.mean(source[:, :2], axis=0)
     target_center = np.mean(target[:, :2], axis=0)
@@ -142,17 +100,7 @@ def estimate_transform_from_points(source: np.ndarray, target: np.ndarray) -> np
 
 def estimate_transform_from_poses(pose_from: dict, pose_to: dict,
                                   quaternion_to_yaw_func) -> np.ndarray:
-    """
-    Estimate 2D transformation between two poses (from odometry)
-
-    Args:
-        pose_from: Source pose dict with keys: x, y, qx, qy, qz, qw
-        pose_to: Target pose dict with keys: x, y, qx, qy, qz, qw
-        quaternion_to_yaw_func: Function to convert quaternion to yaw angle
-
-    Returns:
-        T_rel: 4×4 homogeneous transformation from pose_from to pose_to
-    """
+    
     # Extract positions and orientations
     x_from, y_from = pose_from['x'], pose_from['y']
     x_to, y_to = pose_to['x'], pose_to['y']

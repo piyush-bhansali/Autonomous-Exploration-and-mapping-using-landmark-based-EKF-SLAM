@@ -1,11 +1,3 @@
-"""
-Extended Kalman Filter for 2D Robot Pose Estimation
-
-State vector: [x, y, theta]
-- Prediction: Using IMU angular velocity (high frequency)
-- Update: Using odometry measurements (lower frequency)
-"""
-
 import numpy as np
 from map_generation.utils import normalize_angle
 import time
@@ -53,6 +45,7 @@ class EKF:
         self.prediction_count = 0
         self.imu_prediction_count = 0
         self.update_count = 0
+        self.consecutive_predictions_without_update = 0  # Drift watchdog
 
         # Timing for adaptive dt calculation
         self.last_prediction_time = None
@@ -152,17 +145,15 @@ class EKF:
         self.P = (self.P + self.P.T) / 2.0
 
         self.imu_prediction_count += 1
+        self.consecutive_predictions_without_update += 1
+
+        # Warn if too many predictions without odometry update (potential drift)
+        if self.consecutive_predictions_without_update > 100:  # ~0.5s at 200Hz
+            import warnings
+            warnings.warn(f"EKF: {self.consecutive_predictions_without_update} IMU predictions without odometry update - potential drift!", stacklevel=2)
 
     def update(self, x_meas, y_meas, theta_meas, vx_odom=None):
-        """
-        Update (correction) step using odometry measurements
-
-        Args:
-            x_meas: Measured x position from odometry (m)
-            y_meas: Measured y position from odometry (m)
-            theta_meas: Measured orientation from odometry (rad)
-            vx_odom: Linear velocity from odometry (m/s), optional
-        """
+        
         if not self.initialized:
             raise RuntimeError("EKF not initialized")
 
@@ -207,15 +198,11 @@ class EKF:
             self.vy = 0.0  # Differential drive: no lateral velocity
 
         self.update_count += 1
+        self.consecutive_predictions_without_update = 0  # Reset drift watchdog
         self.last_update_time = time.time()
 
     def get_state(self):
-        """
-        Get current state estimate
-
-        Returns:
-            dict: State dictionary with x, y, theta, vx, vy
-        """
+        
         return {
             'x': self.state[0],
             'y': self.state[1],
@@ -225,21 +212,11 @@ class EKF:
         }
 
     def get_covariance(self):
-        """
-        Get current state covariance matrix
-
-        Returns:
-            np.ndarray: 3x3 covariance matrix
-        """
+        
         return self.P.copy()
 
     def get_uncertainty(self):
-        """
-        Get current state uncertainty (standard deviations)
-
-        Returns:
-            dict: Standard deviations for x, y, theta
-        """
+        
         return {
             'sigma_x': np.sqrt(self.P[0, 0]),
             'sigma_y': np.sqrt(self.P[1, 1]),
@@ -247,12 +224,7 @@ class EKF:
         }
 
     def get_statistics(self):
-        """
-        Get filter statistics
-
-        Returns:
-            dict: Statistics including prediction/update counts
-        """
+        
         return {
             'initialized': self.initialized,
             'prediction_count': self.prediction_count,
@@ -275,40 +247,18 @@ class EKF:
         self.update_count = 0
         self.last_prediction_time = None
         self.last_update_time = None
+        self.consecutive_predictions_without_update = 0
 
     def set_process_noise(self, sigma_x, sigma_y, sigma_theta):
-        """
-        Set process noise parameters
-
-        Args:
-            sigma_x: Process noise std dev for x (m)
-            sigma_y: Process noise std dev for y (m)
-            sigma_theta: Process noise std dev for theta (rad)
-        """
+        
         self.Q = np.diag([sigma_x**2, sigma_y**2, sigma_theta**2])
 
     def set_measurement_noise(self, sigma_x, sigma_y, sigma_theta):
-        """
-        Set measurement noise parameters
-
-        Args:
-            sigma_x: Measurement noise std dev for x (m)
-            sigma_y: Measurement noise std dev for y (m)
-            sigma_theta: Measurement noise std dev for theta (rad)
-        """
+        
         self.R = np.diag([sigma_x**2, sigma_y**2, sigma_theta**2])
 
     def is_converged(self, pos_threshold=0.05, orient_threshold=0.05):
-        """
-        Check if filter has converged (low uncertainty)
-
-        Args:
-            pos_threshold: Position uncertainty threshold (m)
-            orient_threshold: Orientation uncertainty threshold (rad)
-
-        Returns:
-            bool: True if converged
-        """
+        
         uncertainty = self.get_uncertainty()
         pos_uncertain = np.sqrt(uncertainty['sigma_x']**2 + uncertainty['sigma_y']**2)
         return pos_uncertain < pos_threshold and uncertainty['sigma_theta'] < orient_threshold

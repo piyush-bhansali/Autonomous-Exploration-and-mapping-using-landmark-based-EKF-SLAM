@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-"""
-Simple Autonomous Navigation Node
-
-Clean, straightforward frontier-based exploration using:
-- RRT* for path planning
-- Pure Pursuit for path following
-- Frontier detection at map boundary
-
-State machine: DETECT_FRONTIERS → PLAN_PATH → EXECUTE_PATH → repeat
-"""
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2, PointField
+from visualization_msgs.msg import Marker, MarkerArray
 import numpy as np
 import struct
 from enum import Enum
@@ -54,6 +46,8 @@ class SimpleNavigationNode(Node):
         self.current_path = None
         self.current_waypoint_index = 0
         self.explored_positions = []  # Track visited frontiers
+        self.current_goal = None
+        self.all_frontiers = []  # Store all detected frontiers for continuous visualization
 
         # Components (created when map received)
         self.frontier_detector = SimpleFrontierDetector(self.robot_radius)
@@ -89,7 +83,9 @@ class SimpleNavigationNode(Node):
 
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, f'/{self.robot_name}/cmd_vel', 10)
-        self.frontier_pub = self.create_publisher(PointCloud2, f'/{self.robot_name}/frontiers', 10)
+        self.frontier_markers_pub = self.create_publisher(MarkerArray, f'/{self.robot_name}/frontier_markers', 10)
+        self.path_pub = self.create_publisher(Path, f'/{self.robot_name}/planned_path', 10)
+        self.goal_marker_pub = self.create_publisher(Marker, f'/{self.robot_name}/current_goal', 10)
 
         # Control timer (10 Hz)
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -137,6 +133,9 @@ class SimpleNavigationNode(Node):
         if self.robot_pos is None or self.robot_yaw is None:
             return
 
+        # ALWAYS publish visualization (every loop!)
+        self._publish_all_visualizations()
+
         # State machine
         if self.state == State.WAIT_FOR_MAP:
             self._handle_wait_for_map()
@@ -168,13 +167,13 @@ class SimpleNavigationNode(Node):
         # Detect frontiers
         frontiers = self.frontier_detector.detect(self.map_points, self.robot_pos)
 
+        # Store for continuous visualization
+        self.all_frontiers = frontiers
+
         if len(frontiers) == 0:
             self.get_logger().warn('No frontiers found - exploration complete?')
             self.state = State.DONE
             return
-
-        # Visualize frontiers
-        self._publish_frontier_viz(frontiers)
 
         # Filter out explored frontiers
         unexplored = [
@@ -232,6 +231,12 @@ class SimpleNavigationNode(Node):
             self.state = State.DETECT_FRONTIERS
             return
 
+        # RE-DETECT FRONTIERS: Update frontier list as map grows during execution
+        # This ensures we're always navigating to the best available frontier
+        if self.map_points is not None:
+            frontiers = self.frontier_detector.detect(self.map_points, self.robot_pos)
+            self.all_frontiers = frontiers  # Update for visualization
+
         # Check if reached current waypoint
         waypoint = self.current_path[self.current_waypoint_index]
         dist_to_waypoint = np.linalg.norm(self.robot_pos - waypoint)
@@ -260,52 +265,148 @@ class SimpleNavigationNode(Node):
         self.cmd_pub.publish(cmd)
         self.get_logger().info('Exploration complete', once=True)
 
-    def _publish_frontier_viz(self, frontiers):
-        """Publish frontiers for RViz visualization"""
-        if len(frontiers) == 0:
+    def _publish_all_visualizations(self):
+        """Publish ALL visualizations continuously for debugging"""
+        # 1. Publish frontier markers
+        self._publish_frontier_markers()
+
+        # 2. Publish current goal marker
+        self._publish_goal_marker()
+
+        # 3. Publish planned path
+        self._publish_path()
+
+    def _publish_frontier_markers(self):
+        """Publish large sphere markers for all frontiers"""
+        marker_array = MarkerArray()
+
+        # Clear old markers first
+        clear_marker = Marker()
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
+
+        if len(self.all_frontiers) == 0:
+            self.frontier_markers_pub.publish(marker_array)
             return
 
-        # Create colored point cloud
-        points = []
-        colors = [
-            0xFF0000,  # Red (best)
-            0xFF8000,  # Orange
-            0xFFFF00,  # Yellow
-            0x00FF00,  # Green
-            0x0000FF,  # Blue
-        ]
+        # Publish each frontier as a large sphere
+        for i, frontier in enumerate(self.all_frontiers[:20]):  # Show top 20
+            marker = Marker()
+            marker.header.frame_id = 'odom'
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.ns = 'frontiers'
+            marker.id = i
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
 
-        for i, frontier in enumerate(frontiers[:10]):  # Top 10
-            color = colors[i % len(colors)]
-            x, y = frontier.position
-            points.append((x, y, 0.5, color))  # Elevated for visibility
+            # Position
+            marker.pose.position.x = float(frontier.position[0])
+            marker.pose.position.y = float(frontier.position[1])
+            marker.pose.position.z = 0.5  # Elevated for visibility
+            marker.pose.orientation.w = 1.0
 
-        # Create PointCloud2 message
-        msg = PointCloud2()
-        msg.header.frame_id = 'odom'
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.height = 1
-        msg.width = len(points)
-        msg.is_dense = True
+            # Size - LARGE spheres (0.5m diameter)
+            marker.scale.x = 0.5
+            marker.scale.y = 0.5
+            marker.scale.z = 0.5
 
-        msg.fields = [
-            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1),
-        ]
+            # Color based on rank (best = red, others = yellow/orange)
+            if i == 0:
+                # BEST frontier - BRIGHT RED
+                marker.color.r = 1.0
+                marker.color.g = 0.0
+                marker.color.b = 0.0
+                marker.color.a = 1.0
+            elif i < 5:
+                # Top 5 - Orange
+                marker.color.r = 1.0
+                marker.color.g = 0.5
+                marker.color.b = 0.0
+                marker.color.a = 0.8
+            else:
+                # Others - Yellow
+                marker.color.r = 1.0
+                marker.color.g = 1.0
+                marker.color.b = 0.0
+                marker.color.a = 0.6
 
-        msg.point_step = 16
-        msg.row_step = msg.point_step * len(points)
+            marker.lifetime.sec = 0  # Persist until deleted
 
-        # Pack data
-        buffer = []
-        for x, y, z, rgb in points:
-            buffer.append(struct.pack('fffI', x, y, z, rgb))
+            # Add score as text above sphere
+            text_marker = Marker()
+            text_marker.header = marker.header
+            text_marker.ns = 'frontier_scores'
+            text_marker.id = i + 1000
+            text_marker.type = Marker.TEXT_VIEW_FACING
+            text_marker.action = Marker.ADD
+            text_marker.pose.position.x = marker.pose.position.x
+            text_marker.pose.position.y = marker.pose.position.y
+            text_marker.pose.position.z = 1.0  # Above sphere
+            text_marker.scale.z = 0.3  # Text height
+            text_marker.color.r = 1.0
+            text_marker.color.g = 1.0
+            text_marker.color.b = 1.0
+            text_marker.color.a = 1.0
+            text_marker.text = f'#{i+1}: {frontier.score:.2f}'
 
-        msg.data = b''.join(buffer)
+            marker_array.markers.append(marker)
+            marker_array.markers.append(text_marker)
 
-        self.frontier_pub.publish(msg)
+        self.frontier_markers_pub.publish(marker_array)
+
+    def _publish_goal_marker(self):
+        """Publish BRIGHT GREEN marker for current target goal"""
+        if self.current_goal is None:
+            return
+
+        marker = Marker()
+        marker.header.frame_id = 'odom'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'current_goal'
+        marker.id = 0
+        marker.type = Marker.CYLINDER
+        marker.action = Marker.ADD
+
+        # Position
+        marker.pose.position.x = float(self.current_goal[0])
+        marker.pose.position.y = float(self.current_goal[1])
+        marker.pose.position.z = 0.0
+        marker.pose.orientation.w = 1.0
+
+        # Size - VERY LARGE cylinder (1m diameter, 2m tall)
+        marker.scale.x = 1.0
+        marker.scale.y = 1.0
+        marker.scale.z = 2.0
+
+        # BRIGHT GREEN - unmissable!
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 0.8
+
+        marker.lifetime.sec = 0
+
+        self.goal_marker_pub.publish(marker)
+
+    def _publish_path(self):
+        """Publish planned path as line strip"""
+        if self.current_path is None or len(self.current_path) == 0:
+            return
+
+        path_msg = Path()
+        path_msg.header.frame_id = 'odom'
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+
+        for waypoint in self.current_path:
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = float(waypoint[0])
+            pose.pose.position.y = float(waypoint[1])
+            pose.pose.position.z = 0.2
+            pose.pose.orientation.w = 1.0
+            path_msg.poses.append(pose)
+
+        self.path_pub.publish(path_msg)
 
     def _parse_pointcloud2(self, msg: PointCloud2) -> np.ndarray:
         """Convert PointCloud2 to numpy array"""
