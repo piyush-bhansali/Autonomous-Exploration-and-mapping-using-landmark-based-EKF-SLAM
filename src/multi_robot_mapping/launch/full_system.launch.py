@@ -202,12 +202,13 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'robot_name': robot_name,
-            'scans_per_submap': 50,  # 50 scans @ 10Hz = 5 seconds = ~1m at 0.2 m/s
-            'min_distance_between_submaps': 0.8,  # ~1m distance between submaps
+            'scans_per_submap': 150,  # 150 scans @ 8.5Hz = ~17s = ~3.5m at 0.2 m/s
+            'min_distance_between_submaps': 2.5,  # 2.5m ensures 30-40% overlap for robust ICP
             'save_directory': './submaps',
             'voxel_size': 0.05,  # 5cm voxel size for good detail
             'feature_method': 'hybrid',
-            'enable_loop_closure': True  # ENABLED for better mapping
+            'enable_loop_closure': True,  # ENABLED for better mapping
+            'enable_scan_to_map_icp': True  # Enable real-time scan matching
         }]
     )
 
@@ -218,14 +219,12 @@ def generate_launch_description():
     # ========================================================================
     navigation_node = Node(
         package='navigation',
-        executable='navigation_node',
+        executable='simple_navigation',
         name=f'{robot_name}_navigation',
         output='screen',
         parameters=[{
             'robot_name': robot_name,
-            'robot_radius': 0.22,
-            'control_frequency': 10.0,
-            'max_exploration_time': 1800.0  # 30 minutes (increased from 5 min)
+            'robot_radius': 0.22
         }],
         condition=launch.conditions.IfCondition(enable_navigation)
     )

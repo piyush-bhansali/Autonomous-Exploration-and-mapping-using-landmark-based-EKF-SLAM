@@ -16,8 +16,8 @@ class SubmapStitcher:
     
     def __init__(self,
                  voxel_size: float = 0.05,
-                 icp_max_correspondence_dist: float = 0.3,  # Increased from 0.1 to 0.3 for better matching
-                 icp_fitness_threshold: float = 0.2,  # Reduced from 0.3 to 0.2 for more lenient acceptance
+                 icp_max_correspondence_dist: float = 0.15,  # 3x voxel size - tighter for accuracy
+                 icp_fitness_threshold: float = 0.5,  # Require 50% point alignment for quality
                  feature_extraction_method: str = 'hybrid',
                  enable_loop_closure: bool = False):
 
@@ -274,8 +274,21 @@ class SubmapStitcher:
             )
 
             if loop_closure is not None:
-                print(f"  Loop closure detected: submap {submap_id} matches submap {loop_closure['match_id']}")
-                # TODO: Apply loop closure correction to global map
+                print(f"  ✓ Loop closure detected: submap {submap_id} matches submap {loop_closure['match_id']}")
+
+                # Apply loop closure correction via pose graph optimization
+                optimized = self._optimize_pose_graph_with_loop_closure(
+                    current_id=submap_id,
+                    loop_match_id=loop_closure['match_id'],
+                    loop_transform=loop_closure.get('transform', np.eye(4))
+                )
+
+                if optimized:
+                    print(f"  ✓ Pose graph optimized, reconstructing global map...")
+                    # Rebuild global map with optimized transforms
+                    self._rebuild_global_map()
+                else:
+                    print(f"  ⚠ Pose graph optimization failed, continuing with current map")
 
         # Add ICP-aligned submap to global map
         self.global_map += pcd_aligned
@@ -354,3 +367,116 @@ class SubmapStitcher:
             stats.update(self.loop_closure_detector.get_statistics())
 
         return stats
+
+    def _optimize_pose_graph_with_loop_closure(self,
+                                               current_id: int,
+                                               loop_match_id: int,
+                                               loop_transform: np.ndarray) -> bool:
+        """
+        Optimize pose graph when loop closure is detected
+
+        Uses simple graph relaxation to distribute error across all submaps
+        More sophisticated implementation would use g2o or similar
+
+        Args:
+            current_id: Current submap ID
+            loop_match_id: ID of matched submap (earlier in trajectory)
+            loop_transform: Measured transform between current and matched submap
+
+        Returns:
+            True if optimization succeeded
+        """
+        if len(self.submaps) < 3:
+            return False
+
+        print(f"  Optimizing pose graph: {len(self.submaps)} submaps, loop {current_id} -> {loop_match_id}")
+
+        # Simple loop closure: distribute error linearly across submaps in the loop
+        # This is a basic implementation - production code would use g2o or GTSAM
+
+        # Calculate error between measured loop closure and current transforms
+        current_pose = self.submaps[current_id]['global_transform']
+        matched_pose = self.submaps[loop_match_id]['global_transform']
+
+        # Measured relative transform from loop closure
+        measured_relative = loop_transform
+
+        # Current relative transform (from odometry chain)
+        current_relative = np.linalg.inv(matched_pose) @ current_pose
+
+        # Calculate error
+        error_transform = measured_relative @ np.linalg.inv(current_relative)
+
+        # Extract 2D error (translation and rotation)
+        error_x = error_transform[0, 3]
+        error_y = error_transform[1, 3]
+        error_theta = np.arctan2(error_transform[1, 0], error_transform[0, 0])
+
+        print(f"  Loop closure error: dx={error_x:.3f}m, dy={error_y:.3f}m, dθ={np.degrees(error_theta):.1f}°")
+
+        # Only optimize if error is significant (>10cm or >5°)
+        if abs(error_x) < 0.1 and abs(error_y) < 0.1 and abs(error_theta) < np.radians(5):
+            print(f"  Error too small, skipping optimization")
+            return False
+
+        # Distribute error linearly across submaps in the loop
+        num_submaps_in_loop = current_id - loop_match_id
+
+        for i in range(loop_match_id + 1, current_id + 1):
+            # Linear interpolation factor
+            alpha = (i - loop_match_id) / num_submaps_in_loop
+
+            # Correction for this submap
+            correction_x = alpha * error_x
+            correction_y = alpha * error_y
+            correction_theta = alpha * error_theta
+
+            # Build correction transform
+            cos_theta = np.cos(correction_theta)
+            sin_theta = np.sin(correction_theta)
+            correction_T = np.array([
+                [cos_theta, -sin_theta, 0, correction_x],
+                [sin_theta, cos_theta, 0, correction_y],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1]
+            ])
+
+            # Apply correction to submap transform
+            old_transform = self.submaps[i]['global_transform'].copy()
+            new_transform = correction_T @ old_transform
+
+            self.submaps[i]['global_transform'] = new_transform
+            self.transforms[i] = new_transform
+
+        print(f"  ✓ Optimized {num_submaps_in_loop} submap poses")
+        return True
+
+    def _rebuild_global_map(self):
+        """
+        Rebuild global map from scratch using optimized transforms
+
+        Called after loop closure optimization to apply corrected poses
+        """
+        print(f"  Rebuilding global map with optimized poses...")
+
+        # Clear current global map
+        self.global_map = o3d.geometry.PointCloud()
+
+        # Re-stitch all submaps with optimized transforms
+        for submap in self.submaps:
+            # Transform submap to optimized pose
+            pcd_aligned = o3d.geometry.PointCloud(submap['point_cloud'])
+            pcd_aligned.transform(submap['global_transform'])
+
+            # Add to global map
+            self.global_map += pcd_aligned
+
+        # Final downsample to prevent duplicates
+        print(f"  Before final downsample: {len(self.global_map.points)} points")
+        global_map_tensor = o3d.t.geometry.PointCloud.from_legacy(
+            self.global_map, dtype=o3c.float32, device=self.device
+        )
+        global_map_tensor = global_map_tensor.voxel_down_sample(self.voxel_size)
+        self.global_map = global_map_tensor.to_legacy()
+
+        print(f"  ✓ Global map rebuilt: {len(self.global_map.points)} points")

@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Local Submap Generator - Clean Implementation
-
-Subscribes to laser scans and odometry, generates submaps, and stitches them together.
-"""
 
 import rclpy
 from rclpy.node import Node
@@ -16,6 +11,8 @@ import numpy as np
 import os
 from threading import Lock
 import struct
+import open3d as o3d
+import open3d.core as o3c
 
 from map_generation.submap_stitcher import SubmapStitcher
 from map_generation.ekf_lib import EKF
@@ -27,8 +24,7 @@ from map_generation.utils import (
 
 
 class LocalSubmapGenerator(Node):
-    """Generates local submaps from laser scans and stitches them together"""
-
+    
     def __init__(self):
         super().__init__('local_submap_generator')
 
@@ -41,6 +37,7 @@ class LocalSubmapGenerator(Node):
         self.declare_parameter('voxel_size', 0.05)
         self.declare_parameter('feature_method', 'hybrid')
         self.declare_parameter('enable_loop_closure', False)
+        self.declare_parameter('enable_scan_to_map_icp', True)
 
         # Get parameters
         self.robot_name = self.get_parameter('robot_name').value
@@ -51,6 +48,7 @@ class LocalSubmapGenerator(Node):
         self.voxel_size = self.get_parameter('voxel_size').value
         self.feature_method = self.get_parameter('feature_method').value
         self.enable_loop_closure = self.get_parameter('enable_loop_closure').value
+        self.enable_scan_to_map_icp = self.get_parameter('enable_scan_to_map_icp').value
 
         # Create save directory
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
@@ -66,6 +64,14 @@ class LocalSubmapGenerator(Node):
             feature_extraction_method=self.feature_method,
             enable_loop_closure=self.enable_loop_closure
         )
+
+        # GPU device for scan-to-map ICP
+        if o3c.cuda.is_available():
+            self.device = o3c.Device("CUDA:0")
+            self.get_logger().info("✓ GPU acceleration enabled for scan-to-map ICP")
+        else:
+            self.device = o3c.Device("CPU:0")
+            self.get_logger().info("⚠ GPU not available, using CPU for ICP")
 
         # QoS profiles - match what the Gazebo bridge publishes (BEST_EFFORT)
         # This prevents message loss due to QoS incompatibility
@@ -132,6 +138,7 @@ class LocalSubmapGenerator(Node):
 
         self.get_logger().info(f'Local Submap Generator initialized for {self.robot_name}')
         self.get_logger().info(f'Scans per submap: {self.scans_per_submap}, Min distance: {self.min_distance_between_submaps}m, Min rotation: {np.degrees(self.min_rotation_between_submaps):.0f}°')
+        self.get_logger().info(f'Scan-to-map ICP: {"ENABLED" if self.enable_scan_to_map_icp else "DISABLED"}')
 
     def publish_current_submap(self):
         """Publish current submap and global map for visualization"""
@@ -241,22 +248,95 @@ class LocalSubmapGenerator(Node):
             if self.submap_start_pose is None:
                 self.submap_start_pose = self.current_pose.copy()
 
+    def scan_to_map_icp(self, scan_points: np.ndarray, accumulated_points: np.ndarray) -> np.ndarray:
+        """
+        Perform fast ICP registration of current scan against accumulated submap points
+
+        Args:
+            scan_points: Current scan points (N x 3)
+            accumulated_points: Accumulated submap points (M x 3)
+
+        Returns:
+            Transform matrix (4 x 4) to apply to scan points
+        """
+        # Need at least 50 points for reliable ICP
+        if len(scan_points) < 50 or len(accumulated_points) < 100:
+            return np.eye(4)
+
+        try:
+            # Convert to tensor point clouds for GPU acceleration
+            scan_tensor = o3c.Tensor(scan_points.astype(np.float32), dtype=o3c.float32, device=self.device)
+            accum_tensor = o3c.Tensor(accumulated_points.astype(np.float32), dtype=o3c.float32, device=self.device)
+
+            source_pcd = o3d.t.geometry.PointCloud(self.device)
+            source_pcd.point.positions = scan_tensor
+
+            target_pcd = o3d.t.geometry.PointCloud(self.device)
+            target_pcd.point.positions = accum_tensor
+
+            # Quick voxel downsample for speed (use 2x voxel size for scan matching)
+            source_pcd = source_pcd.voxel_down_sample(self.voxel_size * 2)
+            target_pcd = target_pcd.voxel_down_sample(self.voxel_size * 2)
+
+            # Fast point-to-point ICP with tight convergence
+            init_transform = o3c.Tensor(np.eye(4), dtype=o3c.float32, device=self.device)
+
+            reg_result = o3d.t.pipelines.registration.icp(
+                source=source_pcd,
+                target=target_pcd,
+                max_correspondence_distance=0.2,  # 20cm for scan matching
+                init_source_to_target=init_transform,
+                estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
+                criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
+                    max_iteration=30  # Fast convergence for real-time
+                )
+            )
+
+            transform = reg_result.transformation.cpu().numpy()
+
+            # Constrain to 2D (safety - no vertical movement)
+            transform[2, :] = [0, 0, 1, 0]
+            transform[:, 2] = [0, 0, 1, 0]
+
+            # Only accept if fitness is reasonable (>30%)
+            if reg_result.fitness > 0.3:
+                return transform
+            else:
+                return np.eye(4)
+
+        except Exception as e:
+            self.get_logger().warn(f'Scan-to-map ICP failed: {e}', throttle_duration_sec=5.0)
+            return np.eye(4)
+
     def scan_callback(self, msg):
-        """Laser scan callback"""
+        """Laser scan callback with scan-to-map ICP correction"""
         if self.current_pose is None:
             self.get_logger().warn('Waiting for odometry to initialize EKF before processing scans...', throttle_duration_sec=5.0)
             return
 
-        # Convert scan to submap-local points (relative to submap start pose)
-        # This ensures all scans within a submap are in a consistent coordinate frame
-        points_submap = self.scan_to_submap_points(msg, self.current_pose, self.submap_start_pose)
+        # Convert scan to world frame using odometry
+        points_world = self.scan_to_submap_points(msg, self.current_pose, self.submap_start_pose)
 
-        if len(points_submap) == 0:
+        if len(points_world) == 0:
             return
+
+        # SCAN-TO-MAP ICP: Refine pose if we have accumulated points
+        if self.enable_scan_to_map_icp and len(self.current_submap_points) >= 5:
+            with self.data_lock:
+                # Stack accumulated points
+                accumulated_points = np.vstack(self.current_submap_points)
+
+                # Perform ICP to get correction transform
+                icp_transform = self.scan_to_map_icp(points_world, accumulated_points)
+
+                # Apply correction to current scan
+                points_homogeneous = np.hstack([points_world, np.ones((len(points_world), 1))])
+                points_corrected = (icp_transform @ points_homogeneous.T).T[:, :3]
+                points_world = points_corrected
 
         # Add to current submap (store as numpy array, no conversion)
         with self.data_lock:
-            self.current_submap_points.append(points_submap)
+            self.current_submap_points.append(points_world)
             self.scans_in_current_submap += 1
             self.total_scans_processed += 1
 
@@ -346,9 +426,9 @@ class LocalSubmapGenerator(Node):
         ))
 
         # Case 0: Initial submap (bootstrap for navigation)
-        # Create first submap after minimal scans even without movement
+        # Create first submap after sufficient scans to build a useful initial map
         # This allows navigation to start planning from initial position
-        if self.submap_id == 0 and self.scans_in_current_submap >= 30:
+        if self.submap_id == 0 and self.scans_in_current_submap >= 100:
             self.get_logger().info(
                 f'Creating initial submap {self.submap_id} (bootstrap): '
                 f'{self.scans_in_current_submap} scans, '

@@ -1,92 +1,113 @@
 #!/usr/bin/env python3
 """
-Simple random walk controller - bypasses all complexity
-Just makes the robot move to build the map
+Simple Pure Pursuit Controller
+
+Follows a path using the pure pursuit algorithm.
+Returns velocity commands to track waypoints smoothly.
 """
 
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
 import numpy as np
-import time
+from typing import List, Tuple
 
 
-class SimpleController(Node):
-    def __init__(self):
-        super().__init__('simple_controller')
+class SimplePurePursuit:
+    """Pure pursuit path follower"""
 
-        self.declare_parameter('robot_name', 'tb3_1')
-        self.robot_name = self.get_parameter('robot_name').value
+    def __init__(self,
+                 lookahead_distance: float = 1.2,
+                 linear_velocity: float = 0.2,
+                 max_angular_velocity: float = 0.8):
+        """
+        Args:
+            lookahead_distance: How far ahead to look on path (meters)
+            linear_velocity: Forward speed (m/s)
+            max_angular_velocity: Max turning speed (rad/s)
+        """
+        self.lookahead = lookahead_distance
+        self.v = linear_velocity
+        self.max_w = max_angular_velocity
 
-        # Subscribe to odometry
-        self.odom_sub = self.create_subscription(
-            Odometry,
-            f'/{self.robot_name}/odom',
-            self.odom_callback,
-            10
+    def compute_control(self,
+                       robot_pos: np.ndarray,  # [x, y]
+                       robot_yaw: float,        # radians
+                       path: List[np.ndarray],  # List of [x, y] waypoints
+                       current_waypoint_index: int) -> Tuple[float, float]:
+        """
+        Compute velocity commands to follow path
+
+        Returns:
+            (linear_vel, angular_vel) in (m/s, rad/s)
+        """
+        # Find lookahead point on path
+        lookahead_point = self._find_lookahead_point(
+            robot_pos, path, current_waypoint_index
         )
 
-        # Publish velocities
-        self.cmd_pub = self.create_publisher(
-            Twist,
-            f'/{self.robot_name}/cmd_vel',
-            10
-        )
+        if lookahead_point is None:
+            # Path complete or no valid lookahead
+            return 0.0, 0.0
 
-        # Timer for control loop
-        self.create_timer(0.1, self.control_loop)
+        # Compute steering angle to lookahead point
+        angular_vel = self._compute_steering(robot_pos, robot_yaw, lookahead_point)
 
-        self.current_pos = None
-        self.last_turn_time = time.time()
-        self.turn_interval = 5.0  # Turn every 5 seconds
+        # Clamp angular velocity
+        angular_vel = np.clip(angular_vel, -self.max_w, self.max_w)
 
-        self.get_logger().info(f'Simple controller started for {self.robot_name}')
+        return self.v, angular_vel
 
-    def odom_callback(self, msg):
-        self.current_pos = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y
-        ])
+    def _find_lookahead_point(self,
+                             robot_pos: np.ndarray,
+                             path: List[np.ndarray],
+                             start_index: int) -> np.ndarray:
+        """Find point on path at lookahead distance"""
 
-    def control_loop(self):
-        if self.current_pos is None:
-            return
+        # Search forward from current waypoint
+        for i in range(start_index, len(path)):
+            waypoint = path[i]
+            distance = np.linalg.norm(waypoint - robot_pos)
 
-        cmd = Twist()
+            # Return first point beyond lookahead distance
+            if distance >= self.lookahead:
+                return waypoint
 
-        # Simple behavior: move forward, turn occasionally
-        elapsed = time.time() - self.last_turn_time
+        # If no point beyond lookahead, return last waypoint
+        if len(path) > 0:
+            return path[-1]
 
-        if elapsed > self.turn_interval:
-            # Turn
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.5  # Turn
+        return None
 
-            if elapsed > self.turn_interval + 2.0:  # Turn for 2 seconds
-                self.last_turn_time = time.time()
+    def _compute_steering(self,
+                         robot_pos: np.ndarray,
+                         robot_yaw: float,
+                         target_point: np.ndarray) -> float:
+        """
+        Compute angular velocity using pure pursuit formula
+
+        Pure pursuit: curvature = (2 * sin(α)) / L
+        where α is angle to target, L is lookahead distance
+        """
+        # Vector from robot to target
+        dx = target_point[0] - robot_pos[0]
+        dy = target_point[1] - robot_pos[1]
+
+        # Angle to target in global frame
+        target_angle = np.arctan2(dy, dx)
+
+        # Angle error (difference from robot heading)
+        alpha = target_angle - robot_yaw
+
+        # Normalize to [-π, π]
+        alpha = np.arctan2(np.sin(alpha), np.cos(alpha))
+
+        # Distance to target
+        distance = np.sqrt(dx**2 + dy**2)
+
+        # Pure pursuit formula: curvature = 2*sin(α)/L
+        # Angular velocity = v * curvature
+        if distance > 0.01:  # Avoid division by zero
+            curvature = (2.0 * np.sin(alpha)) / distance
+            angular_velocity = self.v * curvature
         else:
-            # Move forward
-            cmd.linear.x = 0.15
-            cmd.angular.z = 0.0
+            angular_velocity = 0.0
 
-        self.cmd_pub.publish(cmd)
-        self.get_logger().info(f'Vel: linear={cmd.linear.x:.2f}, angular={cmd.angular.z:.2f}',
-                              throttle_duration_sec=2.0)
-
-
-def main(args=None):
-    rclpy.init(args=args)
-    node = SimpleController()
-
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
+        return angular_velocity
