@@ -6,17 +6,15 @@ import open3d.core as o3c
 from typing import Optional, Tuple, Dict, List
 import time
 import os
-from map_generation.utils import quaternion_to_yaw
 from map_generation.feature_extractor import FeatureExtractor
 from map_generation.loop_closure_detector import LoopClosureDetector
-from map_generation.geometry_utils import estimate_transform_from_poses
 
 
 class SubmapStitcher:
     
     def __init__(self,
                  voxel_size: float = 0.05,
-                 icp_max_correspondence_dist: float = 0.25,
+                 icp_max_correspondence_dist: float = 0.10,
                  icp_fitness_threshold: float = 0.45,
                  feature_extraction_method: str = 'hybrid',
                  enable_loop_closure: bool = False):
@@ -35,7 +33,6 @@ class SubmapStitcher:
         self.submaps = []
         self.global_map_tensor = o3d.t.geometry.PointCloud(self.device)
         self.transforms = []
-        self.prev_submap_pose = None  # Track previous submap pose for odometry-based ICP initial guess
 
         # Feature extraction (GPU always enabled)
         self.feature_extractor = FeatureExtractor(
@@ -80,7 +77,7 @@ class SubmapStitcher:
             return None
 
     def compute_submap_bounds(self, pcd_tensor: o3d.t.geometry.PointCloud) -> Dict:
-        
+
         points = pcd_tensor.point.positions.cpu().numpy()
         return {
             'min_x': float(points[:, 0].min()),
@@ -88,10 +85,6 @@ class SubmapStitcher:
             'min_y': float(points[:, 1].min()),
             'max_y': float(points[:, 1].max())
         }
-
-    def estimate_2d_transform(self, pose_from: dict, pose_to: dict) -> np.ndarray:
-        
-        return estimate_transform_from_poses(pose_from, pose_to, quaternion_to_yaw)
 
     def register_icp_2d(self,
                        source: o3d.t.geometry.PointCloud,
@@ -116,14 +109,12 @@ class SubmapStitcher:
             estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
             criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
                 max_iteration=100,  # Reduced from 200 for speed
-                relative_fitness=1e-6,  # Stop when fitness improvement < 0.0001%
+                relative_fitness=1e-6,  #
                 relative_rmse=1e-6      # Stop when RMSE improvement < 0.0001%
             )
         )
 
-        # Constrain transformation to 2D (safety measure)
         transform = reg_result.transformation.cpu().numpy()
-        # Keep only X, Y translation and rotation around Z
         transform[2, 0:3] = [0, 0, 1]  # No Z translation, preserve rotation
         transform[2, 3] = 0             # No Z offset
         transform[0:2, 2] = [0, 0]      # No X,Y coupling with Z axis
@@ -195,24 +186,13 @@ class SubmapStitcher:
                     np.array([pose_center['x'], pose_center['y']])
                 )
 
-            # Update previous pose for next submap's odometry-based initial guess
-            self.prev_submap_pose = pose_center
-
             return True
 
-        # For subsequent submaps: use ICP to correct accumulated drift
-        if self.prev_submap_pose is not None:
-            # Compute relative transform from previous submap to current submap
-            initial_transform = self.estimate_2d_transform(self.prev_submap_pose, pose_center)
-        else:
-            # First submap after initialization: use identity
-            initial_transform = np.eye(4)
-
-        # Run ICP registration to correct long-term accumulated drift (tensor-native, stays on GPU!)
+        initial_transform = np.eye(4)  
         success, final_transform, fitness = self.register_icp_2d(
             source=pcd_tensor,
             target=self.global_map_tensor,
-            initial_guess=initial_transform
+            initial_guess=initial_transform  
         )
 
         # Check if transform is reasonable (not too large)
@@ -223,14 +203,16 @@ class SubmapStitcher:
         if translation > 2.0 or rotation > np.radians(30):  # 2m or 30 degrees
             final_transform = np.eye(4)
             success = False
+            print(f"  ✗ ICP rejected: t={translation:.3f}m, r={np.degrees(rotation):.1f}° too large")
 
         # Use consistent fitness threshold
         if not success or fitness < self.icp_fitness_threshold:
             final_transform = np.eye(4)
+            print(f"  ✗ ICP failed: fitness={fitness:.3f} < {self.icp_fitness_threshold}")
         else:
-            print(f"  ✓ ICP: t={translation:.3f}m, r={np.degrees(rotation):.1f}°, fitness={fitness:.3f}")
+            print(f"  ✓ ICP drift correction: t={translation:.3f}m, r={np.degrees(rotation):.1f}°, fitness={fitness:.3f}")
 
-        # Transform submap to align with global map (tensor-native, stays on GPU!)
+        # Transform submap to align with drift-corrected global map
         transform_tensor = o3c.Tensor(final_transform, dtype=o3c.float32, device=self.device)
         pcd_aligned_tensor = pcd_tensor.transform(transform_tensor)
 
@@ -285,14 +267,9 @@ class SubmapStitcher:
             pcd_aligned_tensor.point.positions
         ], axis=0)
 
-        # Voxel downsample to merge overlapping points (5cm voxels) - stays on GPU
         self.global_map_tensor = self.global_map_tensor.voxel_down_sample(self.voxel_size)
 
-        # Outlier removal to clean ICP alignment errors (relaxed parameters) - stays on GPU
         self.global_map_tensor, _ = self.global_map_tensor.remove_statistical_outliers(nb_neighbors=10, std_ratio=3.0)
-
-        # Update previous pose for next submap's odometry-based initial guess
-        self.prev_submap_pose = pose_center
 
         return True
 
@@ -301,57 +278,14 @@ class SubmapStitcher:
         if len(self.global_map_tensor.point.positions) == 0:
             return
 
-        # Convert to legacy only for saving (downsampling already done during stitching)
         global_map_legacy = self.global_map_tensor.to_legacy()
         o3d.io.write_point_cloud(filepath, global_map_legacy)
 
-    def save_submaps(self, directory: str):
-
-        os.makedirs(directory, exist_ok=True)
-
-        for submap in self.submaps:
-            submap_file = os.path.join(directory, f"submap_{submap['id']:04d}.pcd")
-            o3d.io.write_point_cloud(submap_file, submap['point_cloud'])
-
-            # Save metadata
-            metadata_file = os.path.join(directory, f"submap_{submap['id']:04d}_metadata.npz")
-            np.savez(
-                metadata_file,
-                id=submap['id'],
-                global_transform=submap['global_transform'],
-                pose_center=np.array([submap['pose_center']['x'],
-                                     submap['pose_center']['y'],
-                                     submap['pose_center']['z']]),
-                scan_count=submap['scan_count'],
-                timestamp=submap['timestamp_created']
-            )
-
     def get_global_map_points(self) -> Optional[np.ndarray]:
-        """Get global map points as numpy array (optimized GPU→CPU transfer)"""
-        if len(self.global_map_tensor.point.positions) == 0:
+
+        if 'positions' not in self.global_map_tensor.point or len(self.global_map_tensor.point.positions) == 0:
             return None
-        # Direct GPU→CPU transfer, returns numpy array
         return self.global_map_tensor.point.positions.cpu().numpy()
-
-    def get_submap(self, submap_id: int) -> Optional[Dict]:
-        """Get submap by ID"""
-        for submap in self.submaps:
-            if submap['id'] == submap_id:
-                return submap
-        return None
-
-    def get_statistics(self) -> dict:
-        """Get mapping statistics"""
-        stats = {
-            'num_submaps': len(self.submaps),
-            'global_map_points': len(self.global_map.points),
-            'total_transforms': len(self.transforms)
-        }
-
-        if self.loop_closure_detector is not None:
-            stats.update(self.loop_closure_detector.get_statistics())
-
-        return stats
 
     def _optimize_pose_graph_with_loop_closure(self,
                                                current_id: int,
@@ -413,22 +347,29 @@ class SubmapStitcher:
         return True
 
     def _rebuild_global_map(self):
-
+        """Rebuild global map after loop closure optimization"""
         # Clear current global map
-        self.global_map = o3d.geometry.PointCloud()
+        self.global_map_tensor = o3d.t.geometry.PointCloud(self.device)
 
         # Re-stitch all submaps with optimized transforms
         for submap in self.submaps:
-            # Transform submap to optimized pose
-            pcd_aligned = o3d.geometry.PointCloud(submap['point_cloud'])
-            pcd_aligned.transform(submap['global_transform'])
+            # Transform submap to optimized pose (use tensor operations)
+            pcd_legacy = o3d.geometry.PointCloud(submap['point_cloud'])
+            pcd_legacy.transform(submap['global_transform'])
 
-            # Add to global map
-            self.global_map += pcd_aligned
+            # Convert to tensor and add to global map
+            pcd_tensor = o3d.t.geometry.PointCloud.from_legacy(
+                pcd_legacy, dtype=o3c.float32, device=self.device
+            )
+
+            # Concatenate with existing global map
+            if len(self.global_map_tensor.point.positions) == 0:
+                self.global_map_tensor = pcd_tensor
+            else:
+                self.global_map_tensor.point.positions = o3c.concatenate([
+                    self.global_map_tensor.point.positions,
+                    pcd_tensor.point.positions
+                ], axis=0)
 
         # Final downsample to prevent duplicates
-        global_map_tensor = o3d.t.geometry.PointCloud.from_legacy(
-            self.global_map, dtype=o3c.float32, device=self.device
-        )
-        global_map_tensor = global_map_tensor.voxel_down_sample(self.voxel_size)
-        self.global_map = global_map_tensor.to_legacy()
+        self.global_map_tensor = self.global_map_tensor.voxel_down_sample(self.voxel_size)

@@ -43,7 +43,7 @@ Visualization Manager:
         Z: 0
       Plane: XY
       Plane Cell Count: 50
-      Reference Frame: tb3_1/odom
+      Reference Frame: odom
       Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
@@ -142,7 +142,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: tb3_1/odom
+    Fixed Frame: odom
     Frame Rate: 30
   Name: root
   Tools:

@@ -1,5 +1,4 @@
 import numpy as np
-from map_generation.utils import normalize_angle
 import time
 
 
@@ -18,24 +17,36 @@ class EKF:
         self.vy = 0.0
 
         # Process noise covariance (tuned for TurtleBot3)
+        # Increased from [0.005, 0.005, 0.05] to account for:
+        # - Wheel slip on real floors
+        # - Model inaccuracies
+        # - Unmodeled dynamics
         self.Q = np.diag([
-            0.005,  # x position process noise
-            0.005,  # y position process noise
-            0.05    # theta process noise (higher due to gyro drift)
+            0.02,   # x position process noise (was 0.005)
+            0.02,   # y position process noise (was 0.005)
+            0.1     # theta process noise (was 0.05)
         ])
 
         # Measurement noise covariance (from odometry)
+        # Increased from [0.005, 0.005, 0.02] to account for:
+        # - Real-world odometry drift
+        # - Encoder noise
+        # - Wheel slip
         self.R = np.diag([
-            0.005,  # x measurement noise
-            0.005,  # y measurement noise
-            0.02    # theta measurement noise
+            0.01,   # x measurement noise (was 0.005)
+            0.01,   # y measurement noise (was 0.005)
+            0.05    # theta measurement noise (was 0.02)
         ])
 
         # IMU-only prediction noise (for predict_imu with dead reckoning)
+        # Increased from [0.001, 0.001, 0.01] because:
+        # - Dead reckoning accumulates error rapidly
+        # - No odometry feedback between IMU updates
+        # - Gyroscope drift
         self.Q_imu = np.diag([
-            0.001,  # Small position uncertainty (from velocity dead reckoning)
-            0.001,  # Small position uncertainty (from velocity dead reckoning)
-            0.01    # Orientation uncertainty from gyroscope
+            0.01,   # Position uncertainty (was 0.001) - 10× larger for dead reckoning
+            0.01,   # Position uncertainty (was 0.001) - 10× larger for dead reckoning
+            0.02    # Orientation uncertainty (was 0.01) - 2× larger for gyro drift
         ])
 
         # Initialization flag
@@ -60,29 +71,40 @@ class EKF:
         self.last_prediction_time = time.time()
         self.last_update_time = time.time()
 
-    def predict(self, omega, ax, ay, dt):
-        
+    def predict(self, omega, dt):
+        """
+        Predict step using IMU angular velocity and last known velocity from odometry.
+
+        IMPORTANT: We do NOT integrate IMU accelerations because:
+        1. IMU accelerations include gravity and sensor noise
+        2. Integrating raw accelerations causes rapid velocity drift
+        3. Odometry provides more reliable velocity estimates
+
+        Args:
+            omega: Angular velocity from IMU (rad/s)
+            dt: Time step (seconds)
+        """
+
         if not self.initialized:
             raise RuntimeError("EKF not initialized")
 
         x, y, theta = self.state
 
-        # Update velocity estimates from acceleration
-        self.vx += ax * dt
-        self.vy += ay * dt
+        # Use velocity from odometry (set by update() method)
+        # DO NOT integrate accelerations - causes drift!
 
         # Predict new state using motion model
-        x_pred = x + (self.vx * np.cos(theta) - self.vy * np.sin(theta)) * dt
-        y_pred = y + (self.vx * np.sin(theta) + self.vy * np.cos(theta)) * dt
+        x_pred = x + self.vx * np.cos(theta) * dt
+        y_pred = y + self.vx * np.sin(theta) * dt
         theta_pred = theta + omega * dt
-        theta_pred = normalize_angle(theta_pred)
+        theta_pred = np.arctan2(np.sin(theta_pred), np.cos(theta_pred))  # Normalize to [-π, π]
 
         self.state = np.array([x_pred, y_pred, theta_pred])
 
         # Compute Jacobian of motion model
         F = np.array([
-            [1.0, 0.0, -self.vx * np.sin(theta) * dt - self.vy * np.cos(theta) * dt],
-            [0.0, 1.0,  self.vx * np.cos(theta) * dt - self.vy * np.sin(theta) * dt],
+            [1.0, 0.0, -self.vx * np.sin(theta) * dt],
+            [0.0, 1.0,  self.vx * np.cos(theta) * dt],
             [0.0, 0.0,  1.0]
         ])
 
@@ -126,7 +148,8 @@ class EKF:
         # Apply predictions
         x_pred = x + dx
         y_pred = y + dy
-        theta_pred = normalize_angle(theta + dtheta)
+        theta_pred = theta + dtheta
+        theta_pred = np.arctan2(np.sin(theta_pred), np.cos(theta_pred))  # Normalize to [-π, π]
 
         self.state = np.array([x_pred, y_pred, theta_pred])
 
@@ -166,7 +189,7 @@ class EKF:
         # Innovation (measurement residual)
         z_pred = H @ self.state
         innovation = z - z_pred
-        innovation[2] = normalize_angle(innovation[2])  # Wrap angle difference
+        innovation[2] = np.arctan2(np.sin(innovation[2]), np.cos(innovation[2]))  # Wrap angle difference to [-π, π]
 
         # Innovation covariance
         S = H @ self.P @ H.T + self.R
@@ -182,7 +205,7 @@ class EKF:
 
         # State update
         self.state = self.state + K @ innovation
-        self.state[2] = normalize_angle(self.state[2])  # Normalize theta
+        self.state[2] = np.arctan2(np.sin(self.state[2]), np.cos(self.state[2]))  # Normalize theta to [-π, π]
 
         # Covariance update (Joseph form for numerical stability)
         I = np.eye(3)

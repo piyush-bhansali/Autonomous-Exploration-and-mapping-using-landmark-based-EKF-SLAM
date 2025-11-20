@@ -26,7 +26,7 @@ class StraightLineTest(Node):
         super().__init__('straight_line_test')
 
         # Parameters
-        self.declare_parameter('target_distance', 7.0)  # meters
+        self.declare_parameter('target_distance', 8.0)  # meters
         self.declare_parameter('linear_velocity', 0.2)  # m/s
         self.declare_parameter('rate_hz', 10.0)  # control loop rate
 

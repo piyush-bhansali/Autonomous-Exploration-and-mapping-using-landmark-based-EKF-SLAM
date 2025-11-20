@@ -211,7 +211,7 @@ class SimpleFrontierDetector:
         Cluster nearby frontier points using DBSCAN.
 
         Parameters:
-        - eps: 1.5m (frontiers within 1.5m are same cluster)
+        - eps: 1.0m (frontiers within 1.0m are same cluster)
         - min_samples: 2 (need at least 2 points to form cluster)
 
         Returns list of clusters, where each cluster is a list of frontier points.
@@ -224,9 +224,9 @@ class SimpleFrontierDetector:
         points = np.array(candidates)
 
         # DBSCAN clustering
-        # eps=1.5: Points within 1.5m are neighbors
+        # eps=1.0: Points within 1.0m are neighbors
         # min_samples=2: Need 2+ points to form cluster
-        clustering = DBSCAN(eps=1.5, min_samples=2).fit(points)
+        clustering = DBSCAN(eps=1.0, min_samples=2).fit(points)
 
         labels = clustering.labels_
 

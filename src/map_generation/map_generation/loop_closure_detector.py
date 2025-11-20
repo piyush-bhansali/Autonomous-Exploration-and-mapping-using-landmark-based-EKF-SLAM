@@ -6,8 +6,8 @@ import open3d as o3d
 from typing import List, Optional, Tuple, Dict
 from scipy.spatial import KDTree
 
-# Import shared geometry utilities
-from map_generation.geometry_utils import match_scan_context, match_geometric_features
+# Import shared mapping utilities
+from map_generation.mapping_utils import match_scan_context, match_geometric_features
 
 
 class LoopClosureDetector: 

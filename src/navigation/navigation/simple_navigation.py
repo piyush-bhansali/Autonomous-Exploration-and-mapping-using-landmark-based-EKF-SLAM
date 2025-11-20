@@ -14,7 +14,7 @@ from enum import Enum
 
 from navigation.simple_frontiers import SimpleFrontierDetector
 from navigation.simple_rrt import SimpleRRTStar
-from navigation.simple_controller import SimplePurePursuit
+from navigation.smoothed_pure_pursuit import SmoothedPurePursuit
 
 
 class State(Enum):
@@ -52,10 +52,12 @@ class SimpleNavigationNode(Node):
         # Components (created when map received)
         self.frontier_detector = SimpleFrontierDetector(self.robot_radius)
         self.path_planner = None
-        self.controller = SimplePurePursuit(
+        self.controller = SmoothedPurePursuit(
             lookahead_distance=1.2,
             linear_velocity=0.2,
-            max_angular_velocity=0.8
+            max_angular_velocity=0.8,
+            angular_smoothing_factor=0.3,
+            goal_tolerance=0.3
         )
 
         # QoS for map
@@ -292,7 +294,7 @@ class SimpleNavigationNode(Node):
         # Publish each frontier as a large sphere
         for i, frontier in enumerate(self.all_frontiers[:20]):  # Show top 20
             marker = Marker()
-            marker.header.frame_id = 'odom'
+            marker.header.frame_id = 'odom'  # Gazebo publishes odom without namespace
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = 'frontiers'
             marker.id = i
@@ -360,7 +362,7 @@ class SimpleNavigationNode(Node):
             return
 
         marker = Marker()
-        marker.header.frame_id = 'odom'
+        marker.header.frame_id = 'odom'  # Gazebo publishes odom without namespace
         marker.header.stamp = self.get_clock().now().to_msg()
         marker.ns = 'current_goal'
         marker.id = 0
@@ -394,7 +396,7 @@ class SimpleNavigationNode(Node):
             return
 
         path_msg = Path()
-        path_msg.header.frame_id = 'odom'
+        path_msg.header.frame_id = 'odom'  # Gazebo publishes odom without namespace
         path_msg.header.stamp = self.get_clock().now().to_msg()
 
         for waypoint in self.current_path:

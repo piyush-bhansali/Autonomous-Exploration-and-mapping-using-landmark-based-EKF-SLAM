@@ -78,7 +78,9 @@ def generate_launch_description():
     urdf_file = os.path.join(pkg_multi_robot, 'urdf', 'turtlebot3_waffle_pi.urdf')
     bridge_common_yaml = os.path.join(pkg_multi_robot, 'config', 'tb3_bridge_common.yaml')
     bridge_robot_yaml = os.path.join(pkg_multi_robot, 'config', 'tb3_bridge.yaml')
-    rviz_config = os.path.join(pkg_multi_robot, 'rviz', 'mapping_visualization.rviz')
+    # Per-robot RViz configs (supports multi-robot independent visualization)
+    rviz_config_tb3_1 = os.path.join(pkg_multi_robot, 'rviz', 'tb3_1_visualization.rviz')
+    rviz_config_tb3_2 = os.path.join(pkg_multi_robot, 'rviz', 'tb3_2_visualization.rviz')
 
     # World name mapping for Gazebo (default to maze_world)
     world_name_map = {
@@ -86,16 +88,8 @@ def generate_launch_description():
         'park': 'park_world'
     }
 
-    # Read robot SDF
-    with open(robot_sdf, 'r') as f:
-        robot_sdf_content = f.read()
-
-    # Fix mesh paths
+    # Read robot SDF (will be substituted per-robot below)
     mesh_path = os.path.join(pkg_multi_robot, 'meshes')
-    robot_sdf_content = robot_sdf_content.replace(
-        'package://multi_robot_mapping/meshes',
-        f'file://{mesh_path}'
-    )
 
     # ========================================================================
     # 1. GAZEBO SIMULATION
@@ -138,6 +132,14 @@ def generate_launch_description():
     # In production, extract from world parameter properly
     gazebo_world_name = 'maze_world'  # Will be dynamically set based on world arg
 
+    # Prepare robot SDF with substitutions
+    with open(robot_sdf, 'r') as f:
+        robot_sdf_content = f.read()
+
+    # Substitute mesh paths and robot name
+    robot_sdf_content = robot_sdf_content.replace('package://multi_robot_mapping/meshes', f'file://{mesh_path}')
+    robot_sdf_content = robot_sdf_content.replace('{robot_name}', robot_name)
+
     # Spawn robot at corner position
     spawn_robot = Node(
         package='ros_gz_sim',
@@ -175,14 +177,19 @@ def generate_launch_description():
     )
 
     # Robot state publisher
+    # Read URDF and substitute ${namespace} with robot name
+    with open(urdf_file, 'r') as f:
+        urdf_content = f.read()
+    urdf_content = urdf_content.replace('${namespace}', f'{robot_name}/')
+
     robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
         name=f'{robot_name}_state_publisher',
         output='screen',
         parameters=[{
-            'robot_description': open(urdf_file, 'r').read(),
-            'frame_prefix': f'{robot_name}/'
+            'robot_description': urdf_content,
+            'frame_prefix': ''  # Empty since namespace already in URDF
         }],
         remappings=[('/joint_states', f'/{robot_name}/joint_states')]
     )
@@ -232,18 +239,23 @@ def generate_launch_description():
     navigation_delayed = TimerAction(period=15.0, actions=[navigation_node])
 
     # ========================================================================
-    # 6. RVIZ VISUALIZATION
+    # 6. RVIZ VISUALIZATION (Per-Robot)
     # ========================================================================
-    rviz_node = Node(
+    # Launch RViz for tb3_1 with its own map frame
+    rviz_node_tb3_1 = Node(
         package='rviz2',
         executable='rviz2',
-        name='rviz2',
-        arguments=['-d', rviz_config],
+        name='rviz2_tb3_1',
+        namespace='tb3_1',
+        arguments=['-d', rviz_config_tb3_1],
         output='screen',
         condition=launch.conditions.IfCondition(use_rviz)
     )
 
-    rviz_delayed = TimerAction(period=8.0, actions=[rviz_node])
+    rviz_delayed = TimerAction(period=8.0, actions=[rviz_node_tb3_1])
+
+    # NOTE: For tb3_2, launch separately with:
+    # ros2 run rviz2 rviz2 -d /path/to/tb3_2_visualization.rviz
 
     # ========================================================================
     # LAUNCH DESCRIPTION

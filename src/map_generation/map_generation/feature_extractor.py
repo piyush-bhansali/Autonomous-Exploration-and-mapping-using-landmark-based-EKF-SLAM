@@ -4,8 +4,8 @@ import numpy as np
 import open3d as o3d
 from typing import Dict, Tuple
 
-# Import shared geometry utilities
-from map_generation.geometry_utils import match_scan_context, match_geometric_features
+# Import shared mapping utilities
+from map_generation.mapping_utils import match_scan_context, match_geometric_features
 
 
 class FeatureExtractor:
