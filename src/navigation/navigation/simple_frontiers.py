@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Simple Frontier Detector with Clustering
 
-Finds exploration frontiers at the boundary of the known map.
-Clusters nearby frontiers and scores clusters by size and information gain.
-"""
 
 import numpy as np
 from scipy.spatial import KDTree
@@ -29,15 +24,7 @@ class SimpleFrontierDetector:
     def detect(self,
               map_points: np.ndarray,  # Nx3 array of [x,y,z] points
               robot_pos: np.ndarray) -> List[SimpleFrontier]:  # [x, y]
-        """
-        Find frontiers at boundary between KNOWN and UNKNOWN space.
-
-        Strategy:
-        1. Find map bounds from all points
-        2. Place frontiers 0.3m BEFORE map boundary (inside mapped area)
-        3. Filter for collision-free positions only
-        4. Score clusters and return best
-        """
+        
         if len(map_points) < 100:
             return []  # Need minimum map size
 
@@ -224,9 +211,9 @@ class SimpleFrontierDetector:
         points = np.array(candidates)
 
         # DBSCAN clustering
-        # eps=1.0: Points within 1.0m are neighbors
+        # eps=0.5: Points within 0.5m are neighbors
         # min_samples=2: Need 2+ points to form cluster
-        clustering = DBSCAN(eps=1.0, min_samples=2).fit(points)
+        clustering = DBSCAN(eps=0.5, min_samples=2).fit(points)
 
         labels = clustering.labels_
 
@@ -325,6 +312,8 @@ class SimpleFrontierDetector:
             total_info_gain += unexplored_count / 8.0
 
         # Average info gain across sampled points
+        if sample_size == 0:
+            return 0.0
         return total_info_gain / sample_size
 
     def _leads_to_unexplored(self,

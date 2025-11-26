@@ -2,11 +2,13 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default
+from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Header
+from tf2_ros import TransformBroadcaster
 import numpy as np
 import os
 from threading import Lock
@@ -22,7 +24,7 @@ from map_generation.utils import (
 )
 from map_generation.mapping_utils import (
     scan_to_map_icp,
-    scan_to_world_points_with_lidar_offset,
+    transform_scan_to_world_frame,
     publish_global_map
 )
 
@@ -33,6 +35,7 @@ class LocalSubmapGenerator(Node):
         super().__init__('local_submap_generator')
 
         # Declare parameters
+        # NOTE: use_sim_time is automatically declared by ROS 2, don't declare it again!
         self.declare_parameter('robot_name', 'tb3_1')
         self.declare_parameter('scans_per_submap', 50)
         self.declare_parameter('save_directory', './submaps')
@@ -85,11 +88,13 @@ class LocalSubmapGenerator(Node):
             qos_profile_sensor_data
         )
 
+        # Use RELIABLE QoS to match the bridge publisher
+        odom_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.odom_sub = self.create_subscription(
             Odometry,
             f'/{self.robot_name}/odom',
             self.odom_callback,
-            qos_profile_system_default
+            odom_qos
         )
 
         self.current_submap_pub = self.create_publisher(
@@ -102,13 +107,29 @@ class LocalSubmapGenerator(Node):
             f'/{self.robot_name}/global_map',
             10
         )
+        self.ekf_pose_pub = self.create_publisher(
+            PoseStamped,
+            f'/{self.robot_name}/ekf_pose',
+            10
+        )
+        self.ekf_path_pub = self.create_publisher(
+            Path,
+            f'/{self.robot_name}/ekf_path',
+            10
+        )
+
+        # TF broadcaster for publishing odom -> base_footprint transform
+        self.tf_broadcaster = TransformBroadcaster(self)
 
         # State variables
+        self.ekf_path = Path()  # Store EKF trajectory
+        self.ekf_path.header.frame_id = f'{self.robot_name}/odom'
         self.current_pose = None
         self.submap_start_pose = None
         self.current_submap_points = []
         self.submap_id = 0
         self.data_lock = Lock()
+        self.update_count = 0  # For debug logging rate limiting
 
         # Scan counting for submap creation
         self.scans_in_current_submap = 0
@@ -117,14 +138,95 @@ class LocalSubmapGenerator(Node):
         # Timer to publish global map at 1 Hz for visualization
         self.create_timer(1.0, self._publish_global_map_callback)
 
+        # Timer for debug statistics (2 Hz)
+        self.create_timer(0.5, self._debug_statistics_callback)
+
+        # Store last odometry for comparison
+        self.last_odom_pose = None
+
     def _publish_global_map_callback(self):
-        
+
         global_points = self.stitcher.get_global_map_points()
         publish_global_map(
             global_points,
             self.global_map_pub,
-            self.get_clock()
+            self.get_clock(),
+            frame_id=f'{self.robot_name}/odom'
         )
+
+    def _debug_statistics_callback(self):
+        """Periodic debug output comparing EKF vs Odometry"""
+        if not self.ekf_initialized or self.last_odom_pose is None:
+            return
+
+        ekf_state = self.ekf.get_state()
+        ekf_uncertainty = self.ekf.get_uncertainty()
+
+        # Calculate error vs last odometry
+        error_x = ekf_state['x'] - self.last_odom_pose['x']
+        error_y = ekf_state['y'] - self.last_odom_pose['y']
+        error_theta = ekf_state['theta'] - self.last_odom_pose['theta']
+        error_theta = np.arctan2(np.sin(error_theta), np.cos(error_theta))
+        error_pos = np.sqrt(error_x**2 + error_y**2)
+
+        self.get_logger().info(
+            f'[EKF STATUS] '
+            f'Position Error: {error_pos*1000:.1f}mm | '
+            f'Angle Error: {np.degrees(error_theta):.2f}° | '
+            f'Uncertainty: σ_pos={ekf_uncertainty["sigma_x"]*1000:.1f}mm, σ_θ={np.degrees(ekf_uncertainty["sigma_theta"]):.1f}° | '
+            f'EKF vel: {ekf_state["vx"]:.3f} m/s'
+        )
+
+    def _publish_ekf_pose(self):
+        """Publish current EKF-estimated pose and trajectory."""
+        if self.current_pose is None:
+            return
+
+        current_time = self.get_clock().now().to_msg()
+
+        # Publish TF transform: {robot_name}/odom -> {robot_name}/base_footprint
+        t = TransformStamped()
+        t.header.stamp = current_time
+        t.header.frame_id = f'{self.robot_name}/odom'
+        t.child_frame_id = f'{self.robot_name}/base_footprint'
+        t.transform.translation.x = self.current_pose['x']
+        t.transform.translation.y = self.current_pose['y']
+        t.transform.translation.z = self.current_pose['z']
+        t.transform.rotation.x = self.current_pose['qx']
+        t.transform.rotation.y = self.current_pose['qy']
+        t.transform.rotation.z = self.current_pose['qz']
+        t.transform.rotation.w = self.current_pose['qw']
+        self.tf_broadcaster.sendTransform(t)
+
+        # Publish current EKF pose
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp = current_time
+        pose_msg.header.frame_id = f'{self.robot_name}/odom'
+        pose_msg.pose.position.x = self.current_pose['x']
+        pose_msg.pose.position.y = self.current_pose['y']
+        pose_msg.pose.position.z = self.current_pose['z']
+        pose_msg.pose.orientation.x = self.current_pose['qx']
+        pose_msg.pose.orientation.y = self.current_pose['qy']
+        pose_msg.pose.orientation.z = self.current_pose['qz']
+        pose_msg.pose.orientation.w = self.current_pose['qw']
+        self.ekf_pose_pub.publish(pose_msg)
+
+        # Add to trajectory path (sample every 10cm to avoid too many points)
+        if len(self.ekf_path.poses) == 0:
+            # First pose
+            self.ekf_path.poses.append(pose_msg)
+        else:
+            last_pose = self.ekf_path.poses[-1]
+            dx = self.current_pose['x'] - last_pose.pose.position.x
+            dy = self.current_pose['y'] - last_pose.pose.position.y
+            dist = np.sqrt(dx**2 + dy**2)
+
+            if dist > 0.1:  # Only add if moved >10cm
+                self.ekf_path.poses.append(pose_msg)
+
+        # Publish trajectory path
+        self.ekf_path.header.stamp = current_time
+        self.ekf_path_pub.publish(self.ekf_path)
 
     def imu_callback(self, msg):
         """IMU callback for EKF"""
@@ -132,27 +234,74 @@ class LocalSubmapGenerator(Node):
             return
 
         omega = msg.angular_velocity.z
+
+        # Log IMU data periodically (every 200th message ~= 1 Hz at 200 Hz IMU)
+        if not hasattr(self, 'imu_count'):
+            self.imu_count = 0
+        self.imu_count += 1
+
+        if self.imu_count % 200 == 0:
+            self.get_logger().info(
+                f'[IMU DEBUG] ω={omega:.3f} rad/s ({np.degrees(omega):.1f}°/s)'
+            )
+
         self.ekf.predict_imu(omega)
 
     def odom_callback(self, msg):
         """Odometry callback"""
-        x = msg.pose.pose.position.x
-        y = msg.pose.pose.position.y
+        x_odom = msg.pose.pose.position.x
+        y_odom = msg.pose.pose.position.y
 
         qx = msg.pose.pose.orientation.x
         qy = msg.pose.pose.orientation.y
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
-        theta = quaternion_to_yaw(qx, qy, qz, qw)
+        theta_odom = quaternion_to_yaw(qx, qy, qz, qw)
 
         # Update EKF with odometry
         vx = msg.twist.twist.linear.x
+        vy = msg.twist.twist.linear.y
+        vtheta = msg.twist.twist.angular.z
 
         if not self.ekf_initialized:
-            self.ekf.initialize(x, y, theta, vx, 0.0)
+            self.ekf.initialize(x_odom, y_odom, theta_odom, vx, 0.0)
             self.ekf_initialized = True
+            self.get_logger().info(
+                f'[EKF INIT] Odom: x={x_odom:.3f}, y={y_odom:.3f}, θ={theta_odom:.3f}, vx={vx:.3f}'
+            )
+            # Note: EKF state is now initialized, will be used below to publish TF
         else:
-            self.ekf.update(x, y, theta, vx)
+            # Store EKF state BEFORE update
+            ekf_state_before = self.ekf.get_state()
+
+            self.ekf.update(x_odom, y_odom, theta_odom, vx)
+
+            # Get EKF state AFTER update
+            ekf_state_after = self.ekf.get_state()
+
+            # Calculate errors
+            error_x = ekf_state_after['x'] - x_odom
+            error_y = ekf_state_after['y'] - y_odom
+            error_theta = ekf_state_after['theta'] - theta_odom
+            error_theta = np.arctan2(np.sin(error_theta), np.cos(error_theta))  # Wrap to [-π, π]
+            error_pos = np.sqrt(error_x**2 + error_y**2)
+
+            # Log every 50th message (~1 Hz at 50 Hz odometry)
+            if self.update_count % 50 == 0:
+                self.get_logger().info(
+                    f'[EKF DEBUG] '
+                    f'Odom: ({x_odom:.3f}, {y_odom:.3f}, {theta_odom:.2f}°) | '
+                    f'EKF: ({ekf_state_after["x"]:.3f}, {ekf_state_after["y"]:.3f}, {np.degrees(ekf_state_after["theta"]):.2f}°) | '
+                    f'Error: {error_pos:.3f}m, {np.degrees(error_theta):.2f}° | '
+                    f'Vel: odom_vx={vx:.3f}, odom_vy={vy:.3f}, odom_ω={vtheta:.3f}'
+                )
+
+            self.update_count += 1
+
+        # Always update current_pose and publish TF after initialization OR update
+
+        # Store last odometry for comparison
+        self.last_odom_pose = {'x': x_odom, 'y': y_odom, 'theta': theta_odom}
 
         # Get state from EKF
         state = self.ekf.get_state()
@@ -167,7 +316,7 @@ class LocalSubmapGenerator(Node):
                 'x': x,
                 'y': y,
                 'z': 0.0,
-                'theta': theta,  
+                'theta': theta,
                 'qx': qx,
                 'qy': qy,
                 'qz': qz,
@@ -179,6 +328,9 @@ class LocalSubmapGenerator(Node):
             if self.submap_start_pose is None:
                 self.submap_start_pose = self.current_pose.copy()
 
+        # Publish EKF pose and TF transform after every odometry update
+        self._publish_ekf_pose()
+
     def scan_callback(self, msg):
         
         if self.current_pose is None:
@@ -186,7 +338,7 @@ class LocalSubmapGenerator(Node):
             return
 
         # Convert scan to world frame using odometry
-        points_world = scan_to_world_points_with_lidar_offset(
+        points_world = transform_scan_to_world_frame(
             msg,
             self.current_pose
         )
@@ -210,27 +362,49 @@ class LocalSubmapGenerator(Node):
                 )
 
                 if pose_correction is not None:
-                    self.current_pose['x'] += pose_correction['dx']
-                    self.current_pose['y'] += pose_correction['dy']
-                    self.current_pose['theta'] += pose_correction['dtheta']
-                    self.current_pose['theta'] = np.arctan2(
-                        np.sin(self.current_pose['theta']),
-                        np.cos(self.current_pose['theta'])
-                    )
+                    # Validate correction magnitude before applying
+                    correction_distance = np.sqrt(pose_correction['dx']**2 + pose_correction['dy']**2)
+                    correction_angle = np.abs(pose_correction['dtheta'])
 
-                    qx, qy, qz, qw = yaw_to_quaternion(self.current_pose['theta'])
-                    self.current_pose['qx'] = qx
-                    self.current_pose['qy'] = qy
-                    self.current_pose['qz'] = qz
-                    self.current_pose['qw'] = qw
+                    # Stricter thresholds: reject large jumps (>20cm or >15 degrees)
+                    if correction_distance < 0.2 and correction_angle < np.radians(15):
+                        # Apply correction through EKF update (not direct addition!)
+                        corrected_x = self.current_pose['x'] + pose_correction['dx']
+                        corrected_y = self.current_pose['y'] + pose_correction['dy']
+                        corrected_theta = self.current_pose['theta'] + pose_correction['dtheta']
+                        corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
 
-                    self.ekf.state[0] = self.current_pose['x']
-                    self.ekf.state[1] = self.current_pose['y']
-                    self.ekf.state[2] = self.current_pose['theta']
+                        # Feed corrected pose as ICP measurement to EKF
+                        # ICP provides high-accuracy measurements, so use 'icp' measurement type
+                        self.ekf.update(corrected_x, corrected_y, corrected_theta, vx_odom=None, measurement_type='icp')
 
-                    self.ekf.P[0, 0] *= 0.5  
-                    self.ekf.P[1, 1] *= 0.5  
-                    self.ekf.P[2, 2] *= 0.5  
+                        # Update current_pose from EKF state
+                        state = self.ekf.get_state()
+                        qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
+
+                        self.current_pose['x'] = state['x']
+                        self.current_pose['y'] = state['y']
+                        self.current_pose['theta'] = state['theta']
+                        self.current_pose['qx'] = qx
+                        self.current_pose['qy'] = qy
+                        self.current_pose['qz'] = qz
+                        self.current_pose['qw'] = qw
+
+                        # Publish updated EKF pose after scan-to-map ICP correction
+                        self._publish_ekf_pose()
+
+                        self.get_logger().debug(
+                            f'Scan-to-map ICP correction applied: '
+                            f'dx={pose_correction["dx"]:.3f}m, dy={pose_correction["dy"]:.3f}m, '
+                            f'dθ={np.degrees(pose_correction["dtheta"]):.2f}°',
+                            throttle_duration_sec=2.0
+                        )
+                    else:
+                        self.get_logger().warn(
+                            f'Scan-to-map ICP correction REJECTED (too large): '
+                            f'dist={correction_distance:.3f}m, angle={np.degrees(correction_angle):.2f}°',
+                            throttle_duration_sec=5.0
+                        )
 
         with self.data_lock:
             self.current_submap_points.append(points_world)
@@ -253,16 +427,43 @@ class LocalSubmapGenerator(Node):
     def create_submap(self):
 
         if len(self.current_submap_points) == 0:
+            self.get_logger().warn('Cannot create submap: no points collected')
             return
 
         with self.data_lock:
-            points = np.vstack(self.current_submap_points)  
+            # Filter out empty arrays before stacking
+            valid_points = [p for p in self.current_submap_points if len(p) > 0]
+
+            if len(valid_points) == 0:
+                self.get_logger().warn('Cannot create submap: all point arrays are empty')
+                return
+
+            # Stack with error handling
+            try:
+                points = np.vstack(valid_points)
+            except ValueError as e:
+                self.get_logger().error(f'Failed to stack submap points: {e}')
+                return
+
+            # Validate minimum point count
+            if len(points) < 50:
+                self.get_logger().warn(f'Submap has too few points ({len(points)}), skipping')
+                return
+
             scan_count = self.scans_in_current_submap
-            end_pose = self.current_pose.copy()  
+            end_pose = self.current_pose.copy()
 
             self.get_logger().info(f'Creating submap {self.submap_id}: {scan_count} scans, {len(points)} points')
 
-            success = self.stitcher.add_and_stitch_submap(
+            # Publish current submap for visualization (yellow in RViz)
+            submap_msg = numpy_to_pointcloud2(
+                points,
+                f'{self.robot_name}/odom',
+                self.get_clock().now().to_msg()
+            )
+            self.current_submap_pub.publish(submap_msg)
+
+            success, pose_correction = self.stitcher.integrate_submap_to_global_map(
                 points=points,
                 submap_id=self.submap_id,
                 start_pose=self.submap_start_pose,
@@ -271,6 +472,49 @@ class LocalSubmapGenerator(Node):
             )
 
             if success:
+                # Apply submap-to-map ICP correction to robot pose
+                if pose_correction is not None:
+                    # Validate correction magnitude (already validated in stitcher, but double-check)
+                    correction_distance = np.sqrt(pose_correction['dx']**2 + pose_correction['dy']**2)
+                    correction_angle = np.abs(pose_correction['dtheta'])
+
+                    # Submap ICP corrections are typically larger, so use more lenient thresholds
+                    if correction_distance < 0.5 and correction_angle < np.radians(20):
+                        # Apply correction through EKF update (not direct addition!)
+                        corrected_x = self.current_pose['x'] + pose_correction['dx']
+                        corrected_y = self.current_pose['y'] + pose_correction['dy']
+                        corrected_theta = self.current_pose['theta'] + pose_correction['dtheta']
+                        corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
+
+                        # Feed corrected pose as ICP measurement to EKF
+                        # ICP provides high-accuracy measurements, so use 'icp' measurement type
+                        # The Kalman filter will automatically adjust covariance based on R_icp
+                        self.ekf.update(corrected_x, corrected_y, corrected_theta, vx_odom=None, measurement_type='icp')
+
+                        # Update current_pose from EKF state
+                        state = self.ekf.get_state()
+                        qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
+
+                        self.current_pose['x'] = state['x']
+                        self.current_pose['y'] = state['y']
+                        self.current_pose['theta'] = state['theta']
+                        self.current_pose['qx'] = qx
+                        self.current_pose['qy'] = qy
+                        self.current_pose['qz'] = qz
+                        self.current_pose['qw'] = qw
+
+                        self.get_logger().info(
+                            f'Applied submap ICP correction: dx={pose_correction["dx"]:.3f}m, '
+                            f'dy={pose_correction["dy"]:.3f}m, dθ={np.degrees(pose_correction["dtheta"]):.2f}°'
+                        )
+
+                        # Publish updated EKF pose after submap-to-map ICP correction
+                        self._publish_ekf_pose()
+                    else:
+                        self.get_logger().warn(
+                            f'Submap ICP correction REJECTED (too large): '
+                            f'dist={correction_distance:.3f}m, angle={np.degrees(correction_angle):.2f}°'
+                        )
 
                 global_points = self.stitcher.get_global_map_points()
                 global_size = len(global_points) if global_points is not None else 0
@@ -283,11 +527,11 @@ class LocalSubmapGenerator(Node):
                     map_file = os.path.join(self.save_dir, 'global_map.pcd')
                     self.stitcher.save_global_map(map_file)
 
-                # Publish global map for visualization and navigation
                 publish_global_map(
                     global_points,
                     self.global_map_pub,
-                    self.get_clock()
+                    self.get_clock(),
+                    frame_id=f'{self.robot_name}/odom'
                 )
 
             # Reset for next submap - use same pose as end_pose for continuity

@@ -20,10 +20,11 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     TimerAction,
-    LogInfo
+    LogInfo,
+    OpaqueFunction
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -127,10 +128,16 @@ def generate_launch_description():
     # ========================================================================
     robot_name = 'tb3_1'
 
-    # Get Gazebo world name (from world parameter, default to maze)
-    # This needs to be resolved at runtime, so we'll use a default
-    # In production, extract from world parameter properly
-    gazebo_world_name = 'maze_world'  # Will be dynamically set based on world arg
+    # Map world name to Gazebo world name
+    # For Python string operations, we use the map. For launch substitutions, we build dynamically.
+    world_name_map = {
+        'maze': 'maze_world',
+        'park': 'park_world'
+    }
+    # Default to maze_world for Python operations (bridge config)
+    gazebo_world_name_str = 'maze_world'
+    # For spawn command, use dynamic substitution
+    gazebo_world_name_dynamic = [world_name, '_world']
 
     # Prepare robot SDF with substitutions
     with open(robot_sdf, 'r') as f:
@@ -140,6 +147,24 @@ def generate_launch_description():
     robot_sdf_content = robot_sdf_content.replace('package://multi_robot_mapping/meshes', f'file://{mesh_path}')
     robot_sdf_content = robot_sdf_content.replace('{robot_name}', robot_name)
 
+    # Replace gz_frame_id for sensors to add namespace (for proper TF tree)
+    robot_sdf_content = robot_sdf_content.replace(
+        '<gz_frame_id>base_scan</gz_frame_id>',
+        f'<gz_frame_id>{robot_name}/base_scan</gz_frame_id>'
+    )
+
+    # Fix DiffDrive plugin child_frame_id to include robot namespace
+    # This prevents odometry from accumulating in wrong coordinate frame
+    robot_sdf_content = robot_sdf_content.replace(
+        '<child_frame_id>base_footprint</child_frame_id>',
+        f'<child_frame_id>{robot_name}/base_footprint</child_frame_id>'
+    )
+
+    # Debug: Save modified SDF for inspection
+    debug_sdf_path = f'/tmp/{robot_name}_spawned.sdf'
+    with open(debug_sdf_path, 'w') as f:
+        f.write(robot_sdf_content)
+
     # Spawn robot at corner position
     spawn_robot = Node(
         package='ros_gz_sim',
@@ -147,7 +172,7 @@ def generate_launch_description():
         name=f'spawn_{robot_name}',
         output='screen',
         arguments=[
-            '-world', gazebo_world_name,
+            '-world', gazebo_world_name_dynamic,
             '-name', robot_name,
             '-string', robot_sdf_content,
             '-x', '-12.0',
@@ -162,7 +187,7 @@ def generate_launch_description():
         template_content = f.read()
 
     config_content = template_content.replace('{robot_name}', robot_name)
-    config_content = config_content.replace('{world_name}', gazebo_world_name)
+    config_content = config_content.replace('{world_name}', gazebo_world_name_str)
 
     temp_config = f'/tmp/{robot_name}_bridge.yaml'
     with open(temp_config, 'w') as f:
@@ -194,9 +219,11 @@ def generate_launch_description():
         remappings=[('/joint_states', f'/{robot_name}/joint_states')]
     )
 
+    # Spawn robot FIRST - EKF needs sensor data to initialize!
+    # Robot must be spawned and publishing sensor data before EKF can start
     robot_spawn_delayed = TimerAction(
-        period=4.0,
-        actions=[spawn_robot, robot_bridge, robot_state_publisher]
+        period=2.0,  # Spawn robot early so sensor data is available for EKF
+        actions=[spawn_robot, robot_state_publisher, robot_bridge]
     )
 
     # ========================================================================
@@ -208,9 +235,9 @@ def generate_launch_description():
         name=f'{robot_name}_submap_generator',
         output='screen',
         parameters=[{
+            'use_sim_time': True,  # CRITICAL: Use Gazebo simulation time for TF timestamps
             'robot_name': robot_name,
             'scans_per_submap': 50,  # 50 scans @ 8.5Hz = ~6s = ~1.2m at 0.2 m/s (OPTIMIZED for real-time!)
-            'min_distance_between_submaps': 1.0,  # 1.0m for faster updates
             'save_directory': './submaps',
             'voxel_size': 0.08,  # 8cm voxel - coarser but faster processing
             'feature_method': 'hybrid',
@@ -219,7 +246,8 @@ def generate_launch_description():
         }]
     )
 
-    submap_generator_delayed = TimerAction(period=7.0, actions=[submap_generator])
+    # Start EKF AFTER robot has spawned and is publishing sensor data
+    submap_generator_delayed = TimerAction(period=4.0, actions=[submap_generator])
 
     # ========================================================================
     # 5. NAVIGATION: FRONTIER EXPLORATION
@@ -230,13 +258,15 @@ def generate_launch_description():
         name=f'{robot_name}_navigation',
         output='screen',
         parameters=[{
+            'use_sim_time': True,  # Use Gazebo simulation time
             'robot_name': robot_name,
             'robot_radius': 0.22
         }],
         condition=launch.conditions.IfCondition(enable_navigation)
     )
 
-    navigation_delayed = TimerAction(period=15.0, actions=[navigation_node])
+    # Start navigation AFTER EKF has initialized and published initial map
+    navigation_delayed = TimerAction(period=8.0, actions=[navigation_node])
 
     # ========================================================================
     # 6. RVIZ VISUALIZATION (Per-Robot)
@@ -249,10 +279,16 @@ def generate_launch_description():
         namespace='tb3_1',
         arguments=['-d', rviz_config_tb3_1],
         output='screen',
+        parameters=[{'use_sim_time': True}],  # Use Gazebo simulation time
         condition=launch.conditions.IfCondition(use_rviz)
     )
 
-    rviz_delayed = TimerAction(period=8.0, actions=[rviz_node_tb3_1])
+    # RVIZ starts after both robot and EKF are running
+    # Starts at t=6s to ensure TF tree is fully established:
+    #   t=2s: Robot spawns, robot_state_publisher starts
+    #   t=4s: EKF starts, begins publishing odom->base_footprint TF
+    #   t=6s: RViz starts with full TF tree available
+    rviz_delayed = TimerAction(period=6.0, actions=[rviz_node_tb3_1])
 
     # NOTE: For tb3_2, launch separately with:
     # ros2 run rviz2 rviz2 -d /path/to/tb3_2_visualization.rviz
@@ -276,12 +312,18 @@ def generate_launch_description():
         LogInfo(msg='========================================'),
 
         # Components (timed sequence)
+        # t=0s:   Gazebo simulation starts
+        # t=1s:   Clock bridge starts
+        # t=2s:   Robot spawns (sensor data now available)
+        # t=4s:   EKF/mapping starts (can now consume sensor data)
+        # t=6s:   RViz starts (TF tree fully established)
+        # t=8s:   Navigation starts (map available)
         gazebo_server,
-        clock_bridge_delayed,
-        robot_spawn_delayed,
-        submap_generator_delayed,
-        rviz_delayed,
-        navigation_delayed,
+        clock_bridge_delayed,          # t=1s
+        robot_spawn_delayed,           # t=2s - Robot FIRST
+        submap_generator_delayed,      # t=4s - EKF after robot
+        rviz_delayed,                  # t=6s
+        navigation_delayed,            # t=8s
 
         LogInfo(msg='✓ System launching...'),
     ])

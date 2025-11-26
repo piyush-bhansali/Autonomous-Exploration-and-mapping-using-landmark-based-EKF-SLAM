@@ -10,11 +10,19 @@
   gz_type_name: "gz.msgs.Odometry"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/tf"
-  gz_topic_name: "/model/{robot_name}/tf"
-  ros_type_name: "tf2_msgs/msg/TFMessage"
-  gz_type_name: "gz.msgs.Pose_V"
-  direction: GZ_TO_ROS
+# TF bridge DISABLED - Causes conflicts with EKF-based TF publishing
+# The DiffDrive plugin publishes TF with non-namespaced frame names (odom -> base_footprint)
+# which creates an orphaned frame that doesn't connect to the robot model.
+# Our EKF node publishes properly namespaced TF (odom -> tb3_1/base_footprint) instead.
+# Keeping this commented out ensures:
+#   - Single authority for robot localization (EKF with sensor fusion)
+#   - Proper multi-robot namespace support
+#   - No TF conflicts or orphaned frames
+# - ros_topic_name: "/tf"
+#   gz_topic_name: "/model/{robot_name}/tf"
+#   ros_type_name: "tf2_msgs/msg/TFMessage"
+#   gz_type_name: "gz.msgs.Pose_V"
+#   direction: GZ_TO_ROS
 
 - ros_topic_name: "/{robot_name}/imu"
   gz_topic_name: "/world/{world_name}/model/{robot_name}/imu"

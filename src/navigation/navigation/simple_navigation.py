@@ -13,6 +13,7 @@ import struct
 from enum import Enum
 
 from navigation.simple_frontiers import SimpleFrontierDetector
+from map_generation.utils import quaternion_to_yaw
 from navigation.simple_rrt import SimpleRRTStar
 from navigation.smoothed_pure_pursuit import SmoothedPurePursuit
 
@@ -33,6 +34,7 @@ class SimpleNavigationNode(Node):
         super().__init__('simple_navigation')
 
         # Parameters
+        # NOTE: use_sim_time is automatically declared by ROS 2, don't declare it again!
         self.declare_parameter('robot_name', 'tb3_1')
         self.declare_parameter('robot_radius', 0.22)
         self.robot_name = self.get_parameter('robot_name').value
@@ -124,10 +126,12 @@ class SimpleNavigationNode(Node):
             msg.pose.pose.position.y
         ])
 
-        # Extract yaw from quaternion
-        qw = msg.pose.pose.orientation.w
+        # Extract yaw from quaternion using utility function
+        qx = msg.pose.pose.orientation.x
+        qy = msg.pose.pose.orientation.y
         qz = msg.pose.pose.orientation.z
-        self.robot_yaw = 2 * np.arctan2(qz, qw)
+        qw = msg.pose.pose.orientation.w
+        self.robot_yaw = quaternion_to_yaw(qx, qy, qz, qw)
 
     def control_loop(self):
         """Main control loop"""

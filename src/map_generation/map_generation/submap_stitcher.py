@@ -14,7 +14,7 @@ class SubmapStitcher:
     
     def __init__(self,
                  voxel_size: float = 0.05,
-                 icp_max_correspondence_dist: float = 0.10,
+                 icp_max_correspondence_dist: float = 0.1,
                  icp_fitness_threshold: float = 0.45,
                  feature_extraction_method: str = 'hybrid',
                  enable_loop_closure: bool = False):
@@ -76,17 +76,7 @@ class SubmapStitcher:
             print(f"  ✗ Feature extraction failed for submap {submap_id}: {e}")
             return None
 
-    def compute_submap_bounds(self, pcd_tensor: o3d.t.geometry.PointCloud) -> Dict:
-
-        points = pcd_tensor.point.positions.cpu().numpy()
-        return {
-            'min_x': float(points[:, 0].min()),
-            'max_x': float(points[:, 0].max()),
-            'min_y': float(points[:, 1].min()),
-            'max_y': float(points[:, 1].max())
-        }
-
-    def register_icp_2d(self,
+    def align_submap_with_icp(self,
                        source: o3d.t.geometry.PointCloud,
                        target: o3d.t.geometry.PointCloud,
                        initial_guess: Optional[np.ndarray] = None) -> Tuple[bool, np.ndarray, float]:
@@ -108,9 +98,9 @@ class SubmapStitcher:
             init_source_to_target=init_transform,
             estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
             criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
-                max_iteration=100,  # Reduced from 200 for speed
-                relative_fitness=1e-6,  #
-                relative_rmse=1e-6      # Stop when RMSE improvement < 0.0001%
+                max_iteration=100, 
+                relative_fitness=1e-6,  
+                relative_rmse=1e-6     
             )
         )
 
@@ -123,20 +113,18 @@ class SubmapStitcher:
 
         return success, transform, reg_result.fitness
 
-    def add_and_stitch_submap(self,
-                             points: np.ndarray,
-                             submap_id: int,
-                             start_pose: dict,
-                             end_pose: dict,
-                             scan_count: int) -> bool:
+    def integrate_submap_to_global_map(self,
+                                       points: np.ndarray,
+                                       submap_id: int,
+                                       start_pose: dict,
+                                       end_pose: dict,
+                                       scan_count: int) -> Tuple[bool, Optional[dict]]:
 
-        # Process submap (returns GPU tensor)
         pcd_tensor = self.process_submap(points, submap_id)
 
         if len(pcd_tensor.point.positions) < 50:
-            return False
+            return False, None
 
-        # Compute submap center pose
         pose_center = {
             'x': (start_pose['x'] + end_pose['x']) / 2,
             'y': (start_pose['y'] + end_pose['y']) / 2,
@@ -147,22 +135,16 @@ class SubmapStitcher:
             'qw': end_pose['qw']
         }
 
-        # Extract features only if loop closure is enabled (convert to legacy only if needed)
         features = None
         if self.enable_loop_closure:
             pcd_legacy = pcd_tensor.to_legacy()
             features = self.extract_features(pcd_legacy, submap_id)
 
-        # Compute bounds (works with tensor)
-        bounds = self.compute_submap_bounds(pcd_tensor)
-
-        # First submap: initialize global map
         if submap_id == 0:
-            # Points are already in world frame and already a GPU tensor - just copy
-            self.global_map_tensor = pcd_tensor
-            initial_transform = np.eye(4)  # Identity (no transform needed for world frame)
 
-            # Store submap (convert to legacy only for storage)
+            self.global_map_tensor = pcd_tensor
+            initial_transform = np.eye(4)
+
             submap_data = {
                 'id': submap_id,
                 'point_cloud': pcd_tensor.to_legacy(),  # Only convert for storage
@@ -172,7 +154,6 @@ class SubmapStitcher:
                 'pose_center': pose_center,
                 'global_transform': initial_transform,
                 'scan_count': scan_count,
-                'bounds': bounds,
                 'timestamp_created': time.time()
             }
 
@@ -186,61 +167,77 @@ class SubmapStitcher:
                     np.array([pose_center['x'], pose_center['y']])
                 )
 
-            return True
+            return True, None  # No correction for first submap
 
-        initial_transform = np.eye(4)  
-        success, final_transform, fitness = self.register_icp_2d(
+        # Use odometry-based initial guess from previous submap's end pose to current end pose
+        # This provides strong prior information for ICP, preventing corridor sliding!
+        prev_submap = self.submaps[-1]
+        prev_end_pose = prev_submap['pose_end']
+
+        # Import the function from mapping_utils
+        from map_generation.mapping_utils import estimate_transform_from_poses
+        initial_transform = estimate_transform_from_poses(prev_end_pose, end_pose)
+
+        success, icp_refinement, fitness = self.align_submap_with_icp(
             source=pcd_tensor,
             target=self.global_map_tensor,
-            initial_guess=initial_transform  
+            initial_guess=initial_transform  # Use odometry-based guess, not identity!
         )
 
-        # Check if transform is reasonable (not too large)
-        translation = np.linalg.norm(final_transform[:2, 3])
-        rotation = np.abs(np.arctan2(final_transform[1, 0], final_transform[0, 0]))
+        # ICP returns refinement transform relative to initial_guess
+        # Final transform = initial_guess (from odometry) composed with ICP refinement
+        # Since ICP already applies initial_guess internally, icp_refinement is the TOTAL transform
+        final_transform = icp_refinement
 
-        # Reject if correction is unreasonably large (indicates ICP failure)
-        if translation > 2.0 or rotation > np.radians(30):  # 2m or 30 degrees
-            final_transform = np.eye(4)
+        # Calculate ICP correction (difference from odometry prediction)
+        icp_correction = np.linalg.inv(initial_transform) @ final_transform
+        correction_translation = np.linalg.norm(icp_correction[:2, 3])
+        correction_rotation = np.abs(np.arctan2(icp_correction[1, 0], icp_correction[0, 0]))
+
+        if correction_translation > 0.5 or correction_rotation > np.radians(10):  # ICP correction too large
+            final_transform = initial_transform  # Reject ICP, use odometry
             success = False
-            print(f"  ✗ ICP rejected: t={translation:.3f}m, r={np.degrees(rotation):.1f}° too large")
+            print(f"  ✗ ICP correction rejected: Δt={correction_translation:.3f}m, Δr={np.degrees(correction_rotation):.1f}° too large")
 
-        # Use consistent fitness threshold
         if not success or fitness < self.icp_fitness_threshold:
-            final_transform = np.eye(4)
-            print(f"  ✗ ICP failed: fitness={fitness:.3f} < {self.icp_fitness_threshold}")
+            final_transform = initial_transform  # Reject ICP, use odometry
+            print(f"  ✗ ICP failed: fitness={fitness:.3f} < {self.icp_fitness_threshold}, using odometry")
         else:
-            print(f"  ✓ ICP drift correction: t={translation:.3f}m, r={np.degrees(rotation):.1f}°, fitness={fitness:.3f}")
+            print(f"  ✓ ICP refined odometry: Δt={correction_translation:.3f}m, Δr={np.degrees(correction_rotation):.1f}°, fitness={fitness:.3f}")
 
-        # Transform submap to align with drift-corrected global map
+        # Extract pose correction for robot pose update (relative to odometry)
+        pose_correction = None
+        if success and correction_translation > 0.01:  # Only if non-trivial correction (>1cm)
+            pose_correction = {
+                'dx': icp_correction[0, 3],
+                'dy': icp_correction[1, 3],
+                'dtheta': np.arctan2(icp_correction[1, 0], icp_correction[0, 0])
+            }
+
         transform_tensor = o3c.Tensor(final_transform, dtype=o3c.float32, device=self.device)
         pcd_aligned_tensor = pcd_tensor.transform(transform_tensor)
 
-        # Store submap (convert to legacy only for storage)
         submap_data = {
             'id': submap_id,
-            'point_cloud': pcd_tensor.to_legacy(),  # Only convert for storage
+            'point_cloud': pcd_aligned_tensor.to_legacy(),  # Store ICP-aligned version
             'features': features,
             'pose_start': start_pose,
             'pose_end': end_pose,
             'pose_center': pose_center,
             'global_transform': final_transform,
             'scan_count': scan_count,
-            'bounds': bounds,
             'timestamp_created': time.time()
         }
 
         self.submaps.append(submap_data)
         self.transforms.append(final_transform)
 
-        # Add to loop closure spatial index
         if self.loop_closure_detector is not None:
             self.loop_closure_detector.add_submap_to_index(
                 submap_id,
                 np.array([pose_center['x'], pose_center['y']])
             )
 
-        # Check for loop closure (skip entirely if disabled for performance)
         if self.enable_loop_closure:
             if features is not None:
                 loop_closure = self.loop_closure_detector.detect_loop_closure(
@@ -252,7 +249,6 @@ class SubmapStitcher:
                 if loop_closure is not None:
                     print(f"  ✓ Loop closure: submap {submap_id} ↔ {loop_closure['match_id']}")
 
-                    # Apply loop closure correction via pose graph optimization
                     optimized = self._optimize_pose_graph_with_loop_closure(
                         current_id=submap_id,
                         loop_match_id=loop_closure['match_id'],
@@ -271,7 +267,7 @@ class SubmapStitcher:
 
         self.global_map_tensor, _ = self.global_map_tensor.remove_statistical_outliers(nb_neighbors=10, std_ratio=3.0)
 
-        return True
+        return True, pose_correction
 
     def save_global_map(self, filepath: str):
         """Save the global map with final cleanup"""

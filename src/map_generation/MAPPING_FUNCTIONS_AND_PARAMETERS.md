@@ -61,8 +61,7 @@ def __init__(self):
 | `odom_callback()` | Process odometry for EKF update |
 | `scan_callback()` | Process LiDAR scans, apply ICP correction |
 | `should_create_submap()` | Check if submap creation criteria met |
-| `create_submap()` | Create and stitch new submap |
-| `publish_current_submap()` | Publish global map for visualization |
+| `create_submap()` | Create and stitch new submap 
 | `shutdown()` | Clean shutdown, save final map |
 
 #### Key Workflow

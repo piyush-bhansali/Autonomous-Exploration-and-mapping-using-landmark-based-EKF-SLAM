@@ -1,0 +1,231 @@
+═══════════════════════════════════════════════════════════════════════════
+                    TF PUBLISHING FLOW DIAGRAM
+═══════════════════════════════════════════════════════════════════════════
+
+CURRENT STATE (BROKEN - Multiple publishers for same transform)
+─────────────────────────────────────────────────────────────────────────
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                        GAZEBO SIMULATION                            │
+│                                                                     │
+│  ┌──────────────────┐     ┌──────────────────┐                    │
+│  │  Wheel Encoders  │ --> │ DiffDrive Plugin │                    │
+│  └──────────────────┘     └──────────────────┘                    │
+│           │                        │                               │
+│           │                        │                               │
+│           v                        v                               │
+│    Dead Reckoning            TF Publishing                         │
+│    x += v*cos(θ)*dt         odom -> base_footprint ❌             │
+│    y += v*sin(θ)*dt         (NO NAMESPACE!)                        │
+│    θ += ω*dt                                                        │
+└─────────────────────────────────────────────────────────────────────┘
+                │                           │
+                │                           │
+                v                           v
+        ┌───────────────┐          ┌────────────────┐
+        │ /tb3_1/odom   │          │     /tf        │
+        │ (nav_msgs/    │          │ (TF Message)   │
+        │  Odometry)    │          │                │
+        └───────────────┘          └────────────────┘
+                │                           │
+                │                           │
+                │                           └──> ORPHANED!
+                │                                 No children
+                │                                 because names
+                │                                 don't match!
+                │
+                v
+        ┌──────────────────────────────────────────────────────┐
+        │              YOUR EKF NODE                           │
+        │                                                      │
+        │  INPUT:  /tb3_1/odom  (wheel odometry)              │
+        │  INPUT:  /tb3_1/imu   (angular velocity)            │
+        │  INPUT:  ICP corrections (from mapping)              │
+        │                                                      │
+        │  ┌────────────┐    ┌──────────────┐                │
+        │  │ Prediction │ -> │    Update    │ -> ┌─────────┐ │
+        │  │ (IMU-based)│    │ (Odom-based) │    │ Output  │ │
+        │  └────────────┘    └──────────────┘    │  Pose   │ │
+        │                           ^             └─────────┘ │
+        │                           │                   │     │
+        │                    ┌──────────────┐          │     │
+        │                    │ICP Correction│          │     │
+        │                    │ (Map-based)  │          │     │
+        │                    └──────────────┘          │     │
+        │                                              │     │
+        │  PUBLISHES: odom -> tb3_1/base_footprint ✅ │     │
+        └──────────────────────────────────────────────┼─────┘
+                                                       │
+                                                       v
+                                               ┌────────────────┐
+                                               │     /tf        │
+                                               └────────────────┘
+                                                       │
+                                                       │
+                ┌──────────────────────────────────────┘
+                │
+                v
+        ┌──────────────────────────────────────────────────────┐
+        │          ROBOT STATE PUBLISHER                       │
+        │                                                      │
+        │  INPUT: URDF (turtlebot3_waffle_pi.urdf)            │
+        │  INPUT: /tb3_1/joint_states (wheel positions)        │
+        │                                                      │
+        │  PUBLISHES (all with tb3_1/ prefix):                │
+        │    tb3_1/base_footprint -> tb3_1/base_link          │
+        │    tb3_1/base_link -> tb3_1/wheel_left_link         │
+        │    tb3_1/base_link -> tb3_1/wheel_right_link        │
+        │    tb3_1/base_link -> tb3_1/imu_link                │
+        │    tb3_1/base_link -> tb3_1/base_scan               │
+        │    tb3_1/base_link -> tb3_1/camera_link             │
+        │    (and camera sub-frames...)                        │
+        └──────────────────────────────────────────────────────┘
+                                │
+                                v
+                        ┌────────────────┐
+                        │     /tf        │
+                        └────────────────┘
+                                │
+                                │
+        ┌───────────────────────┴───────────────────────┐
+        │                                               │
+        v                                               v
+┌──────────────┐                                ┌──────────────────┐
+│    RVIZ      │                                │ NAVIGATION NODE  │
+│              │                                │                  │
+│ Fixed Frame: │                                │ Needs TF for:    │
+│    odom      │                                │ - Robot pose     │
+│              │                                │ - Sensor frames  │
+│ Uses:        │                                │                  │
+│ - Robot Model│                                │ Uses EKF + RSP   │
+│ - LaserScan  │                                │ TF chain ✅      │
+│ - PointClouds│                                │                  │
+└──────────────┘                                └──────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════
+              AFTER FIX (Single authority per transform)
+═══════════════════════════════════════════════════════════════════════════
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                        GAZEBO SIMULATION                            │
+│                                                                     │
+│  ┌──────────────────┐     ┌──────────────────┐                    │
+│  │  Wheel Encoders  │ --> │ DiffDrive Plugin │                    │
+│  └──────────────────┘     └──────────────────┘                    │
+│           │                        │                               │
+│           │                        X TF DISABLED                   │
+│           v                                                         │
+│    Dead Reckoning                                                   │
+│    Odometry Message Only                                            │
+└─────────────────────────────────────────────────────────────────────┘
+                │
+                │
+                v
+        ┌───────────────┐
+        │ /tb3_1/odom   │
+        │ (nav_msgs/    │  Topic only, no TF
+        │  Odometry)    │
+        └───────────────┘
+                │
+                │
+                v
+        ┌──────────────────────────────────────────────────────┐
+        │              YOUR EKF NODE                           │
+        │                                                      │
+        │  ┌─────────────────────────────────────────┐        │
+        │  │  Sensor Fusion:                         │        │
+        │  │  - Wheel Odometry (position)            │        │
+        │  │  - IMU (angular velocity)               │        │
+        │  │  - ICP (drift correction)               │        │
+        │  │                                         │        │
+        │  │  Result: Optimal pose estimate          │        │
+        │  └─────────────────────────────────────────┘        │
+        │                                                      │
+        │  PUBLISHES: odom -> tb3_1/base_footprint            │
+        │             (SINGLE AUTHORITY) ✅                    │
+        └──────────────────────────────────────────────────────┘
+                                │
+                                v
+                        ┌────────────────┐
+                        │     /tf        │
+                        └────────────────┘
+                                │
+                                │
+        ┌───────────────────────┴─────────────────────────────┐
+        │                                                     │
+        v                                                     v
+┌──────────────────────────────────────┐    ┌──────────────────────────────┐
+│    ROBOT STATE PUBLISHER             │    │      YOUR MAPPING CODE       │
+│                                      │    │                              │
+│ PUBLISHES (downstream from EKF):     │    │ Transforms scans manually    │
+│   tb3_1/base_footprint ->            │    │ using EKF pose dict          │
+│     tb3_1/base_link ->               │    │                              │
+│       tb3_1/wheel_left_link          │    │ Publishes point clouds       │
+│       tb3_1/wheel_right_link         │    │ in 'odom' frame              │
+│       tb3_1/imu_link                 │    │                              │
+│       tb3_1/base_scan (LiDAR)        │    │ No TF lookups needed ✅      │
+│       tb3_1/camera_link              │    │                              │
+│         tb3_1/camera_rgb_frame       │    └──────────────────────────────┘
+│           tb3_1/camera_rgb_optical   │                   │
+│                                      │                   │
+│ (SINGLE AUTHORITY for each) ✅       │                   │
+└──────────────────────────────────────┘                   │
+                    │                                      │
+                    v                                      │
+            ┌────────────────┐                             │
+            │     /tf        │                             │
+            └────────────────┘                             │
+                    │                                      │
+                    │                                      │
+        ┌───────────┴──────────────┬───────────────────────┘
+        │                          │
+        v                          v
+┌──────────────────┐     ┌─────────────────────┐
+│      RVIZ        │     │   NAVIGATION NODE   │
+│                  │     │                     │
+│ Fixed: odom      │     │ Uses complete TF    │
+│                  │     │ tree from odom to   │
+│ CONNECTED TREE:  │     │ all sensor frames   │
+│                  │     │                     │
+│ odom             │     │ Robot always knows  │
+│  └─tb3_1/base... │     │ where it is! ✅     │
+│    └─tb3_1/base..│     │                     │
+│      └─sensors   │     └─────────────────────┘
+│                  │
+│ Robot model and  │
+│ sensor data move │
+│ together! ✅     │
+└──────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════
+                      DATA FLOW SUMMARY
+═══════════════════════════════════════════════════════════════════════════
+
+┌────────────────────┐
+│  Gazebo Simulation │
+│  (Physics Engine)  │
+└──────────┬─────────┘
+           │
+           ├─> Wheel Joint States ──> robot_state_publisher ──> TF (robot links)
+           │
+           ├─> Odometry Topic ──> EKF ──> TF (odom->base_footprint) ✅
+           │
+           ├─> IMU Data ──> EKF ──┘
+           │
+           └─> LaserScan ──> Your Mapping ──> ICP ──> EKF ──┘
+
+
+KEY INSIGHT:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Gazebo provides SENSOR DATA (odometry, IMU, scans)
+Your EKF provides ROBOT LOCALIZATION (fuses all sensors)
+Robot State Publisher provides ROBOT GEOMETRY (link transforms)
+
+Each has ONE JOB. No overlap. No conflicts. Clean architecture. ✅
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

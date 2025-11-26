@@ -9,10 +9,11 @@ import open3d.core as o3c
 
 from map_generation.utils import quaternion_to_rotation_matrix, quaternion_to_yaw, numpy_to_pointcloud2
 
-def scan_to_world_points_with_lidar_offset(
+def transform_scan_to_world_frame(
     scan_msg,
     pose: dict
 ) -> np.ndarray:
+    """Transform laser scan to world frame considering LiDAR mounting offset."""
 
     lidar_offset = np.array([-0.064, 0.0, 0.121])
 
@@ -241,15 +242,7 @@ def publish_global_map(
     clock,
     frame_id: str = 'odom'
 ) -> None:
-    """
-    Publish the complete stitched global map for visualization and navigation.
-
-    Args:
-        global_points: Nx3 numpy array of [x,y,z] points (or None)
-        publisher: ROS2 publisher for PointCloud2 messages
-        clock: ROS2 clock for timestamping
-        frame_id: Coordinate frame for the point cloud (default: 'odom')
-    """
+    
     if global_points is not None and len(global_points) > 0:
         # Publish in odom frame (ICP-corrected points)
         pc2_msg = numpy_to_pointcloud2(
