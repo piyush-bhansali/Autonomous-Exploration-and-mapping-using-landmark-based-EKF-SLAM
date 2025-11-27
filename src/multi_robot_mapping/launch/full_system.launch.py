@@ -153,6 +153,13 @@ def generate_launch_description():
         f'<gz_frame_id>{robot_name}/base_scan</gz_frame_id>'
     )
 
+    # Fix DiffDrive plugin frame_id to include robot namespace
+    # This ensures odometry message uses namespaced frame
+    robot_sdf_content = robot_sdf_content.replace(
+        '<frame_id>odom</frame_id>',
+        f'<frame_id>{robot_name}/odom</frame_id>'
+    )
+
     # Fix DiffDrive plugin child_frame_id to include robot namespace
     # This prevents odometry from accumulating in wrong coordinate frame
     robot_sdf_content = robot_sdf_content.replace(

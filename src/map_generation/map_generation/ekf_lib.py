@@ -16,25 +16,28 @@ class EKF:
         self.vy = 0.0
 
         # Measurement noise covariance (from odometry)
-        # Tuned for Gazebo simulation - odometry is quite accurate
+        # Tuned for Gazebo simulation - odometry is highly accurate
+        # Values are variance (σ²), not standard deviation
         self.R_odom = np.diag([
-            0.01,   # x: 10 cm std (odometry position accuracy)
-            0.01,   # y: 10 cm std
-            0.02    # theta: 0.14 rad (~8°) - reduced from 0.05 for better orientation tracking
+            0.0001,  # x position variance: 0.0001 m² (σ = 1cm)
+            0.0001,  # y position variance: 0.0001 m²
+            0.001    # theta variance: 0.001 rad² (σ = 0.032 rad ≈ 1.8°)
         ])
 
         # Measurement noise for ICP corrections (higher confidence)
         self.R_icp = np.diag([
-            0.005,  # x: 5 mm std (ICP is very accurate)
-            0.005,  # y: 5 mm std
-            0.01    # theta: 0.1 rad (~6°)
+            0.00005,  # x: 5 mm std (ICP is very accurate)
+            0.00005,  # y: 5 mm std
+            0.0001    # theta: 0.1 rad (~6°)
         ])
 
-        
+        # Process noise covariance (from IMU predictions)
+        # Applied at ~200 Hz, so per-update noise must be very small
+        # Values are variance (σ²) added per prediction step
         self.Q_imu = np.diag([
-            0.01,   
-            0.01,   
-            0.02   
+            0.00001,  # x position process variance: 0.00001 m² per update (σ = 0.1cm per 5ms)
+            0.00001,  # y position process variance: 0.00001 m²
+            0.0001    # theta process variance: 0.0001 rad² per update (σ = 0.01 rad ≈ 0.6°)
         ])
 
         # Initialization flag
