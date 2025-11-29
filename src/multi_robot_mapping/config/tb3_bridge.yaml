@@ -25,7 +25,7 @@
 #   direction: GZ_TO_ROS
 
 - ros_topic_name: "/{robot_name}/imu"
-  gz_topic_name: "/world/{world_name}/model/{robot_name}/imu"
+  gz_topic_name: "/world/{world_name}/model/{robot_name}/link/imu_link/sensor/tb3_imu/imu"
   ros_type_name: "sensor_msgs/msg/Imu"
   gz_type_name: "gz.msgs.IMU"
   direction: GZ_TO_ROS

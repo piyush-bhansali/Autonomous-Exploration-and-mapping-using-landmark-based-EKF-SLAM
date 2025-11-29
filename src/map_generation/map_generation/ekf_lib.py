@@ -1,10 +1,18 @@
 import numpy as np
-import time
 
 
 class EKF:
-    
-    def __init__(self):
+
+    def __init__(self, get_time_func=None):
+        """
+        Initialize EKF.
+
+        Args:
+            get_time_func: Function that returns current time in seconds.
+                          Should return simulation time, not wall clock time.
+                          If None, will require dt to be passed to predict_imu().
+        """
+        self.get_time_func = get_time_func
         
         # State vector: [x, y, theta]
         self.state = np.zeros(3)
@@ -16,28 +24,37 @@ class EKF:
         self.vy = 0.0
 
         # Measurement noise covariance (from odometry)
-        # Tuned for Gazebo simulation - odometry is highly accurate
+        # Tuned for Gazebo simulation - odometry is nearly perfect
         # Values are variance (σ²), not standard deviation
+        # Very small values → High Kalman gain → EKF tracks measurements closely
         self.R_odom = np.diag([
-            0.0001,  # x position variance: 0.0001 m² (σ = 1cm)
-            0.0001,  # y position variance: 0.0001 m²
-            0.001    # theta variance: 0.001 rad² (σ = 0.032 rad ≈ 1.8°)
+            0.000001,  # x position variance: 0.000001 m² (σ = 1mm)
+            0.000001,  # y position variance: 0.000001 m²
+            0.00001    # theta variance: 0.00001 rad² (σ = 0.003 rad ≈ 0.18°)
         ])
 
-        # Measurement noise for ICP corrections (higher confidence)
+        # Measurement noise for ICP corrections (very high confidence)
+        # ICP corrections are small and accurate - trust them highly
         self.R_icp = np.diag([
-            0.00005,  # x: 5 mm std (ICP is very accurate)
-            0.00005,  # y: 5 mm std
-            0.0001    # theta: 0.1 rad (~6°)
+            0.000001,  # x: 1mm std (ICP is very accurate in simulation)
+            0.000001,  # y: 1mm std
+            0.00001    # theta: 0.003 rad (≈ 0.18°)
         ])
 
         # Process noise covariance (from IMU predictions)
         # Applied at ~200 Hz, so per-update noise must be very small
         # Values are variance (σ²) added per prediction step
+        #
+        # CRITICAL: These values control how much uncertainty grows during predictions.
+        # If too small → P collapses → Kalman gain ≈ 0 → Filter ignores measurements
+        # If too large → P explodes → Filter becomes unstable
+        #
+        # With cmd_vel velocity source, predictions should be accurate, but we still need
+        # some process noise to prevent P from collapsing to zero.
         self.Q_imu = np.diag([
-            0.00001,  # x position process variance: 0.00001 m² per update (σ = 0.1cm per 5ms)
-            0.00001,  # y position process variance: 0.00001 m²
-            0.0001    # theta process variance: 0.0001 rad² per update (σ = 0.01 rad ≈ 0.6°)
+            0.0001,   # x position process variance: 0.0001 m² per update (σ = 0.316mm per 5ms)
+            0.0001,   # y position process variance: 0.0001 m²
+            0.001     # theta process variance: 0.001 rad² per update (σ = 0.0316 rad ≈ 1.8°)
         ])
 
         # Initialization flag
@@ -53,29 +70,37 @@ class EKF:
         self.last_update_time = None 
 
     def initialize(self, x, y, theta, vx, vy):
-        
+
         self.state = np.array([x, y, theta])
         self.vx = vx
         self.vy = vy
         self.initialized = True
-        self.last_prediction_time = time.time()
-        self.last_update_time = time.time()
+        if self.get_time_func is not None:
+            self.last_prediction_time = self.get_time_func()
+            self.last_update_time = self.get_time_func()
+        else:
+            self.last_prediction_time = None
+            self.last_update_time = None
 
     def predict_imu(self, omega, dt=None):
-        
+
         if not self.initialized:
             return  # Silently return if not initialized yet
 
         # Auto-calculate dt if not provided
         if dt is None:
-            current_time = time.time()
-            if self.last_prediction_time is not None:
-                dt = current_time - self.last_prediction_time
-                if dt > 0.1 or dt <= 0:
+            if self.get_time_func is not None:
+                current_time = self.get_time_func()
+                if self.last_prediction_time is not None:
+                    dt = current_time - self.last_prediction_time
+                    if dt > 0.1 or dt <= 0:
+                        dt = 0.005  # Default to 200 Hz
+                else:
                     dt = 0.005  # Default to 200 Hz
+                self.last_prediction_time = current_time
             else:
-                dt = 0.005  # Default to 200 Hz
-            self.last_prediction_time = current_time
+                # No time function provided, must pass dt explicitly
+                raise ValueError("dt must be provided if get_time_func is None")
 
         x, y, theta = self.state
 
@@ -172,7 +197,8 @@ class EKF:
 
         self.update_count += 1
         self.consecutive_predictions_without_update = 0  # Reset drift watchdog
-        self.last_update_time = time.time()
+        if self.get_time_func is not None:
+            self.last_update_time = self.get_time_func()
 
     def get_state(self):
         

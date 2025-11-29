@@ -73,7 +73,6 @@ class SubmapStitcher:
             return features
 
         except Exception as e:
-            print(f"  ✗ Feature extraction failed for submap {submap_id}: {e}")
             return None
 
     def align_submap_with_icp(self,
@@ -169,19 +168,13 @@ class SubmapStitcher:
 
             return True, None  # No correction for first submap
 
-        # Use odometry-based initial guess from previous submap's end pose to current end pose
-        # This provides strong prior information for ICP, preventing corridor sliding!
-        prev_submap = self.submaps[-1]
-        prev_end_pose = prev_submap['pose_end']
-
-        # Import the function from mapping_utils
-        from map_generation.mapping_utils import estimate_transform_from_poses
-        initial_transform = estimate_transform_from_poses(prev_end_pose, end_pose)
+        # Points are already in world frame, use identity for ICP
+        initial_transform = np.eye(4)
 
         success, icp_refinement, fitness = self.align_submap_with_icp(
             source=pcd_tensor,
             target=self.global_map_tensor,
-            initial_guess=initial_transform  # Use odometry-based guess, not identity!
+            initial_guess=initial_transform
         )
 
         # ICP returns refinement transform relative to initial_guess
@@ -197,13 +190,9 @@ class SubmapStitcher:
         if correction_translation > 0.5 or correction_rotation > np.radians(10):  # ICP correction too large
             final_transform = initial_transform  # Reject ICP, use odometry
             success = False
-            print(f"  ✗ ICP correction rejected: Δt={correction_translation:.3f}m, Δr={np.degrees(correction_rotation):.1f}° too large")
 
         if not success or fitness < self.icp_fitness_threshold:
             final_transform = initial_transform  # Reject ICP, use odometry
-            print(f"  ✗ ICP failed: fitness={fitness:.3f} < {self.icp_fitness_threshold}, using odometry")
-        else:
-            print(f"  ✓ ICP refined odometry: Δt={correction_translation:.3f}m, Δr={np.degrees(correction_rotation):.1f}°, fitness={fitness:.3f}")
 
         # Extract pose correction for robot pose update (relative to odometry)
         pose_correction = None

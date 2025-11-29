@@ -56,8 +56,6 @@ class LoopClosureDetector:
         
         self.stats['num_checks'] += 1
 
-        print(f"\n🔍 Two-stage loop closure check for submap {current_submap['id']}...")
-
         # Stage 1: Spatial + Scan Context Pre-filtering
         candidates = self._stage1_coarse_matching(
             current_submap,
@@ -66,11 +64,9 @@ class LoopClosureDetector:
         )
 
         if len(candidates) == 0:
-            print("  Stage 1: No candidates found")
             return None
 
         self.stats['num_candidates'] += len(candidates)
-        print(f"  Stage 1: Found {len(candidates)} candidates from Scan Context")
 
         # Stage 2: Geometric Feature Verification
         loop_closure = self._stage2_fine_verification(
@@ -80,7 +76,6 @@ class LoopClosureDetector:
 
         if loop_closure is not None:
             self.stats['num_accepted'] += 1
-            print(f"  ✓ Loop closure confirmed: submap {current_submap['id']} ↔ submap {loop_closure['match_id']}")
 
         return loop_closure
 
@@ -99,7 +94,6 @@ class LoopClosureDetector:
 
         # Check if hybrid features available
         if 'scan_context' not in current_features:
-            print("  ⚠ No Scan Context features available")
             return candidates
 
         sc_current = current_features['scan_context']
@@ -157,7 +151,6 @@ class LoopClosureDetector:
 
         # Check if geometric features available
         if 'geometric' not in current_features or len(current_features['geometric']) == 0:
-            print("  ⚠ No geometric features for verification")
             return None
 
         geom_current = current_features['geometric']
@@ -167,9 +160,6 @@ class LoopClosureDetector:
         for i, candidate in enumerate(candidates):
             candidate_submap = candidate['submap']
 
-            print(f"  Stage 2: Verifying candidate {i+1}/{len(candidates)} "
-                  f"(submap {candidate_submap['id']}, similarity={candidate['similarity']:.3f})")
-
             # Get candidate geometric features
             if candidate_submap['features'] is None:
                 continue
@@ -177,7 +167,6 @@ class LoopClosureDetector:
             candidate_features = candidate_submap['features']
 
             if 'geometric' not in candidate_features or len(candidate_features['geometric']) == 0:
-                print("    ⚠ Candidate has no geometric features")
                 continue
 
             geom_candidate = candidate_features['geometric']
@@ -186,10 +175,7 @@ class LoopClosureDetector:
             matches = match_geometric_features(geom_current, geom_candidate)
 
             if len(matches) < self.min_feature_matches:
-                print(f"    ✗ Too few matches: {len(matches)} < {self.min_feature_matches}")
                 continue
-
-            print(f"    ✓ Found {len(matches)} geometric feature matches")
 
             # Get keypoint correspondences
             current_keypoint_indices = current_features['keypoint_indices']
@@ -215,7 +201,6 @@ class LoopClosureDetector:
                         target_pts.append(candidate_points[tgt_pt_idx])
 
             if len(source_pts) < self.min_feature_matches:
-                print(f"    ✗ Too few valid correspondences: {len(source_pts)}")
                 continue
 
             source_pts = np.array(source_pts)
@@ -227,10 +212,7 @@ class LoopClosureDetector:
             num_inliers = np.sum(inliers)
             inlier_ratio = num_inliers / len(inliers)
 
-            print(f"    RANSAC: {num_inliers}/{len(inliers)} inliers ({inlier_ratio*100:.1f}%)")
-
             if num_inliers < self.min_feature_matches:
-                print(f"    ✗ Too few RANSAC inliers")
                 continue
 
             # ICP: Refine transformation
@@ -239,8 +221,6 @@ class LoopClosureDetector:
                 candidate_submap['point_cloud'],
                 transform
             )
-
-            print(f"    ICP: fitness={fitness:.3f}")
 
             if fitness >= self.icp_fitness_threshold:
                 self.stats['num_verified'] += 1
@@ -254,8 +234,6 @@ class LoopClosureDetector:
                     'scan_context_similarity': candidate['similarity'],
                     'method': 'two_stage_scan_context_geometric_ransac_icp'
                 }
-            else:
-                print(f"    ✗ ICP fitness too low: {fitness:.3f} < {self.icp_fitness_threshold}")
 
         return None
 

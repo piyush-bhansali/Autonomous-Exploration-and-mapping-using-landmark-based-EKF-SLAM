@@ -104,7 +104,7 @@ def generate_launch_description():
             ])
         ]),
         launch_arguments={
-            'gz_args': [world_file, ' -r -v 4'],
+            'gz_args': [world_file, ' -r -v 2'],  # v2=WARN, v3=INFO, v4=DEBUG
             'on_exit_shutdown': 'true'
         }.items()
     )
@@ -166,11 +166,6 @@ def generate_launch_description():
         '<child_frame_id>base_footprint</child_frame_id>',
         f'<child_frame_id>{robot_name}/base_footprint</child_frame_id>'
     )
-
-    # Debug: Save modified SDF for inspection
-    debug_sdf_path = f'/tmp/{robot_name}_spawned.sdf'
-    with open(debug_sdf_path, 'w') as f:
-        f.write(robot_sdf_content)
 
     # Spawn robot at corner position
     spawn_robot = Node(

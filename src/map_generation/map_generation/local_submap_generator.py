@@ -5,7 +5,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField, JointState
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Header
 from tf2_ros import TransformBroadcaster
@@ -57,8 +57,9 @@ class LocalSubmapGenerator(Node):
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
 
-        # Initialize EKF
-        self.ekf = EKF()
+        # Initialize EKF with simulation time function
+        # Pass a lambda that returns current ROS time in seconds
+        self.ekf = EKF(get_time_func=lambda: self.get_clock().now().nanoseconds / 1e9)
         self.ekf_initialized = False
 
         # Store latest raw odometry for ICP correction
@@ -108,6 +109,14 @@ class LocalSubmapGenerator(Node):
             10
         )
 
+        # Subscribe to cmd_vel for velocity commands (used for EKF predictions)
+        self.cmd_vel_sub = self.create_subscription(
+            Twist,
+            f'/{self.robot_name}/cmd_vel',
+            self.cmd_vel_callback,
+            10
+        )
+
         self.current_submap_pub = self.create_publisher(
             PointCloud2,
             f'/{self.robot_name}/current_submap',
@@ -140,7 +149,6 @@ class LocalSubmapGenerator(Node):
         self.current_submap_points = []
         self.submap_id = 0
         self.data_lock = Lock()
-        self.update_count = 0  # For debug logging rate limiting
 
         # Scan counting for submap creation
         self.scans_in_current_submap = 0
@@ -148,9 +156,6 @@ class LocalSubmapGenerator(Node):
 
         # Timer to publish global map at 1 Hz for visualization
         self.create_timer(1.0, self._publish_global_map_callback)
-
-        # Timer for debug statistics (2 Hz)
-        self.create_timer(0.5, self._debug_statistics_callback)
 
         # Store last odometry for comparison
         self.last_odom_pose = None
@@ -163,29 +168,6 @@ class LocalSubmapGenerator(Node):
             self.global_map_pub,
             self.get_clock(),
             frame_id=f'{self.robot_name}/odom'
-        )
-
-    def _debug_statistics_callback(self):
-        """Periodic debug output comparing EKF vs Odometry"""
-        if not self.ekf_initialized or self.last_odom_pose is None:
-            return
-
-        ekf_state = self.ekf.get_state()
-        ekf_uncertainty = self.ekf.get_uncertainty()
-
-        # Calculate error vs last odometry
-        error_x = ekf_state['x'] - self.last_odom_pose['x']
-        error_y = ekf_state['y'] - self.last_odom_pose['y']
-        error_theta = ekf_state['theta'] - self.last_odom_pose['theta']
-        error_theta = np.arctan2(np.sin(error_theta), np.cos(error_theta))
-        error_pos = np.sqrt(error_x**2 + error_y**2)
-
-        self.get_logger().info(
-            f'[EKF STATUS] '
-            f'Position Error: {error_pos*1000:.1f}mm | '
-            f'Angle Error: {np.degrees(error_theta):.2f}° | '
-            f'Uncertainty: σ_pos={ekf_uncertainty["sigma_x"]*1000:.1f}mm, σ_θ={np.degrees(ekf_uncertainty["sigma_theta"]):.1f}° | '
-            f'EKF vel: {ekf_state["vx"]:.3f} m/s'
         )
 
     def _publish_ekf_pose(self):
@@ -240,81 +222,40 @@ class LocalSubmapGenerator(Node):
         self.ekf_path_pub.publish(self.ekf_path)
 
     def imu_callback(self, msg):
-        """IMU callback for EKF"""
+        """IMU callback for EKF prediction"""
         if not self.ekf_initialized:
             return
 
         omega = msg.angular_velocity.z
 
-        # Log IMU data periodically (every 200th message ~= 1 Hz at 200 Hz IMU)
-        if not hasattr(self, 'imu_count'):
-            self.imu_count = 0
-        self.imu_count += 1
-
-        if self.imu_count % 200 == 0:
-            self.get_logger().info(
-                f'[IMU DEBUG] ω={omega:.3f} rad/s ({np.degrees(omega):.1f}°/s)'
-            )
-
+        # EKF PREDICTION STEP: Propagate state using IMU
         self.ekf.predict_imu(omega)
 
     def joint_states_callback(self, msg):
-        """Monitor wheel joint velocities for debugging"""
-        if not hasattr(self, 'joint_count'):
-            self.joint_count = 0
-            self.joint_last_log_time = self.get_clock().now()
+        """Monitor wheel joint velocities (disabled - no longer needed)"""
+        # Removed verbose wheel velocity logging - odometry data is sufficient
+        pass
 
-        self.joint_count += 1
+    def cmd_vel_callback(self, msg):
+        """
+        Cmd_vel callback - updates EKF velocity for predictions.
 
-        # Log wheel velocities every 2 seconds
-        current_time = self.get_clock().now()
-        time_since_last_log = (current_time - self.joint_last_log_time).nanoseconds / 1e9
+        We use COMMANDED velocity (cmd_vel) for EKF predictions, not odometry velocity.
+        Reason: Odometry velocity is calculated from position derivatives, which:
+        - Lags behind actual motion (calculated AFTER robot moves)
+        - Has quantization noise
+        - Doesn't reflect intended motion during acceleration
 
-        if time_since_last_log >= 2.0:
-            # TurtleBot3 has wheel_left_joint and wheel_right_joint
-            # Joint names should be in msg.name, velocities in msg.velocity
-            try:
-                left_idx = msg.name.index('wheel_left_joint')
-                right_idx = msg.name.index('wheel_right_joint')
-
-                left_vel = msg.velocity[left_idx]  # rad/s
-                right_vel = msg.velocity[right_idx]  # rad/s
-
-                # Calculate expected linear/angular velocities from wheel speeds
-                # For differential drive: v = r * (ωL + ωR) / 2, ω = r * (ωR - ωL) / L
-                wheel_radius = 0.033  # meters (from SDF)
-                wheel_separation = 0.287  # meters (from SDF)
-
-                expected_linear_vel = wheel_radius * (left_vel + right_vel) / 2.0
-                expected_angular_vel = wheel_radius * (right_vel - left_vel) / wheel_separation
-
-                self.get_logger().info(
-                    f'[WHEEL VEL] left={left_vel:.3f} rad/s, right={right_vel:.3f} rad/s'
-                )
-                self.get_logger().info(
-                    f'[WHEEL CALC] Expected: v={expected_linear_vel:.3f} m/s, '
-                    f'ω={expected_angular_vel:.3f} rad/s ({np.degrees(expected_angular_vel):.1f}°/s)'
-                )
-
-                self.joint_last_log_time = current_time
-            except (ValueError, IndexError) as e:
-                if self.joint_count == 1:  # Only log once to avoid spam
-                    self.get_logger().warn(
-                        f'[WHEEL VEL] Could not find wheel joints: {msg.name}'
-                    )
+        Cmd_vel represents the INTENDED motion, which is better for predictions.
+        Odometry position is still used for corrections via EKF updates.
+        """
+        # Update velocity BEFORE EKF initialization
+        # This ensures velocity is available when EKF starts
+        self.ekf.vx = msg.linear.x
+        self.ekf.vy = msg.linear.y
 
     def odom_callback(self, msg):
         """Odometry callback"""
-        # Add detailed odometry debugging
-        if not hasattr(self, 'odom_count'):
-            self.odom_count = 0
-            self.odom_last_log_time = self.get_clock().now()
-            self.odom_first_pose = None
-            self.odom_last_pose = None
-            self.odom_last_timestamp = None
-
-        self.odom_count += 1
-
         x_odom = msg.pose.pose.position.x
         y_odom = msg.pose.pose.position.y
 
@@ -328,57 +269,6 @@ class LocalSubmapGenerator(Node):
         vx = msg.twist.twist.linear.x
         vy = msg.twist.twist.linear.y
         vtheta = msg.twist.twist.angular.z
-
-        # Track first pose for total distance calculation
-        if self.odom_first_pose is None:
-            self.odom_first_pose = (x_odom, y_odom, theta_odom)
-
-        # Calculate change since last odometry message
-        odom_delta_dist = 0.0
-        odom_delta_time = 0.0
-        if self.odom_last_pose is not None and self.odom_last_timestamp is not None:
-            dx = x_odom - self.odom_last_pose[0]
-            dy = y_odom - self.odom_last_pose[1]
-            odom_delta_dist = np.sqrt(dx**2 + dy**2)
-
-            # Calculate time delta
-            current_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
-            last_stamp = self.odom_last_timestamp
-            odom_delta_time = current_stamp - last_stamp
-
-        # Store current pose for next iteration
-        self.odom_last_pose = (x_odom, y_odom, theta_odom)
-        self.odom_last_timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
-
-        # Log raw odometry message every 2 seconds
-        current_time = self.get_clock().now()
-        time_since_last_log = (current_time - self.odom_last_log_time).nanoseconds / 1e9
-        if time_since_last_log >= 2.0:
-            # Calculate total distance traveled from start
-            total_x_dist = x_odom - self.odom_first_pose[0]
-            total_y_dist = y_odom - self.odom_first_pose[1]
-            total_odom_dist = np.sqrt(total_x_dist**2 + total_y_dist**2)
-
-            self.get_logger().info(
-                f'[ODOM RAW] frame_id={msg.header.frame_id}, '
-                f'child_frame_id={msg.child_frame_id}'
-            )
-            self.get_logger().info(
-                f'[ODOM RAW] pos=({x_odom:.3f}, {y_odom:.3f}), '
-                f'θ={np.degrees(theta_odom):.2f}°, '
-                f'vel=({vx:.3f}, {vy:.3f}) m/s, ω={vtheta:.3f} rad/s'
-            )
-            self.get_logger().info(
-                f'[ODOM RAW] Total dist from start: {total_odom_dist:.3f}m, '
-                f'Count: {self.odom_count}'
-            )
-            if odom_delta_time > 0:
-                self.get_logger().info(
-                    f'[ODOM RAW] Delta: {odom_delta_dist:.4f}m in {odom_delta_time:.3f}s, '
-                    f'avg speed: {odom_delta_dist/odom_delta_time:.3f} m/s'
-                )
-
-            self.odom_last_log_time = current_time
 
         # Store latest raw odometry for scan transformation and ICP correction
         # This is BEFORE EKF filtering, so it's the direct sensor measurement
@@ -398,41 +288,16 @@ class LocalSubmapGenerator(Node):
             self.ekf.initialize(x_odom, y_odom, theta_odom, vx, 0.0)
             self.ekf_initialized = True
             self.get_logger().info(
-                f'[EKF INIT] Odom: x={x_odom:.3f}, y={y_odom:.3f}, θ={theta_odom:.3f}, vx={vx:.3f}'
+                f'EKF initialized at odom pose: ({x_odom:.3f}, {y_odom:.3f}, {np.degrees(theta_odom):.2f}°)'
             )
-            # Note: EKF state is now initialized, will be used below to publish TF
         else:
-            # Store EKF state BEFORE update
-            ekf_state_before = self.ekf.get_state()
+            # NOTE: We NO LONGER update velocity from odometry!
+            # Velocity now comes from cmd_vel callback (commanded velocity)
+            # Odometry is only used for position/orientation corrections
 
-            self.ekf.update(x_odom, y_odom, theta_odom, vx)
-
-            # Get EKF state AFTER update
-            ekf_state_after = self.ekf.get_state()
-
-            # Calculate errors
-            error_x = ekf_state_after['x'] - x_odom
-            error_y = ekf_state_after['y'] - y_odom
-            error_theta = ekf_state_after['theta'] - theta_odom
-            error_theta = np.arctan2(np.sin(error_theta), np.cos(error_theta))  # Wrap to [-π, π]
-            error_pos = np.sqrt(error_x**2 + error_y**2)
-
-            # Log every 50th message (~1 Hz at 50 Hz odometry)
-            if self.update_count % 50 == 0:
-                self.get_logger().info(
-                    f'[EKF DEBUG] '
-                    f'Odom: ({x_odom:.3f}, {y_odom:.3f}, {theta_odom:.2f}°) | '
-                    f'EKF: ({ekf_state_after["x"]:.3f}, {ekf_state_after["y"]:.3f}, {np.degrees(ekf_state_after["theta"]):.2f}°) | '
-                    f'Error: {error_pos:.3f}m, {np.degrees(error_theta):.2f}° | '
-                    f'Vel: odom_vx={vx:.3f}, odom_vy={vy:.3f}, odom_ω={vtheta:.3f}'
-                )
-
-            self.update_count += 1
-
-        # Always update current_pose and publish TF after initialization OR update
-
-        # Store last odometry for comparison
-        self.last_odom_pose = {'x': x_odom, 'y': y_odom, 'theta': theta_odom}
+            # EKF UPDATE STEP: Feed odometry measurement (position/orientation only)
+            # Velocity comes from cmd_vel, not odometry
+            self.ekf.update(x_odom, y_odom, theta_odom, vx_odom=None)
 
         # Get state from EKF
         state = self.ekf.get_state()
@@ -529,15 +394,6 @@ class LocalSubmapGenerator(Node):
 
                         # Publish updated EKF pose after scan-to-map ICP correction
                         self._publish_ekf_pose()
-
-                        self.get_logger().info(
-                            f'[ICP CORRECTION] Applied to odometry: '
-                            f'dx={pose_correction["dx"]:.3f}m, dy={pose_correction["dy"]:.3f}m, '
-                            f'dθ={np.degrees(pose_correction["dtheta"]):.2f}° | '
-                            f'Odom: ({self.latest_odom_pose["x"]:.3f}, {self.latest_odom_pose["y"]:.3f}) → '
-                            f'Corrected: ({corrected_x:.3f}, {corrected_y:.3f})',
-                            throttle_duration_sec=2.0
-                        )
                     else:
                         self.get_logger().warn(
                             f'Scan-to-map ICP correction REJECTED (too large): '
