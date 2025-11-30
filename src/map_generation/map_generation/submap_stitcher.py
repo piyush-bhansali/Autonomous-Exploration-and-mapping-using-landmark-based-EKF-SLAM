@@ -254,7 +254,9 @@ class SubmapStitcher:
 
         self.global_map_tensor = self.global_map_tensor.voxel_down_sample(self.voxel_size)
 
-        self.global_map_tensor, _ = self.global_map_tensor.remove_statistical_outliers(nb_neighbors=10, std_ratio=3.0)
+        # DISABLED: Aggressive statistical outlier removal was progressively deleting sparse wall points
+        # Walls are naturally sparse (2D surfaces) so they get flagged as "outliers" after many cycles
+        # self.global_map_tensor, _ = self.global_map_tensor.remove_statistical_outliers(nb_neighbors=10, std_ratio=3.0)
 
         return True, pose_correction
 

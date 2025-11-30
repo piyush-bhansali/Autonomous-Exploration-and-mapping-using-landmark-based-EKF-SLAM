@@ -8,18 +8,25 @@ class SmoothedPurePursuit:
     
 
     def __init__(self,
-                 lookahead_distance: float = 1.2,
-                 linear_velocity: float = 0.2,
+                 lookahead_distance: float = 0.6,
+                 max_linear_velocity: float = 0.2,
+                 min_linear_velocity: float = 0.1,
                  max_angular_velocity: float = 0.8,
                  angular_smoothing_factor: float = 0.3,
-                 goal_tolerance: float = 0.3):
-        
+                 goal_tolerance: float = 0.3,
+                 velocity_gain: float = 0.5):
+
+        # BUG FIX #7: Validate smoothing factor is in valid range [0, 1]
+        if not (0.0 <= angular_smoothing_factor <= 1.0):
+            raise ValueError(f"angular_smoothing_factor must be in [0, 1], got {angular_smoothing_factor}")
 
         self.lookahead = lookahead_distance
-        self.v = linear_velocity  # CONSTANT - never varies!
+        self.v_max = max_linear_velocity  # Maximum linear velocity
+        self.v_min = min_linear_velocity  # Minimum linear velocity
         self.max_w = max_angular_velocity
         self.alpha = angular_smoothing_factor
         self.goal_tolerance = goal_tolerance
+        self.velocity_gain = velocity_gain  # How much to reduce velocity on turns
 
         # State variables for smoothing
         self.omega_smooth = 0.0  # Smoothed angular velocity
@@ -54,8 +61,19 @@ class SmoothedPurePursuit:
             self.omega_smooth = 0.0
             return 0.0, 0.0
 
-        # Compute DESIRED angular velocity (raw pure pursuit output)
-        omega_desired = self._compute_steering(robot_pos, robot_yaw, lookahead_point)
+        # First compute adaptive velocity based on previous smoothed angular velocity
+        # ADAPTIVE VELOCITY: Slow down on sharp turns
+        # v = v_max * (1 - k * |ω|) where k = velocity_gain
+        # Higher angular velocity → lower linear velocity
+        omega_magnitude = abs(self.omega_smooth)
+        velocity_scale = 1.0 - self.velocity_gain * (omega_magnitude / self.max_w)
+        velocity_scale = np.clip(velocity_scale, 0.5, 1.0)  # Keep between 50% and 100% speed
+
+        v_adaptive = self.v_max * velocity_scale
+        v_adaptive = np.clip(v_adaptive, self.v_min, self.v_max)
+
+        # Compute DESIRED angular velocity using ADAPTIVE velocity (not v_max)
+        omega_desired = self._compute_steering(robot_pos, robot_yaw, lookahead_point, v_adaptive)
 
         # Clamp desired angular velocity to kinematic limits
         omega_desired = np.clip(omega_desired, -self.max_w, self.max_w)
@@ -69,8 +87,8 @@ class SmoothedPurePursuit:
         # Update statistics
         self._update_stats(omega_change)
 
-        # Return CONSTANT linear velocity + SMOOTHED angular velocity
-        return self.v, self.omega_smooth
+        # Return ADAPTIVE linear velocity + SMOOTHED angular velocity
+        return v_adaptive, self.omega_smooth
 
     def _find_lookahead_point(self,
                              robot_pos: np.ndarray,
@@ -95,8 +113,9 @@ class SmoothedPurePursuit:
     def _compute_steering(self,
                          robot_pos: np.ndarray,
                          robot_yaw: float,
-                         target_point: np.ndarray) -> float:
-       
+                         target_point: np.ndarray,
+                         current_velocity: float = None) -> float:
+
         # Vector from robot to target
         dx = target_point[0] - robot_pos[0]
         dy = target_point[1] - robot_pos[1]
@@ -114,11 +133,16 @@ class SmoothedPurePursuit:
         distance = np.sqrt(dx**2 + dy**2)
 
         # Pure pursuit formula: ω = v * (2*sin(α)/L)
-        if distance > 0.01:  # Avoid division by zero
-            curvature = (2.0 * np.sin(alpha)) / distance
-            angular_velocity = self.v * curvature
-        else:
-            angular_velocity = 0.0
+        # BUG FIX #5: Increased safety margin from 0.01m to 0.05m to prevent numerical instability
+        if distance < 0.05:  # 5cm safety margin
+            return 0.0
+
+        curvature = (2.0 * np.sin(alpha)) / distance
+
+        # BUG FIX #6: Use actual velocity for curvature calculation, not v_max
+        # If no velocity provided, use v_max as fallback
+        velocity = current_velocity if current_velocity is not None else self.v_max
+        angular_velocity = velocity * curvature
 
         return angular_velocity
 
@@ -147,6 +171,6 @@ class SmoothedPurePursuit:
         return {
             **self.stats,
             'smoothing_factor': self.alpha,
-            'constant_velocity': self.v,
+            'max_velocity': self.v_max,
             'current_omega_smooth': self.omega_smooth
         }

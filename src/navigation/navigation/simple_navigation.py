@@ -11,10 +11,11 @@ from visualization_msgs.msg import Marker, MarkerArray
 import numpy as np
 import struct
 from enum import Enum
+import threading
 
 from navigation.simple_frontiers import SimpleFrontierDetector
 from map_generation.utils import quaternion_to_yaw
-from navigation.simple_rrt import SimpleRRTStar
+from navigation.rrt_star import RRTStar
 from navigation.smoothed_pure_pursuit import SmoothedPurePursuit
 
 
@@ -51,15 +52,33 @@ class SimpleNavigationNode(Node):
         self.current_goal = None
         self.all_frontiers = []  # Store all detected frontiers for continuous visualization
 
+        # BUG FIX #14: Stuck detection
+        self.stuck_detection_enabled = True
+        self.stuck_check_window = 5.0  # seconds to check for movement
+        self.stuck_distance_threshold = 0.1  # meters - must move at least this far
+        self.last_stuck_check_time = None
+        self.last_stuck_check_position = None
+        self.stuck_timeout = 30.0  # seconds - max time in EXECUTE_PATH state
+        self.execute_path_start_time = None
+
+        # BUG FIX #15: Thread safety for map updates
+        self.map_lock = threading.Lock()
+
+        # Dynamic replanning thresholds
+        self.replan_score_threshold = 0.30  # Replan if new frontier score improves by >30% (increased from 15% to prevent oscillation)
+        self.replan_distance_threshold = 3.0  # Replan if new frontier is >3m closer
+
         # Components (created when map received)
         self.frontier_detector = SimpleFrontierDetector(self.robot_radius)
         self.path_planner = None
         self.controller = SmoothedPurePursuit(
-            lookahead_distance=1.2,
-            linear_velocity=0.2,
+            lookahead_distance=0.6,
+            max_linear_velocity=0.2,
+            min_linear_velocity=0.1,
             max_angular_velocity=0.8,
             angular_smoothing_factor=0.3,
-            goal_tolerance=0.3
+            goal_tolerance=0.3,
+            velocity_gain=0.5
         )
 
         # QoS for map
@@ -89,7 +108,6 @@ class SimpleNavigationNode(Node):
         self.cmd_pub = self.create_publisher(Twist, f'/{self.robot_name}/cmd_vel', 10)
         self.frontier_markers_pub = self.create_publisher(MarkerArray, f'/{self.robot_name}/frontier_markers', 10)
         self.path_pub = self.create_publisher(Path, f'/{self.robot_name}/planned_path', 10)
-        self.goal_marker_pub = self.create_publisher(Marker, f'/{self.robot_name}/current_goal', 10)
 
         # Control timer (10 Hz)
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -104,15 +122,17 @@ class SimpleNavigationNode(Node):
         if len(points) < 100:
             return  # Need minimum map size
 
-        self.map_points = points
+        # BUG FIX #15: Use lock to prevent race condition with control loop
+        with self.map_lock:
+            self.map_points = points
 
-        # Create/update path planner
-        self.path_planner = SimpleRRTStar(
-            self.map_points,
-            robot_radius=self.robot_radius,
-            step_size=0.8,
-            goal_bias=0.5
-        )
+            # Create/update path planner
+            self.path_planner = RRTStar(
+                self.map_points,
+                robot_radius=self.robot_radius,
+                step_size=0.4,
+                goal_bias=0.5
+            )
 
         # Transition from WAIT_FOR_MAP if needed
         if self.state == State.WAIT_FOR_MAP:
@@ -165,89 +185,193 @@ class SimpleNavigationNode(Node):
 
     def _handle_detect_frontiers(self):
         """Detect frontiers and select best one"""
-        if self.map_points is None:
+        # BUG FIX #15: Acquire lock when reading map_points
+        with self.map_lock:
+            map_points_copy = self.map_points.copy() if self.map_points is not None else None
+
+        if map_points_copy is None:
             return
 
-        self.get_logger().info(f'Detecting frontiers (map: {len(self.map_points)} points)')
+        self.get_logger().info(f'[STATE: DETECT_FRONTIERS] Map: {len(map_points_copy)} points, Explored: {len(self.explored_positions)} positions')
 
         # Detect frontiers
-        frontiers = self.frontier_detector.detect(self.map_points, self.robot_pos)
+        frontiers = self.frontier_detector.detect(map_points_copy, self.robot_pos, self.robot_yaw)
 
         # Store for continuous visualization
         self.all_frontiers = frontiers
 
         if len(frontiers) == 0:
-            self.get_logger().warn('No frontiers found - exploration complete?')
+            self.get_logger().warn('[STATE: DETECT_FRONTIERS] No frontiers found - exploration complete')
             self.state = State.DONE
             return
 
-        # Filter out explored frontiers
-        unexplored = [
-            f for f in frontiers
-            if all(np.linalg.norm(f.position - exp_pos) > 1.0
-                   for exp_pos in self.explored_positions)
-        ]
+        self.get_logger().info(f'[STATE: DETECT_FRONTIERS] Found {len(frontiers)} total frontiers')
+
+        # Filter out explored frontiers (use 2.0m threshold to avoid revisiting)
+        unexplored = []
+        for f in frontiers:
+            min_dist_to_explored = float('inf')
+            for exp_pos in self.explored_positions:
+                dist = np.linalg.norm(f.position - exp_pos)
+                min_dist_to_explored = min(min_dist_to_explored, dist)
+
+            if min_dist_to_explored > 2.0 or len(self.explored_positions) == 0:
+                unexplored.append(f)
+            else:
+                self.get_logger().debug(f'  Frontier at [{f.position[0]:.2f}, {f.position[1]:.2f}] too close to explored position (dist={min_dist_to_explored:.2f}m)')
 
         if len(unexplored) == 0:
-            self.get_logger().warn('All frontiers explored')
+            self.get_logger().warn(f'[STATE: DETECT_FRONTIERS] All {len(frontiers)} frontiers already explored (within 2.0m of {len(self.explored_positions)} explored positions)')
+            for i, exp_pos in enumerate(self.explored_positions):
+                self.get_logger().warn(f'  Explored position #{i+1}: [{exp_pos[0]:.2f}, {exp_pos[1]:.2f}]')
             self.state = State.DONE
             return
+
+        self.get_logger().info(f'[STATE: DETECT_FRONTIERS] {len(unexplored)} unexplored frontiers available (filtered {len(frontiers) - len(unexplored)})')
 
         # Select best frontier
         best_frontier = unexplored[0]
         self.current_goal = best_frontier.position
 
         self.get_logger().info(
-            f'Selected frontier at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}] '
+            f'[STATE: DETECT_FRONTIERS] Selected frontier #{1} at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}] '
             f'(score={best_frontier.score:.3f})'
         )
 
         # Transition to planning
         self.state = State.PLAN_PATH
+        self.get_logger().info('[STATE: DETECT_FRONTIERS → PLAN_PATH]')
 
     def _handle_plan_path(self):
         """Plan path to current goal"""
-        if self.path_planner is None:
+        # BUG FIX #15: Acquire lock when accessing path_planner
+        with self.map_lock:
+            path_planner = self.path_planner
+
+        if path_planner is None:
+            self.get_logger().error('[STATE: PLAN_PATH] Path planner not initialized!')
             return
 
-        self.get_logger().info(f'Planning path to [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
-
-        # Plan with RRT*
-        path = self.path_planner.plan(self.robot_pos, self.current_goal)
-
-        if path is None:
-            self.get_logger().warn('Planning FAILED - trying next frontier')
-            self.explored_positions.append(self.current_goal)
+        if self.current_goal is None:
+            self.get_logger().error('[STATE: PLAN_PATH] No current goal set!')
             self.state = State.DETECT_FRONTIERS
             return
 
-        self.get_logger().info(f'Path planned: {len(path)} waypoints')
+        self.get_logger().info(f'[STATE: PLAN_PATH] Planning from [{self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f}] to [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
+
+        # Plan with RRT*
+        path = path_planner.plan(self.robot_pos, self.current_goal)
+
+        if path is None:
+            self.get_logger().warn('[STATE: PLAN_PATH] Planning FAILED - marking as explored, trying next frontier')
+            self.explored_positions.append(self.current_goal.copy())
+            self.current_goal = None
+            self.state = State.DETECT_FRONTIERS
+            return
+
+        self.get_logger().info(f'[STATE: PLAN_PATH] Success! {len(path)} waypoints, distance: {self._path_length(path):.2f}m')
 
         # Start path execution
         self.current_path = path
         self.current_waypoint_index = 0
         self.state = State.EXECUTE_PATH
 
+        # Initialize stuck detection timers
+        self.execute_path_start_time = self.get_clock().now()
+        self.last_stuck_check_time = self.get_clock().now()
+        self.last_stuck_check_position = self.robot_pos.copy()
+
+        self.get_logger().info('[STATE: PLAN_PATH → EXECUTE_PATH] Starting path execution')
+
+    def _path_length(self, path):
+        """Calculate total path length"""
+        total = 0.0
+        for i in range(len(path) - 1):
+            total += np.linalg.norm(path[i+1] - path[i])
+        return total
+
     def _handle_execute_path(self):
         """Execute path using pure pursuit"""
+        # BUG FIX #14: Check for stuck condition
+        if self.stuck_detection_enabled and self._is_stuck():
+            self.get_logger().warn('[STATE: EXECUTE_PATH] Robot is STUCK! Aborting current path and replanning...')
+
+            # Stop the robot
+            cmd = Twist()
+            self.cmd_pub.publish(cmd)
+
+            # Mark current goal as explored (avoid re-selecting same unreachable goal)
+            if self.current_goal is not None:
+                self.explored_positions.append(self.current_goal.copy())
+
+            # Clear current path and goal
+            self.current_path = None
+            self.current_goal = None
+
+            # Transition back to frontier detection
+            self.state = State.DETECT_FRONTIERS
+            self.get_logger().info('[STATE: EXECUTE_PATH → DETECT_FRONTIERS] Recovering from stuck condition...')
+            return
+
         # Check if path complete
         if self.current_waypoint_index >= len(self.current_path):
-            self.get_logger().info('Path complete - reached frontier')
-            self.explored_positions.append(self.current_goal)
+            self.get_logger().info(f'[STATE: EXECUTE_PATH] ✓ Path complete! Reached frontier at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
+
+            # Mark current goal as explored
+            self.explored_positions.append(self.current_goal.copy())
+
+            # Stop the robot
+            cmd = Twist()
+            self.cmd_pub.publish(cmd)
+
+            # Clear current path and goal
+            self.current_path = None
+            self.current_goal = None
+
+            # Transition to detect new frontiers
             self.state = State.DETECT_FRONTIERS
+            self.get_logger().info('[STATE: EXECUTE_PATH → DETECT_FRONTIERS] Searching for next frontier...')
             return
 
         # RE-DETECT FRONTIERS: Update frontier list as map grows during execution
         # This ensures we're always navigating to the best available frontier
-        if self.map_points is not None:
-            frontiers = self.frontier_detector.detect(self.map_points, self.robot_pos)
+        # BUG FIX #15: Acquire lock when reading map_points
+        with self.map_lock:
+            map_points_copy = self.map_points.copy() if self.map_points is not None else None
+
+        if map_points_copy is not None:
+            frontiers = self.frontier_detector.detect(map_points_copy, self.robot_pos, self.robot_yaw)
             self.all_frontiers = frontiers  # Update for visualization
+
+            # DYNAMIC REPLANNING: Check if we should switch to a better frontier
+            should_replan, new_goal, reason = self._should_replan_to_new_frontier(frontiers, self.current_goal)
+
+            if should_replan:
+                self.get_logger().warn(f'[STATE: EXECUTE_PATH] REPLANNING! {reason}')
+                self.get_logger().warn(f'  Old goal: [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
+                self.get_logger().warn(f'  New goal: [{new_goal[0]:.2f}, {new_goal[1]:.2f}]')
+
+                # Stop the robot
+                cmd = Twist()
+                self.cmd_pub.publish(cmd)
+
+                # Clear current path
+                self.current_path = None
+                self.current_waypoint_index = 0
+
+                # Set new goal
+                self.current_goal = new_goal.copy()
+
+                # Transition to PLAN_PATH to create new path
+                self.state = State.PLAN_PATH
+                self.get_logger().info('[STATE: EXECUTE_PATH → PLAN_PATH] Replanning to better frontier')
+                return
 
         # Check if reached current waypoint
         waypoint = self.current_path[self.current_waypoint_index]
         dist_to_waypoint = np.linalg.norm(self.robot_pos - waypoint)
 
-        if dist_to_waypoint < 0.3:  # Waypoint tolerance
+        if dist_to_waypoint < 0.15:  # Waypoint tolerance (reduced for better tracking)
             self.current_waypoint_index += 1
             return
 
@@ -258,6 +382,15 @@ class SimpleNavigationNode(Node):
             self.current_path,
             self.current_waypoint_index
         )
+
+        # Log progress periodically
+        if self.current_waypoint_index % 10 == 0:
+            progress = (self.current_waypoint_index / len(self.current_path)) * 100
+            dist_to_goal = np.linalg.norm(self.robot_pos - self.current_path[-1])
+            self.get_logger().info(
+                f'[STATE: EXECUTE_PATH] Waypoint {self.current_waypoint_index}/{len(self.current_path)} '
+                f'({progress:.1f}%), dist to goal: {dist_to_goal:.2f}m, v={v:.2f}, w={w:.2f}'
+            )
 
         # Publish velocity
         cmd = Twist()
@@ -271,15 +404,121 @@ class SimpleNavigationNode(Node):
         self.cmd_pub.publish(cmd)
         self.get_logger().info('Exploration complete', once=True)
 
+    def _should_replan_to_new_frontier(self, new_frontiers: list, current_goal: np.ndarray) -> tuple:
+        """
+        Check if robot should abandon current path for a better frontier.
+
+        Returns:
+            (should_replan: bool, new_goal: np.ndarray or None, reason: str)
+        """
+        if len(new_frontiers) == 0:
+            return False, None, ""
+
+        # Filter out explored frontiers (same logic as _handle_detect_frontiers)
+        unexplored = []
+        for f in new_frontiers:
+            min_dist_to_explored = float('inf')
+            for exp_pos in self.explored_positions:
+                dist = np.linalg.norm(f.position - exp_pos)
+                min_dist_to_explored = min(min_dist_to_explored, dist)
+
+            if min_dist_to_explored > 2.0 or len(self.explored_positions) == 0:
+                unexplored.append(f)
+
+        if len(unexplored) == 0:
+            return False, None, ""
+
+        # Best frontier from new detection
+        best_new_frontier = unexplored[0]
+        best_new_pos = best_new_frontier.position
+        best_new_score = best_new_frontier.score
+
+        # Find current goal in new frontier list
+        current_frontier = None
+        current_score = 0.0
+        for f in unexplored:
+            if np.linalg.norm(f.position - current_goal) < 0.5:  # Same frontier if within 0.5m
+                current_frontier = f
+                current_score = f.score
+                break
+
+        # REASON 1: Current goal has disappeared (blocked, explored, or no longer valid)
+        if current_frontier is None:
+            reason = f"Current goal disappeared from frontier list"
+            return True, best_new_pos, reason
+
+        # REASON 2: Score improvement (new frontier significantly better)
+        score_improvement = best_new_score - current_score
+        if score_improvement > self.replan_score_threshold:
+            reason = f"Better frontier found (score: {current_score:.3f} → {best_new_score:.3f}, +{score_improvement:.3f})"
+            return True, best_new_pos, reason
+
+        # REASON 3: Distance improvement (new frontier much closer)
+        dist_to_current = np.linalg.norm(current_goal - self.robot_pos)
+        dist_to_new = np.linalg.norm(best_new_pos - self.robot_pos)
+        distance_improvement = dist_to_current - dist_to_new
+
+        if distance_improvement > self.replan_distance_threshold:
+            reason = f"Closer frontier found (dist: {dist_to_current:.2f}m → {dist_to_new:.2f}m, -{distance_improvement:.2f}m)"
+            return True, best_new_pos, reason
+
+        # No replanning needed
+        return False, None, ""
+
+    def _is_stuck(self) -> bool:
+        """
+        BUG FIX #14: Detect if robot is stuck.
+
+        Returns True if:
+        1. Robot hasn't moved >0.1m in the last 5 seconds, OR
+        2. Robot has been in EXECUTE_PATH state for >30 seconds
+
+        This prevents infinite loops when robot gets stuck on obstacles
+        or when path is unreachable.
+        """
+        current_time = self.get_clock().now()
+
+        # Check 1: Global timeout (30 seconds in EXECUTE_PATH)
+        if self.execute_path_start_time is not None:
+            time_in_state = (current_time - self.execute_path_start_time).nanoseconds / 1e9
+            if time_in_state > self.stuck_timeout:
+                self.get_logger().warn(
+                    f'[STUCK DETECTION] Global timeout: {time_in_state:.1f}s > {self.stuck_timeout}s in EXECUTE_PATH'
+                )
+                return True
+
+        # Check 2: Movement check (every 5 seconds)
+        if self.last_stuck_check_time is None or self.last_stuck_check_position is None:
+            # Initialize
+            self.last_stuck_check_time = current_time
+            self.last_stuck_check_position = self.robot_pos.copy()
+            return False
+
+        time_since_check = (current_time - self.last_stuck_check_time).nanoseconds / 1e9
+
+        if time_since_check >= self.stuck_check_window:
+            # Check if robot has moved enough
+            distance_moved = np.linalg.norm(self.robot_pos - self.last_stuck_check_position)
+
+            if distance_moved < self.stuck_distance_threshold:
+                self.get_logger().warn(
+                    f'[STUCK DETECTION] Insufficient movement: {distance_moved:.3f}m < {self.stuck_distance_threshold}m '
+                    f'in {time_since_check:.1f}s'
+                )
+                return True
+
+            # Update check window
+            self.last_stuck_check_time = current_time
+            self.last_stuck_check_position = self.robot_pos.copy()
+
+        return False
+
     def _publish_all_visualizations(self):
         """Publish ALL visualizations continuously for debugging"""
         # 1. Publish frontier markers
         self._publish_frontier_markers()
 
-        # 2. Publish current goal marker
-        self._publish_goal_marker()
-
-        # 3. Publish planned path
+        # 2. Publish planned path
         self._publish_path()
 
     def _publish_frontier_markers(self):
@@ -298,7 +537,7 @@ class SimpleNavigationNode(Node):
         # Publish each frontier as a large sphere
         for i, frontier in enumerate(self.all_frontiers[:20]):  # Show top 20
             marker = Marker()
-            marker.header.frame_id = 'odom'  # Gazebo publishes odom without namespace
+            marker.header.frame_id = f'{self.robot_name}/odom'
             marker.header.stamp = self.get_clock().now().to_msg()
             marker.ns = 'frontiers'
             marker.id = i
@@ -360,47 +599,13 @@ class SimpleNavigationNode(Node):
 
         self.frontier_markers_pub.publish(marker_array)
 
-    def _publish_goal_marker(self):
-        """Publish BRIGHT GREEN marker for current target goal"""
-        if self.current_goal is None:
-            return
-
-        marker = Marker()
-        marker.header.frame_id = 'odom'  # Gazebo publishes odom without namespace
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'current_goal'
-        marker.id = 0
-        marker.type = Marker.CYLINDER
-        marker.action = Marker.ADD
-
-        # Position
-        marker.pose.position.x = float(self.current_goal[0])
-        marker.pose.position.y = float(self.current_goal[1])
-        marker.pose.position.z = 0.0
-        marker.pose.orientation.w = 1.0
-
-        # Size - VERY LARGE cylinder (1m diameter, 2m tall)
-        marker.scale.x = 1.0
-        marker.scale.y = 1.0
-        marker.scale.z = 2.0
-
-        # BRIGHT GREEN - unmissable!
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 0.8
-
-        marker.lifetime.sec = 0
-
-        self.goal_marker_pub.publish(marker)
-
     def _publish_path(self):
         """Publish planned path as line strip"""
         if self.current_path is None or len(self.current_path) == 0:
             return
 
         path_msg = Path()
-        path_msg.header.frame_id = 'odom'  # Gazebo publishes odom without namespace
+        path_msg.header.frame_id = f'{self.robot_name}/odom'
         path_msg.header.stamp = self.get_clock().now().to_msg()
 
         for waypoint in self.current_path:

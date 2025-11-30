@@ -6,7 +6,7 @@ from collections import deque
 
 
 class RRTNode:
-    """Node in RRT tree"""
+    """Node in RRT* tree"""
     def __init__(self, position: np.ndarray):
         self.position = position  # [x, y]
         self.parent = None
@@ -14,12 +14,12 @@ class RRTNode:
         self.children = []  # Track children for cost propagation
 
 
-class SimpleRRTStar:
+class RRTStar:
 
     def __init__(self,
                  map_points: np.ndarray,  # Nx3 obstacles
                  robot_radius: float = 0.22,
-                 step_size: float = 0.8,
+                 step_size: float = 0.4,
                  goal_bias: float = 0.5,
                  max_iterations: int = 3000,
                  gamma: float = 2.0,  # RRT* gamma parameter for shrinking radius
@@ -286,13 +286,17 @@ class SimpleRRTStar:
         """
         distance = np.linalg.norm(end - start)
 
+        # Handle very short distances (points are essentially the same)
+        if distance < 1e-6:
+            return not self._is_collision(start)
+
         # Sample at intervals of robot_radius/2 to ensure we don't miss obstacles
         # that could fit between check points
         check_interval = self.robot_radius / 2.0
         num_checks = max(1, int(np.ceil(distance / check_interval)))
 
         for i in range(num_checks + 1):
-            alpha = i / num_checks
+            alpha = i / num_checks if num_checks > 0 else 0.0
             point = start + alpha * (end - start)
 
             if self._is_collision(point):
@@ -315,18 +319,15 @@ class SimpleRRTStar:
 
     def _smooth_path(self, path: List[np.ndarray]) -> List[np.ndarray]:
         """
-        Smooth path by removing unnecessary waypoints
+        Smooth path by removing unnecessary waypoints while preserving obstacle avoidance.
 
-        Strategy: ALWAYS try direct start->goal connection first
+        Uses incremental shortcutting to reduce waypoints without creating dangerous
+        straight lines through obstacles.
         """
         if len(path) < 3:
             return path
 
-        # ALWAYS try direct connection first (for corridors!)
-        if self._is_path_collision_free(path[0], path[-1]):
-            return [path[0], path[-1]]
-
-        # Try shortcuts
+        # Incremental shortcut smoothing (safe approach)
         smoothed = [path[0]]
 
         i = 0
@@ -343,4 +344,45 @@ class SimpleRRTStar:
                 if i < len(path):
                     smoothed.append(path[i])
 
-        return smoothed
+        # Densify path with intermediate waypoints for smoother curves
+        densified = self._densify_path(smoothed, spacing=0.3)
+
+        return densified
+
+    def _densify_path(self, path: List[np.ndarray], spacing: float = 0.3) -> List[np.ndarray]:
+        """
+        Add intermediate waypoints along path segments for smoother curve following.
+
+        Args:
+            path: List of waypoints
+            spacing: Desired spacing between waypoints (meters)
+
+        Returns:
+            Densified path with intermediate points
+        """
+        if len(path) < 2:
+            return path
+
+        densified = [path[0]]
+
+        for i in range(len(path) - 1):
+            start = path[i]
+            end = path[i + 1]
+
+            # Calculate segment length
+            segment_length = np.linalg.norm(end - start)
+
+            # Number of intermediate points needed
+            if segment_length > spacing:
+                num_points = int(np.ceil(segment_length / spacing))
+
+                # Add intermediate points
+                for j in range(1, num_points):
+                    alpha = j / num_points
+                    intermediate = start + alpha * (end - start)
+                    densified.append(intermediate)
+
+            # Add end point
+            densified.append(end)
+
+        return densified

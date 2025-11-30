@@ -4,14 +4,7 @@ import numpy as np
 class EKF:
 
     def __init__(self, get_time_func=None):
-        """
-        Initialize EKF.
-
-        Args:
-            get_time_func: Function that returns current time in seconds.
-                          Should return simulation time, not wall clock time.
-                          If None, will require dt to be passed to predict_imu().
-        """
+        
         self.get_time_func = get_time_func
         
         # State vector: [x, y, theta]
@@ -23,34 +16,18 @@ class EKF:
         self.vx = 0.0
         self.vy = 0.0
 
-        # Measurement noise covariance (from odometry)
-        # Tuned for Gazebo simulation - odometry is nearly perfect
-        # Values are variance (σ²), not standard deviation
-        # Very small values → High Kalman gain → EKF tracks measurements closely
         self.R_odom = np.diag([
             0.000001,  # x position variance: 0.000001 m² (σ = 1mm)
             0.000001,  # y position variance: 0.000001 m²
             0.00001    # theta variance: 0.00001 rad² (σ = 0.003 rad ≈ 0.18°)
         ])
 
-        # Measurement noise for ICP corrections (very high confidence)
-        # ICP corrections are small and accurate - trust them highly
         self.R_icp = np.diag([
             0.000001,  # x: 1mm std (ICP is very accurate in simulation)
             0.000001,  # y: 1mm std
             0.00001    # theta: 0.003 rad (≈ 0.18°)
         ])
 
-        # Process noise covariance (from IMU predictions)
-        # Applied at ~200 Hz, so per-update noise must be very small
-        # Values are variance (σ²) added per prediction step
-        #
-        # CRITICAL: These values control how much uncertainty grows during predictions.
-        # If too small → P collapses → Kalman gain ≈ 0 → Filter ignores measurements
-        # If too large → P explodes → Filter becomes unstable
-        #
-        # With cmd_vel velocity source, predictions should be accurate, but we still need
-        # some process noise to prevent P from collapsing to zero.
         self.Q_imu = np.diag([
             0.0001,   # x position process variance: 0.0001 m² per update (σ = 0.316mm per 5ms)
             0.0001,   # y position process variance: 0.0001 m²
@@ -137,16 +114,7 @@ class EKF:
             warnings.warn(f"EKF: {self.consecutive_predictions_without_update} IMU predictions without odometry update - potential drift!", stacklevel=2)
 
     def update(self, x_meas, y_meas, theta_meas, vx_odom=None, measurement_type='odom'):
-        """
-        Update EKF state with measurement.
-
-        Args:
-            x_meas: Measured x position
-            y_meas: Measured y position
-            theta_meas: Measured orientation
-            vx_odom: Linear velocity from odometry (optional)
-            measurement_type: 'odom' or 'icp' - determines measurement noise
-        """
+        
         if not self.initialized:
             raise RuntimeError("EKF not initialized")
 
@@ -247,15 +215,7 @@ class EKF:
         self.consecutive_predictions_without_update = 0
 
     def set_measurement_noise(self, sigma_x, sigma_y, sigma_theta, measurement_type='odom'):
-        """
-        Set measurement noise covariance.
-
-        Args:
-            sigma_x: Standard deviation of x measurement (m)
-            sigma_y: Standard deviation of y measurement (m)
-            sigma_theta: Standard deviation of theta measurement (rad)
-            measurement_type: 'odom' or 'icp'
-        """
+        
         R = np.diag([sigma_x**2, sigma_y**2, sigma_theta**2])
         if measurement_type == 'icp':
             self.R_icp = R

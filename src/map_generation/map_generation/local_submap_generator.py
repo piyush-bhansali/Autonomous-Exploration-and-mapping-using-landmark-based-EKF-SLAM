@@ -237,18 +237,7 @@ class LocalSubmapGenerator(Node):
         pass
 
     def cmd_vel_callback(self, msg):
-        """
-        Cmd_vel callback - updates EKF velocity for predictions.
-
-        We use COMMANDED velocity (cmd_vel) for EKF predictions, not odometry velocity.
-        Reason: Odometry velocity is calculated from position derivatives, which:
-        - Lags behind actual motion (calculated AFTER robot moves)
-        - Has quantization noise
-        - Doesn't reflect intended motion during acceleration
-
-        Cmd_vel represents the INTENDED motion, which is better for predictions.
-        Odometry position is still used for corrections via EKF updates.
-        """
+       
         # Update velocity BEFORE EKF initialization
         # This ensures velocity is available when EKF starts
         self.ekf.vx = msg.linear.x
@@ -481,9 +470,6 @@ class LocalSubmapGenerator(Node):
                         corrected_theta = self.current_pose['theta'] + pose_correction['dtheta']
                         corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
 
-                        # Feed corrected pose as ICP measurement to EKF
-                        # ICP provides high-accuracy measurements, so use 'icp' measurement type
-                        # The Kalman filter will automatically adjust covariance based on R_icp
                         self.ekf.update(corrected_x, corrected_y, corrected_theta, vx_odom=None, measurement_type='icp')
 
                         # Update current_pose from EKF state
