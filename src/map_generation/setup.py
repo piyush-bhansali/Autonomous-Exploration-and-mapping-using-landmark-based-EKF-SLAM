@@ -18,7 +18,7 @@ setup(
     zip_safe=True,
     maintainer='piyush',
     maintainer_email='piyushbhansali8@gmail.com',
-    description='TODO: Package description',
+    description='SLAM mapping with EKF fusion, loop closure detection, and GTSAM optimization',
     license='Apache-2.0',
     extras_require={
         'test': [

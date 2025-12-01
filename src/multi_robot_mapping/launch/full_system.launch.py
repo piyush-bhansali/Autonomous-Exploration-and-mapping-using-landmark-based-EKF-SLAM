@@ -243,7 +243,7 @@ def generate_launch_description():
             'save_directory': './submaps',
             'voxel_size': 0.08,  # 8cm voxel - coarser but faster processing
             'feature_method': 'hybrid',
-            'enable_loop_closure': True,  # ENABLED for better mapping
+            'enable_loop_closure': False,  # DISABLED for testing
             'enable_scan_to_map_icp': True  # Enable real-time scan matching
         }]
     )

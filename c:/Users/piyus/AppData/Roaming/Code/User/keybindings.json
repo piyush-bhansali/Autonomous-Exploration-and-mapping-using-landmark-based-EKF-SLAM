@@ -1,0 +1,8 @@
+[
+  {
+    "key": "shift+enter",
+    "command": "type",
+    "args": { "text": "\n" },
+    "when": "textInputFocus"
+  }
+]

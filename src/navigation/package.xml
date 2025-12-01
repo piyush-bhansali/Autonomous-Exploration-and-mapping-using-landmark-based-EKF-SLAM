@@ -13,6 +13,10 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>nav_msgs</depend>
+
+  <!-- Package dependencies -->
+  <depend>map_generation</depend>
 
   <!-- Python dependencies -->
   <exec_depend>python3-numpy</exec_depend>

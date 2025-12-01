@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='piyush',
     maintainer_email='piyushbhansali8@gmail.com',
-    description='TODO: Package description',
+    description='Frontier-based exploration with RRT* path planning for point cloud maps',
     license='Apache-2.0',
     extras_require={
         'test': [

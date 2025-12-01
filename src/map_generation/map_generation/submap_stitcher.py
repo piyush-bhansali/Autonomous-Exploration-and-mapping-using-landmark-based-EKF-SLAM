@@ -8,6 +8,7 @@ import time
 import os
 from map_generation.feature_extractor import FeatureExtractor
 from map_generation.loop_closure_detector import LoopClosureDetector
+from map_generation.gtsam_optimizer import GTSAMOptimizer
 
 
 class SubmapStitcher:
@@ -44,8 +45,13 @@ class SubmapStitcher:
         self.enable_loop_closure = enable_loop_closure
         if enable_loop_closure:
             self.loop_closure_detector = LoopClosureDetector()
+            self.gtsam_optimizer = GTSAMOptimizer(
+                translation_noise_sigma=0.1,  # 10cm std dev for loop closure
+                rotation_noise_sigma=0.1       # ~5.7 degrees std dev
+            )
         else:
             self.loop_closure_detector = None
+            self.gtsam_optimizer = None
 
     def process_submap(self, points: np.ndarray, submap_id: int) -> o3d.t.geometry.PointCloud:
 
@@ -144,9 +150,18 @@ class SubmapStitcher:
             self.global_map_tensor = pcd_tensor
             initial_transform = np.eye(4)
 
+            # Memory optimization: Only store point cloud if loop closure is disabled
+            # For loop closure, we only need features after extraction
+            if self.enable_loop_closure:
+                # Store minimal point cloud (decimated) for ICP verification only
+                pcd_decimated = pcd_tensor.to_legacy().voxel_down_sample(self.voxel_size * 3.0)
+                stored_pcd = pcd_decimated
+            else:
+                stored_pcd = pcd_tensor.to_legacy()
+
             submap_data = {
                 'id': submap_id,
-                'point_cloud': pcd_tensor.to_legacy(),  # Only convert for storage
+                'point_cloud': stored_pcd,  # Decimated for memory efficiency
                 'features': features,
                 'pose_start': start_pose,
                 'pose_end': end_pose,
@@ -206,9 +221,16 @@ class SubmapStitcher:
         transform_tensor = o3c.Tensor(final_transform, dtype=o3c.float32, device=self.device)
         pcd_aligned_tensor = pcd_tensor.transform(transform_tensor)
 
+        # Memory optimization: Only store decimated point cloud for subsequent submaps
+        if self.enable_loop_closure:
+            pcd_decimated = pcd_aligned_tensor.to_legacy().voxel_down_sample(self.voxel_size * 3.0)
+            stored_pcd = pcd_decimated
+        else:
+            stored_pcd = pcd_aligned_tensor.to_legacy()
+
         submap_data = {
             'id': submap_id,
-            'point_cloud': pcd_aligned_tensor.to_legacy(),  # Store ICP-aligned version
+            'point_cloud': stored_pcd,  # Decimated for memory efficiency
             'features': features,
             'pose_start': start_pose,
             'pose_end': end_pose,
@@ -238,14 +260,26 @@ class SubmapStitcher:
                 if loop_closure is not None:
                     print(f"  ✓ Loop closure: submap {submap_id} ↔ {loop_closure['match_id']}")
 
-                    optimized = self._optimize_pose_graph_with_loop_closure(
-                        current_id=submap_id,
-                        loop_match_id=loop_closure['match_id'],
-                        loop_transform=loop_closure.get('transform', np.eye(4))
+                    # Use GTSAM for pose graph optimization
+                    optimized_transforms = self.gtsam_optimizer.optimize_pose_graph(
+                        submaps=self.submaps,
+                        loop_closure=loop_closure
                     )
 
-                    if optimized:
+                    if optimized_transforms is not None:
+                        # Apply optimized transforms to submaps
+                        for i, optimized_transform in enumerate(optimized_transforms):
+                            self.submaps[i]['global_transform'] = optimized_transform
+                            self.transforms[i] = optimized_transform
+
+                        # Rebuild global map with optimized poses
                         self._rebuild_global_map()
+
+                        # Print optimization statistics
+                        stats = self.gtsam_optimizer.get_statistics()
+                        if stats['last_error'] is not None:
+                            error_reduction = stats['last_error']['improvement']
+                            print(f"    GTSAM optimization: error reduced by {error_reduction:.4f}")
 
         self.global_map_tensor.point.positions = o3c.concatenate([
             self.global_map_tensor.point.positions,
@@ -274,64 +308,10 @@ class SubmapStitcher:
             return None
         return self.global_map_tensor.point.positions.cpu().numpy()
 
-    def _optimize_pose_graph_with_loop_closure(self,
-                                               current_id: int,
-                                               loop_match_id: int,
-                                               loop_transform: np.ndarray) -> bool:
-        if len(self.submaps) < 3:
-            return False
-
-        current_pose = self.submaps[current_id]['global_transform']
-        matched_pose = self.submaps[loop_match_id]['global_transform']
-
-        # Measured relative transform from loop closure
-        measured_relative = loop_transform
-
-        # Current relative transform (from odometry chain)
-        current_relative = np.linalg.inv(matched_pose) @ current_pose
-
-        # Calculate error
-        error_transform = measured_relative @ np.linalg.inv(current_relative)
-
-        # Extract 2D error (translation and rotation)
-        error_x = error_transform[0, 3]
-        error_y = error_transform[1, 3]
-        error_theta = np.arctan2(error_transform[1, 0], error_transform[0, 0])
-
-        # Only optimize if error is significant (>10cm or >5°)
-        if abs(error_x) < 0.1 and abs(error_y) < 0.1 and abs(error_theta) < np.radians(5):
-            return False
-
-        # Distribute error linearly across submaps in the loop
-        num_submaps_in_loop = current_id - loop_match_id
-
-        for i in range(loop_match_id + 1, current_id + 1):
-            # Linear interpolation factor
-            alpha = (i - loop_match_id) / num_submaps_in_loop
-
-            # Correction for this submap
-            correction_x = alpha * error_x
-            correction_y = alpha * error_y
-            correction_theta = alpha * error_theta
-
-            # Build correction transform
-            cos_theta = np.cos(correction_theta)
-            sin_theta = np.sin(correction_theta)
-            correction_T = np.array([
-                [cos_theta, -sin_theta, 0, correction_x],
-                [sin_theta, cos_theta, 0, correction_y],
-                [0, 0, 1, 0],
-                [0, 0, 0, 1]
-            ])
-
-            # Apply correction to submap transform
-            old_transform = self.submaps[i]['global_transform'].copy()
-            new_transform = correction_T @ old_transform
-
-            self.submaps[i]['global_transform'] = new_transform
-            self.transforms[i] = new_transform
-
-        return True
+    # REMOVED: Old linear optimization replaced by GTSAM
+    # The _optimize_pose_graph_with_loop_closure method has been replaced
+    # with GTSAMOptimizer.optimize_pose_graph() which provides proper
+    # pose graph optimization using factor graphs
 
     def _rebuild_global_map(self):
         """Rebuild global map after loop closure optimization"""

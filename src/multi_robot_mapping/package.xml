@@ -2,10 +2,20 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>multi_robot_mapping</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <version>0.0.1</version>
+  <description>Multi-robot SLAM system with TurtleBot3 in Gazebo Harmonic</description>
   <maintainer email="piyushbhansali8@gmail.com">piyush</maintainer>
   <license>Apache-2.0</license>
+
+  <!-- ROS 2 dependencies for launch files -->
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <!-- Package dependencies -->
+  <exec_depend>map_generation</exec_depend>
+  <exec_depend>navigation</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

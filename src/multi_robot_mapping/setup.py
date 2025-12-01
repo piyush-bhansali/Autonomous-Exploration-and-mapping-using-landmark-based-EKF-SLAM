@@ -59,7 +59,7 @@ setup(
     zip_safe=True,
     
     maintainer='piyush',
-    maintainer_email='piyush@todo.todo',  # TODO: Update this
+    maintainer_email='piyushbhansali8@gmail.com',
     
     description='Multi-robot SLAM system with TurtleBot3 in Gazebo Harmonic',
     license='Apache-2.0',
