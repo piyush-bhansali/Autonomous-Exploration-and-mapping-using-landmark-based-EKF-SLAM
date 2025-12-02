@@ -65,6 +65,33 @@ class GTSAMOptimizer:
             )
             graph.add(gtsam.PriorFactorPose2(0, first_pose, prior_noise))
 
+            # Add odometry constraints between consecutive submaps
+            # This is CRITICAL - without these, the pose graph is underconstrained
+            odometry_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                np.array([self.translation_sigma, self.translation_sigma, self.rotation_sigma])
+            )
+
+            for i in range(len(submaps) - 1):
+                current_submap = submaps[i]
+                next_submap = submaps[i + 1]
+
+                # Compute relative transformation from current to next
+                T_current = current_submap['global_transform']
+                T_next = next_submap['global_transform']
+                T_relative = np.linalg.inv(T_current) @ T_next
+
+                # Extract 2D relative pose
+                dx = T_relative[0, 3]
+                dy = T_relative[1, 3]
+                dtheta = np.arctan2(T_relative[1, 0], T_relative[0, 0])
+
+                relative_pose = gtsam.Pose2(dx, dy, dtheta)
+
+                # Add odometry constraint between consecutive submaps
+                graph.add(gtsam.BetweenFactorPose2(
+                    current_submap['id'], next_submap['id'], relative_pose, odometry_noise
+                ))
+
             # Add loop closure constraint
             current_id = loop_closure['current_id']
             match_id = loop_closure['match_id']
@@ -186,6 +213,29 @@ class GTSAMOptimizer:
                 np.arctan2(first_transform[1, 0], first_transform[0, 0])
             )
             graph.add(gtsam.PriorFactorPose2(0, first_pose, prior_noise))
+
+            # Add odometry constraints between consecutive submaps
+            odometry_noise = gtsam.noiseModel.Diagonal.Sigmas(
+                np.array([self.translation_sigma, self.translation_sigma, self.rotation_sigma])
+            )
+
+            for i in range(len(submaps) - 1):
+                current_submap = submaps[i]
+                next_submap = submaps[i + 1]
+
+                T_current = current_submap['global_transform']
+                T_next = next_submap['global_transform']
+                T_relative = np.linalg.inv(T_current) @ T_next
+
+                dx = T_relative[0, 3]
+                dy = T_relative[1, 3]
+                dtheta = np.arctan2(T_relative[1, 0], T_relative[0, 0])
+
+                relative_pose = gtsam.Pose2(dx, dy, dtheta)
+
+                graph.add(gtsam.BetweenFactorPose2(
+                    current_submap['id'], next_submap['id'], relative_pose, odometry_noise
+                ))
 
             # Add all loop closure constraints
             for loop_closure in loop_closures:

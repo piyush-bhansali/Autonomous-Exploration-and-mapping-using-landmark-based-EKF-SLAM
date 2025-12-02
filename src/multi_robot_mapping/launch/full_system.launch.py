@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-Complete Multi-Robot SLAM and Navigation System
-
-Launches:
-1. Gazebo simulation with world
-2. TurtleBot3 robots
-3. Local submap generation (mapping)
-4. Frontier exploration (navigation)
-5. RViz visualization
-
-Usage:
-    ros2 launch multi_robot_mapping full_system.launch.py
-    ros2 launch multi_robot_mapping full_system.launch.py num_robots:=2 world:=maze
-"""
 
 from launch import LaunchDescription
 import launch.conditions
@@ -243,7 +229,7 @@ def generate_launch_description():
             'save_directory': './submaps',
             'voxel_size': 0.08,  # 8cm voxel - coarser but faster processing
             'feature_method': 'hybrid',
-            'enable_loop_closure': False,  # DISABLED for testing
+            'enable_loop_closure': False,  # ENABLED to correct accumulated drift
             'enable_scan_to_map_icp': True  # Enable real-time scan matching
         }]
     )
@@ -262,7 +248,7 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': True,  # Use Gazebo simulation time
             'robot_name': robot_name,
-            'robot_radius': 0.22
+            'robot_radius': 0.35  # Increased from 0.22 to maintain larger clearance from obstacles
         }],
         condition=launch.conditions.IfCondition(enable_navigation)
     )
@@ -285,11 +271,6 @@ def generate_launch_description():
         condition=launch.conditions.IfCondition(use_rviz)
     )
 
-    # RVIZ starts after both robot and EKF are running
-    # Starts at t=6s to ensure TF tree is fully established:
-    #   t=2s: Robot spawns, robot_state_publisher starts
-    #   t=4s: EKF starts, begins publishing odom->base_footprint TF
-    #   t=6s: RViz starts with full TF tree available
     rviz_delayed = TimerAction(period=6.0, actions=[rviz_node_tb3_1])
 
     # NOTE: For tb3_2, launch separately with:
@@ -313,13 +294,7 @@ def generate_launch_description():
         LogInfo(msg=['Robots: ', num_robots]),
         LogInfo(msg='========================================'),
 
-        # Components (timed sequence)
-        # t=0s:   Gazebo simulation starts
-        # t=1s:   Clock bridge starts
-        # t=2s:   Robot spawns (sensor data now available)
-        # t=4s:   EKF/mapping starts (can now consume sensor data)
-        # t=6s:   RViz starts (TF tree fully established)
-        # t=8s:   Navigation starts (map available)
+        
         gazebo_server,
         clock_bridge_delayed,          # t=1s
         robot_spawn_delayed,           # t=2s - Robot FIRST

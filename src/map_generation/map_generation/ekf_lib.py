@@ -1,12 +1,9 @@
 import numpy as np
 
-
 class EKF:
 
-    def __init__(self, get_time_func=None):
-        
-        self.get_time_func = get_time_func
-        
+    def __init__(self):
+
         # State vector: [x, y, theta]
         self.state = np.zeros(3)
 
@@ -16,23 +13,26 @@ class EKF:
         self.vx = 0.0
         self.vy = 0.0
 
+    
         self.R_odom = np.diag([
-            0.000001,  # x position variance: 0.000001 m² (σ = 1mm)
-            0.000001,  # y position variance: 0.000001 m²
-            0.00001    # theta variance: 0.00001 rad² (σ = 0.003 rad ≈ 0.18°)
+            0.005,   # x position variance: 0.005 m² (σ = 0.071m ≈ 7.1cm)
+            0.005,   # y position variance: 0.005 m² (σ = 0.071m ≈ 7.1cm)
+            0.02     # theta variance: 0.02 rad² (σ = 0.141 rad ≈ 8.1°)
         ])
 
         self.R_icp = np.diag([
-            0.000001,  # x: 1mm std (ICP is very accurate in simulation)
-            0.000001,  # y: 1mm std
-            0.00001    # theta: 0.003 rad (≈ 0.18°)
+            0.0001,   # x: 0.0001 m² (σ = 0.01m = 1cm, ICP is accurate)
+            0.0001,   # y: 0.0001 m² (σ = 0.01m = 1cm)
+            0.0001    # theta: 0.0001 rad² (σ = 0.01 rad ≈ 0.57°)
         ])
 
         self.Q_imu = np.diag([
-            0.0001,   # x position process variance: 0.0001 m² per update (σ = 0.316mm per 5ms)
-            0.0001,   # y position process variance: 0.0001 m²
-            0.001     # theta process variance: 0.001 rad² per update (σ = 0.0316 rad ≈ 1.8°)
+            0.0001,   # x position process variance: 0.0001 m² per update (σ = 0.01m per 5ms)
+            0.0001,   # y position process variance: 0.0001 m² (σ = 0.01m per 5ms)
+            0.0001    # theta process variance: 0.0001 rad² per update (σ = 0.01 rad ≈ 0.57° per 5ms)
         ])
+
+        self.dt = 0.005  # 200 Hz
 
         # Initialization flag
         self.initialized = False
@@ -40,11 +40,7 @@ class EKF:
         # Statistics
         self.imu_prediction_count = 0
         self.update_count = 0
-        self.consecutive_predictions_without_update = 0  # Drift watchdog
-
-        # Timing for adaptive dt calculation
-        self.last_prediction_time = None
-        self.last_update_time = None 
+        self.consecutive_predictions_without_update = 0  # Drift watchdog 
 
     def initialize(self, x, y, theta, vx, vy):
 
@@ -52,52 +48,30 @@ class EKF:
         self.vx = vx
         self.vy = vy
         self.initialized = True
-        if self.get_time_func is not None:
-            self.last_prediction_time = self.get_time_func()
-            self.last_update_time = self.get_time_func()
-        else:
-            self.last_prediction_time = None
-            self.last_update_time = None
 
-    def predict_imu(self, omega, dt=None):
+    def predict_imu(self, omega):
 
         if not self.initialized:
-            return  # Silently return if not initialized yet
-
-        # Auto-calculate dt if not provided
-        if dt is None:
-            if self.get_time_func is not None:
-                current_time = self.get_time_func()
-                if self.last_prediction_time is not None:
-                    dt = current_time - self.last_prediction_time
-                    if dt > 0.1 or dt <= 0:
-                        dt = 0.005  # Default to 200 Hz
-                else:
-                    dt = 0.005  # Default to 200 Hz
-                self.last_prediction_time = current_time
-            else:
-                # No time function provided, must pass dt explicitly
-                raise ValueError("dt must be provided if get_time_func is None")
+            return
 
         x, y, theta = self.state
 
-        dx = self.vx * np.cos(theta) * dt
-        dy = self.vx * np.sin(theta) * dt
+        dx = self.vx * np.cos(theta) * self.dt
+        dy = self.vx * np.sin(theta) * self.dt
 
-        # Update orientation from gyroscope
-        dtheta = omega * dt
+        dtheta = omega * self.dt
 
-        # Apply predictions
         x_pred = x + dx
         y_pred = y + dy
         theta_pred = theta + dtheta
-        theta_pred = np.arctan2(np.sin(theta_pred), np.cos(theta_pred))  # Normalize to [-π, π]
+        theta_pred = np.arctan2(np.sin(theta_pred), np.cos(theta_pred))  
 
         self.state = np.array([x_pred, y_pred, theta_pred])
 
+        # Jacobian of motion model
         F = np.array([
-            [1.0, 0.0, -self.vx * np.sin(theta) * dt],
-            [0.0, 1.0,  self.vx * np.cos(theta) * dt],
+            [1.0, 0.0, -self.vx * np.sin(theta) * self.dt],
+            [0.0, 1.0,  self.vx * np.cos(theta) * self.dt],
             [0.0, 0.0,  1.0]
         ])
 
@@ -120,9 +94,9 @@ class EKF:
 
         # Select measurement noise based on source
         if measurement_type == 'icp':
-            R = self.R_icp  # High confidence (5mm position, 0.1 rad orientation)
+            R = self.R_icp  
         else:
-            R = self.R_odom  # Normal odometry confidence (10cm position, 0.14 rad orientation)
+            R = self.R_odom
 
         H = np.eye(3)
 
@@ -141,7 +115,6 @@ class EKF:
         try:
             S_inv = np.linalg.inv(S)
         except np.linalg.LinAlgError:
-            # Singular matrix, skip update
             return
 
         K = self.P @ H.T @ S_inv
@@ -153,20 +126,16 @@ class EKF:
 
         I = np.eye(3)
         I_KH = I - K @ H
-        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T  # Use measurement-specific R
-
-        # Ensure symmetry
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T  
+        
         self.P = (self.P + self.P.T) / 2.0
 
-        # Update velocity estimate from odometry
         if vx_odom is not None:
             self.vx = vx_odom
             self.vy = 0.0  
 
         self.update_count += 1
-        self.consecutive_predictions_without_update = 0  # Reset drift watchdog
-        if self.get_time_func is not None:
-            self.last_update_time = self.get_time_func()
+        self.consecutive_predictions_without_update = 0
 
     def get_state(self):
         
@@ -202,7 +171,7 @@ class EKF:
         }
 
     def reset(self):
-        
+
         self.state = np.zeros(3)
         self.P = np.eye(3) * 0.1
         self.vx = 0.0
@@ -210,8 +179,6 @@ class EKF:
         self.initialized = False
         self.imu_prediction_count = 0
         self.update_count = 0
-        self.last_prediction_time = None
-        self.last_update_time = None
         self.consecutive_predictions_without_update = 0
 
     def set_measurement_noise(self, sigma_x, sigma_y, sigma_theta, measurement_type='odom'):

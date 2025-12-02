@@ -57,9 +57,8 @@ class LocalSubmapGenerator(Node):
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
 
-        # Initialize EKF with simulation time function
-        # Pass a lambda that returns current ROS time in seconds
-        self.ekf = EKF(get_time_func=lambda: self.get_clock().now().nanoseconds / 1e9)
+        # Initialize EKF (hardcoded to 200 Hz IMU rate)
+        self.ekf = EKF()
         self.ekf_initialized = False
 
         # Store latest raw odometry for ICP correction
@@ -353,8 +352,8 @@ class LocalSubmapGenerator(Node):
                     correction_distance = np.sqrt(pose_correction['dx']**2 + pose_correction['dy']**2)
                     correction_angle = np.abs(pose_correction['dtheta'])
 
-                    # Stricter thresholds: reject large jumps (>20cm or >15 degrees)
-                    if correction_distance < 0.2 and correction_angle < np.radians(15):
+                    # Relaxed thresholds to allow for accumulated drift correction
+                    if correction_distance < 0.5 and correction_angle < np.radians(25):
                         # CRITICAL FIX: Apply ICP correction to RAW ODOMETRY, not EKF output!
                         # ICP measured the error in the odometry-based scan transformation,
                         # so we correct the odometry and feed it to EKF as a new measurement
@@ -462,8 +461,8 @@ class LocalSubmapGenerator(Node):
                     correction_distance = np.sqrt(pose_correction['dx']**2 + pose_correction['dy']**2)
                     correction_angle = np.abs(pose_correction['dtheta'])
 
-                    # Submap ICP corrections are typically larger, so use more lenient thresholds
-                    if correction_distance < 0.5 and correction_angle < np.radians(20):
+                    # Submap ICP corrections can be large with accumulated drift, use lenient thresholds
+                    if correction_distance < 1.0 and correction_angle < np.radians(30):
                         # Apply correction through EKF update (not direct addition!)
                         corrected_x = self.current_pose['x'] + pose_correction['dx']
                         corrected_y = self.current_pose['y'] + pose_correction['dy']

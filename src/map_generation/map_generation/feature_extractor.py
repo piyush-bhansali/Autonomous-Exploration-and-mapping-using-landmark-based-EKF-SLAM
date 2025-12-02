@@ -35,12 +35,9 @@ class FeatureExtractor:
         import time
         start_time = time.time()
 
-        # Downsample
         pcd_down = point_cloud.voxel_down_sample(self.voxel_size)
 
-        # Extract features based on method
         if self.method == 'hybrid':
-            # Extract BOTH for two-stage loop closure
             sc_desc, sc_meta = self._extract_scan_context(pcd_down)
             keypoints, keypoint_indices = self._extract_keypoints_uniform(pcd_down)
             if len(keypoints.points) > 0:
@@ -171,7 +168,7 @@ class FeatureExtractor:
                                    ratio: float = 0.1) -> Tuple[o3d.geometry.PointCloud, np.ndarray]:
         
         num_points = len(pcd.points)
-        num_keypoints = max(int(num_points * ratio), 50)  # At least 50 keypoints
+        num_keypoints = max(int(num_points * ratio), 50)  
 
         # Uniform sampling
         indices = np.random.choice(num_points, min(num_keypoints, num_points), replace=False)

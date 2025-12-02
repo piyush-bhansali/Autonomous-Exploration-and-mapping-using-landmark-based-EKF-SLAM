@@ -202,7 +202,8 @@ class SubmapStitcher:
         correction_translation = np.linalg.norm(icp_correction[:2, 3])
         correction_rotation = np.abs(np.arctan2(icp_correction[1, 0], icp_correction[0, 0]))
 
-        if correction_translation > 0.5 or correction_rotation > np.radians(10):  # ICP correction too large
+        # Relaxed thresholds to allow larger corrections for accumulated drift
+        if correction_translation > 1.0 or correction_rotation > np.radians(20):  # ICP correction too large
             final_transform = initial_transform  # Reject ICP, use odometry
             success = False
 
