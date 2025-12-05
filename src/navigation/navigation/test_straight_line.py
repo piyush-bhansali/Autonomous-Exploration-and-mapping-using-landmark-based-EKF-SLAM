@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""
-Test node to move robot in a straight line for 7 meters.
 
-This is useful for:
-1. Testing odometry accuracy
-2. Verifying scan-to-map ICP corrections
-3. Checking map quality over distance
-4. Debugging coordinate transformations
-
-Usage:
-    ros2 run navigation test_straight_line --ros-args -r __ns:=/tb3_1
-"""
 
 import rclpy
 from rclpy.node import Node

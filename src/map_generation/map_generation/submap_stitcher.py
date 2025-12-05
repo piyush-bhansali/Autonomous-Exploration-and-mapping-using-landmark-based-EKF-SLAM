@@ -205,24 +205,10 @@ class SubmapStitcher:
         # Step 1: Transform points from world → submap-local frame
         points_local = self._transform_points_to_local(points, start_pose)
 
-        # DEBUG: Log transformation info
-        print(f"\n{'='*60}")
-        print(f"SUBMAP {submap_id} INTEGRATION DEBUG")
-        print(f"{'='*60}")
-        print(f"Start pose: x={start_pose['x']:.3f}, y={start_pose['y']:.3f}, "
-              f"qz={start_pose['qz']:.3f}, qw={start_pose['qw']:.3f}")
-        print(f"Points in world frame: {len(points)} points")
-        print(f"  World frame center: {np.mean(points, axis=0)}")
-        print(f"  World frame extent: min={np.min(points, axis=0)}, max={np.max(points, axis=0)}")
-        print(f"Points in local frame: {len(points_local)} points")
-        print(f"  Local frame center: {np.mean(points_local, axis=0)}")
-        print(f"  Local frame extent: min={np.min(points_local, axis=0)}, max={np.max(points_local, axis=0)}")
-
         # Step 2: Process submap (downsample) in local frame
         pcd_tensor = self.process_submap(points_local, submap_id)
 
         if len(pcd_tensor.point.positions) < 50:
-            print(f"SKIPPED: Too few points after downsampling ({len(pcd_tensor.point.positions)})")
             return False, None
 
         # Step 3: Calculate pose_center for spatial search (still needed for loop closure)
@@ -293,9 +279,6 @@ class SubmapStitcher:
         # Step 6: ICP alignment for submap-to-map refinement
         # We do ICP on LOCAL frame points with global_transform as initial guess
         # This way ICP directly gives us the refined global_transform
-        print(f"\nICP Alignment:")
-        print(f"  Source (submap in LOCAL frame): {len(pcd_tensor.point.positions)} points")
-        print(f"  Target (global map): {len(self.global_map_tensor.point.positions)} points")
 
         # ICP with global_transform as initial guess
         # ICP will transform source by initial_guess, then find refinement
@@ -305,22 +288,10 @@ class SubmapStitcher:
             initial_guess=global_transform  # Use odometry estimate as starting point
         )
 
-        print(f"  ICP Success: {success}, Fitness: {fitness:.4f}")
-        print(f"  ICP refined global transform:")
-        print(f"{global_transform_refined}")
-
-        print(f"\nRefined global transform (after ICP):")
-        print(f"  Translation: [{global_transform_refined[0,3]:.3f}, {global_transform_refined[1,3]:.3f}, {global_transform_refined[2,3]:.3f}]")
-        print(f"  Rotation (yaw): {np.arctan2(global_transform_refined[1,0], global_transform_refined[0,0]):.3f} rad")
-
         # Calculate ICP correction (difference from odometry-based placement)
         icp_correction = np.linalg.inv(global_transform) @ global_transform_refined
         correction_translation = np.linalg.norm(icp_correction[:2, 3])
         correction_rotation = np.abs(np.arctan2(icp_correction[1, 0], icp_correction[0, 0]))
-
-        print(f"\nICP Correction:")
-        print(f"  Translation: {correction_translation:.4f} m")
-        print(f"  Rotation: {np.degrees(correction_rotation):.2f} deg")
 
         # Relaxed thresholds to allow larger corrections for accumulated drift
         if correction_translation > 1.0 or correction_rotation > np.radians(20):
