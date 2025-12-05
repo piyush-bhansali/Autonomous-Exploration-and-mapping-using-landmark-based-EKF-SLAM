@@ -115,9 +115,9 @@ class FeatureExtractor:
         theta = np.arctan2(points_centered[:, 1], points_centered[:, 0])
 
         r_99th = np.percentile(r, 99) if len(r) > 0 else 1.0
-        max_range_adaptive = max(r_99th * 1.1, 1.0)  # 10% margin, minimum 1m
-
-        max_range = max(max_range_adaptive, self.sc_params['max_range'])
+        # Use ONLY 99th percentile for adaptive scaling (no fixed minimum)
+        # Each submap adapts to its actual content size
+        max_range = max(r_99th * 1.1, 0.5)  # 10% margin, minimum 0.5m (safety)
 
         num_rings = self.sc_params['num_rings']
         num_sectors = self.sc_params['num_sectors']
@@ -151,11 +151,18 @@ class FeatureExtractor:
         # Compute descriptor density (how many bins are occupied)
         occupancy = np.sum(scan_context > 0) / (num_rings * num_sectors)
 
+        # Compute extent for scale normalization
+        extent_x = np.max(points_2d[:, 0]) - np.min(points_2d[:, 0]) if len(points_2d) > 0 else 0.0
+        extent_y = np.max(points_2d[:, 1]) - np.min(points_2d[:, 1]) if len(points_2d) > 0 else 0.0
+
         metadata = {
             'descriptor_dim': len(descriptor),
             'num_rings': num_rings,
             'num_sectors': num_sectors,
             'max_range_used': float(max_range),
+            'r_99th_percentile': float(r_99th),
+            'extent_x': float(extent_x),
+            'extent_y': float(extent_y),
             'center': center.tolist(),
             'points_used': points_used,
             'points_discarded': points_discarded,

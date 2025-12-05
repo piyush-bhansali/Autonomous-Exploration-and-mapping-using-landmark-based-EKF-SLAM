@@ -53,6 +53,67 @@ class SubmapStitcher:
             self.loop_closure_detector = None
             self.gtsam_optimizer = None
 
+    def _pose_to_matrix(self, pose: dict) -> np.ndarray:
+        """
+        Convert pose dictionary to 4×4 homogeneous transformation matrix
+
+        Args:
+            pose: Dictionary with keys 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'
+
+        Returns:
+            4×4 transformation matrix
+        """
+        from scipy.spatial.transform import Rotation
+
+        # Extract position
+        x = pose['x']
+        y = pose['y']
+        z = pose.get('z', 0.0)
+
+        # Extract quaternion (x, y, z, w)
+        qx = pose['qx']
+        qy = pose['qy']
+        qz = pose['qz']
+        qw = pose['qw']
+
+        # Convert quaternion to rotation matrix
+        rotation = Rotation.from_quat([qx, qy, qz, qw])
+        rotation_matrix = rotation.as_matrix()
+
+        # Build 4×4 homogeneous transform
+        transform = np.eye(4)
+        transform[0:3, 0:3] = rotation_matrix
+        transform[0:3, 3] = [x, y, z]
+
+        return transform
+
+    def _transform_points_to_local(self, points_world: np.ndarray, submap_origin_pose: dict) -> np.ndarray:
+        """
+        Transform points from world frame to submap-local frame
+
+        The submap-local frame has its origin at submap_origin_pose (pose_start).
+        This allows all points in the submap to be expressed relative to where
+        the submap began, making the entire submap transformable as a rigid body.
+
+        Args:
+            points_world: N×3 array of points in world frame (tb3_1/odom)
+            submap_origin_pose: Pose dict for the submap origin (pose_start)
+
+        Returns:
+            N×3 array of points in submap-local frame
+        """
+        # _pose_to_matrix gives us T_local_to_world (transforms points FROM local TO world)
+        # We need T_world_to_local, which is the inverse
+        T_local_to_world = self._pose_to_matrix(submap_origin_pose)
+        T_world_to_local = np.linalg.inv(T_local_to_world)
+
+        # Transform points: world → submap-local
+        points_homogeneous = np.column_stack([points_world, np.ones(len(points_world))])
+        points_local_homogeneous = (T_world_to_local @ points_homogeneous.T).T
+        points_local = points_local_homogeneous[:, 0:3]
+
+        return points_local
+
     def process_submap(self, points: np.ndarray, submap_id: int) -> o3d.t.geometry.PointCloud:
 
         points_tensor = o3c.Tensor(points.astype(np.float32), dtype=o3c.float32, device=self.device)
@@ -124,12 +185,47 @@ class SubmapStitcher:
                                        start_pose: dict,
                                        end_pose: dict,
                                        scan_count: int) -> Tuple[bool, Optional[dict]]:
+        """
+        Integrate submap into global map using submap-local coordinate frames
 
-        pcd_tensor = self.process_submap(points, submap_id)
+        Points come in world frame (tb3_1/odom). We transform them to submap-local
+        frame (relative to pose_start), then store global_transform as the absolute
+        pose of pose_start. This allows GTSAM to optimize submap poses as rigid bodies.
+
+        Args:
+            points: N×3 array in world frame (accumulated from scan-to-map ICP)
+            submap_id: Unique submap identifier
+            start_pose: Robot pose at submap start (world frame)
+            end_pose: Robot pose at submap end (world frame)
+            scan_count: Number of scans in this submap
+
+        Returns:
+            (success, pose_correction)
+        """
+        # Step 1: Transform points from world → submap-local frame
+        points_local = self._transform_points_to_local(points, start_pose)
+
+        # DEBUG: Log transformation info
+        print(f"\n{'='*60}")
+        print(f"SUBMAP {submap_id} INTEGRATION DEBUG")
+        print(f"{'='*60}")
+        print(f"Start pose: x={start_pose['x']:.3f}, y={start_pose['y']:.3f}, "
+              f"qz={start_pose['qz']:.3f}, qw={start_pose['qw']:.3f}")
+        print(f"Points in world frame: {len(points)} points")
+        print(f"  World frame center: {np.mean(points, axis=0)}")
+        print(f"  World frame extent: min={np.min(points, axis=0)}, max={np.max(points, axis=0)}")
+        print(f"Points in local frame: {len(points_local)} points")
+        print(f"  Local frame center: {np.mean(points_local, axis=0)}")
+        print(f"  Local frame extent: min={np.min(points_local, axis=0)}, max={np.max(points_local, axis=0)}")
+
+        # Step 2: Process submap (downsample) in local frame
+        pcd_tensor = self.process_submap(points_local, submap_id)
 
         if len(pcd_tensor.point.positions) < 50:
+            print(f"SKIPPED: Too few points after downsampling ({len(pcd_tensor.point.positions)})")
             return False, None
 
+        # Step 3: Calculate pose_center for spatial search (still needed for loop closure)
         pose_center = {
             'x': (start_pose['x'] + end_pose['x']) / 2,
             'y': (start_pose['y'] + end_pose['y']) / 2,
@@ -140,15 +236,26 @@ class SubmapStitcher:
             'qw': end_pose['qw']
         }
 
+        # Step 4: Extract features from local-frame points
         features = None
         if self.enable_loop_closure:
             pcd_legacy = pcd_tensor.to_legacy()
             features = self.extract_features(pcd_legacy, submap_id)
 
-        if submap_id == 0:
+        # Step 5: Calculate global_transform as absolute pose of pose_start
+        global_transform = self._pose_to_matrix(start_pose)
 
-            self.global_map_tensor = pcd_tensor
-            initial_transform = np.eye(4)
+        print(f"\nGlobal transform matrix (pose_start → world):")
+        print(f"{global_transform}")
+        print(f"Translation: [{global_transform[0,3]:.3f}, {global_transform[1,3]:.3f}, {global_transform[2,3]:.3f}]")
+        print(f"Rotation (yaw): {np.arctan2(global_transform[1,0], global_transform[0,0]):.3f} rad")
+
+        if submap_id == 0:
+            # First submap: Store directly without ICP alignment
+            # Transform submap to world frame for global map
+            transform_tensor = o3c.Tensor(global_transform, dtype=o3c.float32, device=self.device)
+            pcd_world_tensor = pcd_tensor.transform(transform_tensor)
+            self.global_map_tensor = pcd_world_tensor
 
             # Memory optimization: Only store point cloud if loop closure is disabled
             # For loop closure, we only need features after extraction
@@ -161,18 +268,18 @@ class SubmapStitcher:
 
             submap_data = {
                 'id': submap_id,
-                'point_cloud': stored_pcd,  # Decimated for memory efficiency
+                'point_cloud': stored_pcd,  # In submap-local frame
                 'features': features,
                 'pose_start': start_pose,
                 'pose_end': end_pose,
                 'pose_center': pose_center,
-                'global_transform': initial_transform,
+                'global_transform': global_transform,  # Absolute pose of pose_start
                 'scan_count': scan_count,
                 'timestamp_created': time.time()
             }
 
             self.submaps.append(submap_data)
-            self.transforms.append(initial_transform)
+            self.transforms.append(global_transform)
 
             # Add to loop closure spatial index
             if self.loop_closure_detector is not None:
@@ -183,32 +290,47 @@ class SubmapStitcher:
 
             return True, None  # No correction for first submap
 
-        # Points are already in world frame, use identity for ICP
-        initial_transform = np.eye(4)
+        # Step 6: ICP alignment for submap-to-map refinement
+        # We do ICP on LOCAL frame points with global_transform as initial guess
+        # This way ICP directly gives us the refined global_transform
+        print(f"\nICP Alignment:")
+        print(f"  Source (submap in LOCAL frame): {len(pcd_tensor.point.positions)} points")
+        print(f"  Target (global map): {len(self.global_map_tensor.point.positions)} points")
 
-        success, icp_refinement, fitness = self.align_submap_with_icp(
+        # ICP with global_transform as initial guess
+        # ICP will transform source by initial_guess, then find refinement
+        success, global_transform_refined, fitness = self.align_submap_with_icp(
             source=pcd_tensor,
             target=self.global_map_tensor,
-            initial_guess=initial_transform
+            initial_guess=global_transform  # Use odometry estimate as starting point
         )
 
-        # ICP returns refinement transform relative to initial_guess
-        # Final transform = initial_guess (from odometry) composed with ICP refinement
-        # Since ICP already applies initial_guess internally, icp_refinement is the TOTAL transform
-        final_transform = icp_refinement
+        print(f"  ICP Success: {success}, Fitness: {fitness:.4f}")
+        print(f"  ICP refined global transform:")
+        print(f"{global_transform_refined}")
 
-        # Calculate ICP correction (difference from odometry prediction)
-        icp_correction = np.linalg.inv(initial_transform) @ final_transform
+        print(f"\nRefined global transform (after ICP):")
+        print(f"  Translation: [{global_transform_refined[0,3]:.3f}, {global_transform_refined[1,3]:.3f}, {global_transform_refined[2,3]:.3f}]")
+        print(f"  Rotation (yaw): {np.arctan2(global_transform_refined[1,0], global_transform_refined[0,0]):.3f} rad")
+
+        # Calculate ICP correction (difference from odometry-based placement)
+        icp_correction = np.linalg.inv(global_transform) @ global_transform_refined
         correction_translation = np.linalg.norm(icp_correction[:2, 3])
         correction_rotation = np.abs(np.arctan2(icp_correction[1, 0], icp_correction[0, 0]))
 
+        print(f"\nICP Correction:")
+        print(f"  Translation: {correction_translation:.4f} m")
+        print(f"  Rotation: {np.degrees(correction_rotation):.2f} deg")
+
         # Relaxed thresholds to allow larger corrections for accumulated drift
-        if correction_translation > 1.0 or correction_rotation > np.radians(20):  # ICP correction too large
-            final_transform = initial_transform  # Reject ICP, use odometry
+        if correction_translation > 1.0 or correction_rotation > np.radians(20):
+            # ICP correction too large - reject and use odometry
+            global_transform_refined = global_transform
             success = False
 
         if not success or fitness < self.icp_fitness_threshold:
-            final_transform = initial_transform  # Reject ICP, use odometry
+            # ICP failed - use odometry
+            global_transform_refined = global_transform
 
         # Extract pose correction for robot pose update (relative to odometry)
         pose_correction = None
@@ -219,30 +341,32 @@ class SubmapStitcher:
                 'dtheta': np.arctan2(icp_correction[1, 0], icp_correction[0, 0])
             }
 
-        transform_tensor = o3c.Tensor(final_transform, dtype=o3c.float32, device=self.device)
-        pcd_aligned_tensor = pcd_tensor.transform(transform_tensor)
+        # Transform local-frame submap to world frame using refined transform
+        transform_refined_tensor = o3c.Tensor(global_transform_refined, dtype=o3c.float32, device=self.device)
+        pcd_aligned_tensor = pcd_tensor.transform(transform_refined_tensor)
 
-        # Memory optimization: Only store decimated point cloud for subsequent submaps
+        # Memory optimization: Store local-frame point cloud (decimated)
+        # We store in local frame so GTSAM can re-transform with optimized poses
         if self.enable_loop_closure:
-            pcd_decimated = pcd_aligned_tensor.to_legacy().voxel_down_sample(self.voxel_size * 3.0)
+            pcd_decimated = pcd_tensor.to_legacy().voxel_down_sample(self.voxel_size * 3.0)
             stored_pcd = pcd_decimated
         else:
-            stored_pcd = pcd_aligned_tensor.to_legacy()
+            stored_pcd = pcd_tensor.to_legacy()
 
         submap_data = {
             'id': submap_id,
-            'point_cloud': stored_pcd,  # Decimated for memory efficiency
+            'point_cloud': stored_pcd,  # In submap-local frame
             'features': features,
             'pose_start': start_pose,
             'pose_end': end_pose,
             'pose_center': pose_center,
-            'global_transform': final_transform,
+            'global_transform': global_transform_refined,  # Absolute pose of pose_start (refined by ICP)
             'scan_count': scan_count,
             'timestamp_created': time.time()
         }
 
         self.submaps.append(submap_data)
-        self.transforms.append(final_transform)
+        self.transforms.append(global_transform_refined)
 
         if self.loop_closure_detector is not None:
             self.loop_closure_detector.add_submap_to_index(

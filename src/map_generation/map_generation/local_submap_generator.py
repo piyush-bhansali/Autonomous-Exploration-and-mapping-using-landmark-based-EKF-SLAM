@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default, QoSProfile, ReliabilityPolicy
+from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField, JointState
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
@@ -77,11 +77,19 @@ class LocalSubmapGenerator(Node):
             self.device = o3c.Device("CPU:0")
             self.get_logger().info("GPU not available, using CPU for ICP")
 
+        # Use RELIABLE QoS to match the bridge publisher (fixes QoS mismatch)
+        # Bridge publishes scan with RELIABLE QoS, so subscriber must match
+        scan_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST
+        )
         self.scan_sub = self.create_subscription(
             LaserScan,
             f'/{self.robot_name}/scan',
             self.scan_callback,
-            qos_profile_sensor_data
+            scan_qos
         )
 
         self.imu_sub = self.create_subscription(
@@ -293,6 +301,20 @@ class LocalSubmapGenerator(Node):
         y = state['y']
         theta = state['theta']
         qx, qy, qz, qw = yaw_to_quaternion(theta)
+
+        # DEBUG: Compare EKF vs Ground Truth (every 20 updates)
+        if self.ekf.update_count % 20 == 0:
+            error_x = x - x_odom
+            error_y = y - y_odom
+            error_theta = theta - theta_odom
+            # Wrap angle error
+            error_theta = np.arctan2(np.sin(error_theta), np.cos(error_theta))
+            error_dist = np.sqrt(error_x**2 + error_y**2)
+
+            print(f"\n[EKF vs GROUND TRUTH COMPARISON]")
+            print(f"  Ground Truth (odom): x={x_odom:.3f}, y={y_odom:.3f}, theta={theta_odom:.3f}")
+            print(f"  EKF Estimate:        x={x:.3f}, y={y:.3f}, theta={theta:.3f}")
+            print(f"  Error: dx={error_x:.4f}m, dy={error_y:.4f}m, dist={error_dist:.4f}m, dtheta={np.degrees(error_theta):.2f}°")
 
         # Update current pose
         with self.data_lock:

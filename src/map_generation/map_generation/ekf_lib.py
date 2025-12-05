@@ -83,6 +83,11 @@ class EKF:
         self.imu_prediction_count += 1
         self.consecutive_predictions_without_update += 1
 
+        # DEBUG: Log every 50 predictions
+        if self.imu_prediction_count % 50 == 0:
+            print(f"[EKF PREDICT] State after prediction: x={x_pred:.3f}, y={y_pred:.3f}, theta={theta_pred:.3f}, "
+                  f"vx={self.vx:.3f}, omega={omega:.3f}")
+
         if self.consecutive_predictions_without_update > 100:  # ~0.5s at 200Hz
             import warnings
             warnings.warn(f"EKF: {self.consecutive_predictions_without_update} IMU predictions without odometry update - potential drift!", stacklevel=2)
@@ -119,23 +124,34 @@ class EKF:
 
         K = self.P @ H.T @ S_inv
 
+        # DEBUG: Log before update
+        state_before = self.state.copy()
+
         # State update
         self.state = self.state + K @ innovation
-        self.state[2] = np.arctan2(np.sin(self.state[2]), np.cos(self.state[2])) 
+        self.state[2] = np.arctan2(np.sin(self.state[2]), np.cos(self.state[2]))
 
 
         I = np.eye(3)
         I_KH = I - K @ H
-        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T  
-        
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+
         self.P = (self.P + self.P.T) / 2.0
 
         if vx_odom is not None:
             self.vx = vx_odom
-            self.vy = 0.0  
+            self.vy = 0.0
 
         self.update_count += 1
         self.consecutive_predictions_without_update = 0
+
+        # DEBUG: Log update
+        print(f"[EKF UPDATE {measurement_type.upper()}]")
+        print(f"  Measurement: x={x_meas:.3f}, y={y_meas:.3f}, theta={theta_meas:.3f}")
+        print(f"  Before: x={state_before[0]:.3f}, y={state_before[1]:.3f}, theta={state_before[2]:.3f}")
+        print(f"  After:  x={self.state[0]:.3f}, y={self.state[1]:.3f}, theta={self.state[2]:.3f}")
+        print(f"  Innovation: dx={innovation[0]:.4f}, dy={innovation[1]:.4f}, dtheta={innovation[2]:.4f}")
+        print(f"  Kalman gain norm: {np.linalg.norm(K):.4f}")
 
     def get_state(self):
         

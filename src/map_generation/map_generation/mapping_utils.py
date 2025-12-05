@@ -2,7 +2,7 @@
 
 
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 from scipy.spatial import KDTree
 import open3d as o3d
 import open3d.core as o3c
@@ -114,7 +114,9 @@ def scan_to_map_icp(
 
 
 def match_scan_context(sc1: np.ndarray, sc2: np.ndarray, num_sectors: int = 60) -> Tuple[float, int]:
-   
+    """
+    Original Scan Context matching (kept for backward compatibility)
+    """
     # Reshape to 2D grid (rings × sectors) if needed
     if sc1.ndim == 1:
         sc1 = sc1.reshape(-1, num_sectors)
@@ -148,6 +150,237 @@ def match_scan_context(sc1: np.ndarray, sc2: np.ndarray, num_sectors: int = 60) 
                 best_shift = shift
 
     return best_sim, best_shift
+
+
+def match_scan_context_scale_invariant(
+    sc1: np.ndarray,
+    sc2: np.ndarray,
+    metadata1: dict,
+    metadata2: dict,
+    num_rings: int = 20,
+    num_sectors: int = 60
+) -> Tuple[float, int]:
+    """
+    Scale-invariant Scan Context matching
+
+    Matches submaps of different sizes by comparing relative occupancy distributions
+    rather than absolute range values.
+
+    Args:
+        sc1: Scan Context descriptor 1 (flattened or 2D)
+        sc2: Scan Context descriptor 2
+        metadata1: Metadata from feature extraction (includes max_range_used, r_99th_percentile)
+        metadata2: Metadata from feature extraction
+        num_rings: Number of radial bins
+        num_sectors: Number of angular bins
+
+    Returns:
+        (similarity_score, best_rotation_shift)
+    """
+    # Reshape to 2D grids
+    if sc1.ndim == 1:
+        grid1 = sc1.reshape(num_rings, num_sectors)
+    elif sc1.shape[0] == 1:
+        grid1 = sc1.reshape(num_rings, num_sectors)
+    else:
+        grid1 = sc1
+
+    if sc2.ndim == 1:
+        grid2 = sc2.reshape(num_rings, num_sectors)
+    elif sc2.shape[0] == 1:
+        grid2 = sc2.reshape(num_rings, num_sectors)
+    else:
+        grid2 = sc2
+
+    # Compute radial occupancy distribution (scale-invariant!)
+    ring_occupancy1 = np.sum(grid1, axis=1)  # Sum over sectors
+    ring_occupancy2 = np.sum(grid2, axis=1)
+
+    # Normalize to make distribution comparable
+    sum1 = np.sum(ring_occupancy1)
+    sum2 = np.sum(ring_occupancy2)
+
+    if sum1 > 0:
+        ring_occupancy1 = ring_occupancy1 / sum1
+    if sum2 > 0:
+        ring_occupancy2 = ring_occupancy2 / sum2
+
+    # Compare distributions (1.0 = identical, 0.0 = completely different)
+    radial_similarity = 1.0 - np.mean(np.abs(ring_occupancy1 - ring_occupancy2))
+
+    # Search for best rotation with angular pattern matching
+    best_angular_sim = -1
+    best_shift = 0
+
+    for shift in range(num_sectors):
+        grid2_shifted = np.roll(grid2, shift, axis=1)
+
+        # Cosine similarity on full descriptor
+        flat1 = grid1.flatten()
+        flat2 = grid2_shifted.flatten()
+
+        norm1 = np.linalg.norm(flat1)
+        norm2 = np.linalg.norm(flat2)
+
+        if norm1 > 0 and norm2 > 0:
+            angular_sim = np.dot(flat1, flat2) / (norm1 * norm2)
+
+            if angular_sim > best_angular_sim:
+                best_angular_sim = angular_sim
+                best_shift = shift
+
+    # Combined score: radial distribution (scale-invariant) + angular pattern
+    # Radial similarity ensures we match similar structures regardless of size
+    # Angular similarity ensures rotation alignment
+    combined_similarity = 0.4 * radial_similarity + 0.6 * best_angular_sim
+
+    return combined_similarity, best_shift
+
+
+def match_scan_context_with_voting(
+    sc1: np.ndarray,
+    sc2: np.ndarray,
+    num_rings: int = 20,
+    num_sectors: int = 60,
+    threshold: float = 0.5
+) -> Tuple[float, int, Optional[np.ndarray]]:
+    """
+    Majority voting Scan Context matching
+
+    Requires that >50% of bins agree (both occupied or both free)
+    to reduce false positives from partial matches like corridor ends.
+
+    Args:
+        sc1: Scan Context descriptor 1
+        sc2: Scan Context descriptor 2
+        num_rings: Number of radial bins
+        num_sectors: Number of angular bins
+        threshold: Minimum agreement ratio (default 0.5 = 50%)
+
+    Returns:
+        (agreement_ratio, best_rotation_shift, agreement_mask)
+    """
+    # Reshape to 2D grids
+    if sc1.ndim == 1:
+        grid1 = sc1.reshape(num_rings, num_sectors)
+    elif sc1.shape[0] == 1:
+        grid1 = sc1.reshape(num_rings, num_sectors)
+    else:
+        grid1 = sc1
+
+    if sc2.ndim == 1:
+        grid2 = sc2.reshape(num_rings, num_sectors)
+    elif sc2.shape[0] == 1:
+        grid2 = sc2.reshape(num_rings, num_sectors)
+    else:
+        grid2 = sc2
+
+    best_agreement = 0
+    best_shift = 0
+    best_mask = None
+
+    for shift in range(num_sectors):
+        grid2_shifted = np.roll(grid2, shift, axis=1)
+
+        # Bin-wise agreement (1 if both occupied or both empty)
+        both_occupied = (grid1 > 0.5) & (grid2_shifted > 0.5)
+        both_empty = (grid1 <= 0.5) & (grid2_shifted <= 0.5)
+        agreement_mask = both_occupied | both_empty
+
+        # Count agreement percentage
+        agreement_ratio = np.sum(agreement_mask) / agreement_mask.size
+
+        if agreement_ratio > best_agreement:
+            best_agreement = agreement_ratio
+            best_shift = shift
+            best_mask = agreement_mask
+
+    # Return 0 if below threshold (reject match)
+    if best_agreement < threshold:
+        return 0.0, 0, None
+
+    return best_agreement, best_shift, best_mask
+
+
+def is_distinctive_submap(
+    geometric_descriptors: np.ndarray,
+    min_distinctiveness: float = 0.25,
+    min_keypoints: int = 15
+) -> Tuple[bool, Dict]:
+    """
+    Check if submap has enough geometric features for reliable loop closure
+
+    Rejects:
+    - Long corridors (high linearity, low scattering)
+    - Planar walls (high planarity, uniform features)
+    - Featureless spaces (low variance in descriptors)
+
+    Args:
+        geometric_descriptors: N×4 array [linearity, planarity, scattering, avg_dist]
+        min_distinctiveness: Minimum feature variance threshold
+        min_keypoints: Minimum number of keypoints required
+
+    Returns:
+        (is_distinctive, metrics_dict)
+    """
+    if len(geometric_descriptors) < min_keypoints:
+        return False, {'reason': 'too_few_keypoints', 'num_keypoints': len(geometric_descriptors)}
+
+    # Extract feature statistics
+    linearity = geometric_descriptors[:, 0]
+    planarity = geometric_descriptors[:, 1]
+    scattering = geometric_descriptors[:, 2]
+    avg_dist = geometric_descriptors[:, 3]
+
+    # Metric 1: High linearity = corridor (walls parallel to viewing direction)
+    mean_linearity = np.mean(linearity)
+    if mean_linearity > 0.7:  # 70% linear = corridor walls
+        return False, {
+            'reason': 'corridor_detected',
+            'mean_linearity': float(mean_linearity)
+        }
+
+    # Metric 2: Low scattering variance = uniform structure (no distinctive features)
+    scattering_variance = np.var(scattering)
+    if scattering_variance < 0.01:  # Very uniform
+        return False, {
+            'reason': 'low_geometric_diversity',
+            'scattering_var': float(scattering_variance)
+        }
+
+    # Metric 3: Feature diversity (variance across all dimensions)
+    feature_variance = np.mean([
+        np.var(linearity),
+        np.var(planarity),
+        np.var(scattering),
+        np.var(avg_dist)
+    ])
+
+    if feature_variance < min_distinctiveness:
+        return False, {
+            'reason': 'low_feature_diversity',
+            'feature_var': float(feature_variance)
+        }
+
+    # Metric 4: Check for distinctive corners/intersections
+    # Corners have: low linearity, high scattering
+    corner_points = (linearity < 0.3) & (scattering > 0.4)
+    corner_ratio = np.sum(corner_points) / len(linearity)
+
+    if corner_ratio < 0.1:  # Less than 10% corners
+        return False, {
+            'reason': 'no_distinctive_features',
+            'corner_ratio': float(corner_ratio)
+        }
+
+    # Passed all checks - this is a distinctive submap!
+    return True, {
+        'mean_linearity': float(mean_linearity),
+        'scattering_var': float(scattering_variance),
+        'feature_var': float(feature_variance),
+        'corner_ratio': float(corner_ratio),
+        'num_keypoints': len(geometric_descriptors)
+    }
 
 
 def match_geometric_features(

@@ -7,7 +7,13 @@ from typing import List, Optional, Tuple, Dict
 from scipy.spatial import KDTree
 
 # Import shared mapping utilities
-from map_generation.mapping_utils import match_scan_context, match_geometric_features
+from map_generation.mapping_utils import (
+    match_scan_context,
+    match_scan_context_scale_invariant,
+    match_scan_context_with_voting,
+    match_geometric_features,
+    is_distinctive_submap
+)
 
 
 class LoopClosureDetector: 
@@ -53,8 +59,19 @@ class LoopClosureDetector:
                            current_submap: Dict,
                            submap_database: List[Dict],
                            min_time_separation: float = 30.0) -> Optional[Dict]:
-        
+
         self.stats['num_checks'] += 1
+
+        # PRE-FILTER: Check if current submap is distinctive enough
+        if current_submap['features'] is not None and 'geometric' in current_submap['features']:
+            geom_descriptors = current_submap['features']['geometric']
+            if len(geom_descriptors) > 0:
+                is_distinctive, metrics = is_distinctive_submap(geom_descriptors)
+
+                if not is_distinctive:
+                    # Skip loop closure for corridors/featureless areas
+                    # print(f"  Skipping loop closure: {metrics['reason']}")
+                    return None
 
         # Stage 1: Spatial + Scan Context Pre-filtering
         candidates = self._stage1_coarse_matching(
@@ -110,6 +127,13 @@ class LoopClosureDetector:
         else:
             spatial_candidates = range(len(submap_database))
 
+        # Get current metadata for scale-invariant matching
+        current_metadata = current_features.get('metadata', {})
+        if 'scan_context' in current_metadata:
+            sc_metadata_current = current_metadata['scan_context']
+        else:
+            sc_metadata_current = {}
+
         # Scan Context matching on spatially filtered candidates
         for idx in spatial_candidates:
             if idx >= len(submap_database):
@@ -122,24 +146,47 @@ class LoopClosureDetector:
             if time_diff < min_time_separation:
                 continue
 
+            # Check if candidate is distinctive (skip corridors)
+            if candidate['features'] is not None and 'geometric' in candidate['features']:
+                geom_candidate = candidate['features']['geometric']
+                if len(geom_candidate) > 0:
+                    is_candidate_distinctive, _ = is_distinctive_submap(geom_candidate)
+                    if not is_candidate_distinctive:
+                        continue  # Skip non-distinctive candidates
+
             # Get candidate Scan Context
             if candidate['features'] is None or 'scan_context' not in candidate['features']:
                 continue
 
             sc_candidate = candidate['features']['scan_context']
+            candidate_metadata = candidate['features'].get('metadata', {})
+            if 'scan_context' in candidate_metadata:
+                sc_metadata_candidate = candidate_metadata['scan_context']
+            else:
+                sc_metadata_candidate = {}
 
-            # Rotation-invariant Scan Context matching
-            similarity, best_rotation = match_scan_context(sc_current, sc_candidate)
+            # Scale-invariant Scan Context matching
+            similarity, best_rotation = match_scan_context_scale_invariant(
+                sc_current, sc_candidate,
+                sc_metadata_current, sc_metadata_candidate
+            )
 
-            if similarity > self.scan_context_threshold:
+            # Majority voting check (additional robustness)
+            agreement_ratio, voting_rotation, _ = match_scan_context_with_voting(
+                sc_current, sc_candidate
+            )
+
+            # Accept if both scale-invariant similarity AND majority voting pass
+            if similarity > 0.65 and agreement_ratio > 0.5:
                 candidates.append({
                     'submap': candidate,
                     'similarity': similarity,
+                    'agreement_ratio': agreement_ratio,
                     'estimated_rotation_sectors': best_rotation
                 })
 
-        # Sort by similarity (best first)
-        candidates.sort(key=lambda x: x['similarity'], reverse=True)
+        # Sort by combined score (similarity + agreement)
+        candidates.sort(key=lambda x: 0.6 * x['similarity'] + 0.4 * x['agreement_ratio'], reverse=True)
 
         return candidates[:5]  # Return top 5 candidates
 
