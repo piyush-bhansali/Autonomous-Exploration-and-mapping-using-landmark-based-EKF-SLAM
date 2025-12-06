@@ -278,8 +278,151 @@ def generate_launch_description():
 
     rviz_delayed = TimerAction(period=6.0, actions=[rviz_node_tb3_1])
 
-    # NOTE: For tb3_2, launch separately with:
-    # ros2 run rviz2 rviz2 -d /path/to/tb3_2_visualization.rviz
+    # ========================================================================
+    # 7. SECOND ROBOT: TB3_2 (OPPOSITE CORNER)
+    # ========================================================================
+    robot_name_2 = 'tb3_2'
+
+    # Prepare robot SDF with substitutions for tb3_2
+    with open(robot_sdf, 'r') as f:
+        robot_sdf_content_2 = f.read()
+
+    # Substitute mesh paths and robot name
+    robot_sdf_content_2 = robot_sdf_content_2.replace('package://multi_robot_mapping/meshes', f'file://{mesh_path}')
+    robot_sdf_content_2 = robot_sdf_content_2.replace('{robot_name}', robot_name_2)
+
+    # Replace gz_frame_id for sensors to add namespace
+    robot_sdf_content_2 = robot_sdf_content_2.replace(
+        '<gz_frame_id>base_scan</gz_frame_id>',
+        f'<gz_frame_id>{robot_name_2}/base_scan</gz_frame_id>'
+    )
+
+    # Fix DiffDrive plugin frame_id
+    robot_sdf_content_2 = robot_sdf_content_2.replace(
+        '<frame_id>odom</frame_id>',
+        f'<frame_id>{robot_name_2}/odom</frame_id>'
+    )
+
+    # Fix DiffDrive plugin child_frame_id
+    robot_sdf_content_2 = robot_sdf_content_2.replace(
+        '<child_frame_id>base_footprint</child_frame_id>',
+        f'<child_frame_id>{robot_name_2}/base_footprint</child_frame_id>'
+    )
+
+    # Spawn tb3_2 at OPPOSITE corner (Northeast: +12, +12)
+    spawn_robot_2 = Node(
+        package='ros_gz_sim',
+        executable='create',
+        name=f'spawn_{robot_name_2}',
+        output='screen',
+        arguments=[
+            '-world', gazebo_world_name_dynamic,
+            '-name', robot_name_2,
+            '-string', robot_sdf_content_2,
+            '-x', '12.0',   # OPPOSITE corner from tb3_1
+            '-y', '12.0',   # OPPOSITE corner from tb3_1
+            '-z', '0.01',
+            '-Y', '3.14159'  # Face southwest (180 degrees)
+        ]
+    )
+
+    # Robot bridge for tb3_2
+    with open(bridge_robot_yaml, 'r') as f:
+        template_content_2 = f.read()
+
+    config_content_2 = template_content_2.replace('{robot_name}', robot_name_2)
+    config_content_2 = config_content_2.replace('{world_name}', gazebo_world_name_str)
+
+    temp_config_2 = f'/tmp/{robot_name_2}_bridge.yaml'
+    with open(temp_config_2, 'w') as f:
+        f.write(config_content_2)
+
+    robot_bridge_2 = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name=f'{robot_name_2}_bridge',
+        output='screen',
+        parameters=[{'config_file': temp_config_2}]
+    )
+
+    # Robot state publisher for tb3_2
+    with open(urdf_file, 'r') as f:
+        urdf_content_2 = f.read()
+    urdf_content_2 = urdf_content_2.replace('${namespace}', f'{robot_name_2}/')
+
+    robot_state_publisher_2 = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        name=f'{robot_name_2}_state_publisher',
+        output='screen',
+        parameters=[{
+            'robot_description': urdf_content_2,
+            'frame_prefix': ''
+        }],
+        remappings=[('/joint_states', f'/{robot_name_2}/joint_states')]
+    )
+
+    robot_spawn_delayed_2 = TimerAction(
+        period=3.0,  # 1s after tb3_1
+        actions=[spawn_robot_2, robot_state_publisher_2, robot_bridge_2]
+    )
+
+    # Mapping for tb3_2
+    submap_generator_2 = Node(
+        package='map_generation',
+        executable='local_submap_generator',
+        name=f'{robot_name_2}_submap_generator',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'robot_name': robot_name_2,
+            'scans_per_submap': 50,
+            'save_directory': './submaps',
+            'voxel_size': 0.08,
+            'feature_method': 'hybrid',
+            'enable_loop_closure': True,
+            'enable_scan_to_map_icp': True
+        }]
+    )
+
+    submap_generator_delayed_2 = TimerAction(period=5.0, actions=[submap_generator_2])
+
+    # Navigation for tb3_2
+    navigation_node_2 = Node(
+        package='navigation',
+        executable='simple_navigation',
+        name=f'{robot_name_2}_navigation',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'robot_name': robot_name_2,
+            'robot_radius': 0.35,
+            'enable_reactive_avoidance': True,
+            'scan_danger_distance': 0.5,
+            'scan_emergency_distance': 0.3,
+            'scan_angular_range': 60.0,
+            'enable_path_deviation_check': True,
+            'path_deviation_threshold': 0.8,
+            'path_deviation_check_interval': 2.0
+        }],
+        condition=launch.conditions.IfCondition(enable_navigation)
+    )
+
+    navigation_delayed_2 = TimerAction(period=9.0, actions=[navigation_node_2])
+
+    # RViz for tb3_2
+    rviz_node_tb3_2 = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2_tb3_2',
+        namespace='tb3_2',
+        arguments=['-d', rviz_config_tb3_2],
+        output='screen',
+        parameters=[{'use_sim_time': True}],
+        condition=launch.conditions.IfCondition(use_rviz)
+    )
+
+    rviz_delayed_2 = TimerAction(period=7.0, actions=[rviz_node_tb3_2])
 
     # ========================================================================
     # LAUNCH DESCRIPTION
@@ -299,13 +442,22 @@ def generate_launch_description():
         LogInfo(msg=['Robots: ', num_robots]),
         LogInfo(msg='========================================'),
 
-        
+
+        # Core system
         gazebo_server,
         clock_bridge_delayed,          # t=1s
+
+        # Robot 1 (tb3_1)
         robot_spawn_delayed,           # t=2s - Robot FIRST
         submap_generator_delayed,      # t=4s - EKF after robot
         rviz_delayed,                  # t=6s
         navigation_delayed,            # t=8s
 
-        LogInfo(msg='✓ System launching...'),
+        # Robot 2 (tb3_2)
+        robot_spawn_delayed_2,         # t=3s
+        submap_generator_delayed_2,    # t=5s
+        rviz_delayed_2,                # t=7s
+        navigation_delayed_2,          # t=9s
+
+        LogInfo(msg='✓ Multi-robot system launching...'),
     ])
