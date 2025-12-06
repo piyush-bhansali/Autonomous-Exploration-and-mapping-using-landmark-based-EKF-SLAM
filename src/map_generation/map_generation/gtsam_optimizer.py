@@ -65,8 +65,6 @@ class GTSAMOptimizer:
             )
             graph.add(gtsam.PriorFactorPose2(0, first_pose, prior_noise))
 
-            # Add odometry constraints between consecutive submaps
-            # This is CRITICAL - without these, the pose graph is underconstrained
             odometry_noise = gtsam.noiseModel.Diagonal.Sigmas(
                 np.array([self.translation_sigma, self.translation_sigma, self.rotation_sigma])
             )
@@ -123,8 +121,6 @@ class GTSAMOptimizer:
 
             relative_pose = gtsam.Pose2(dx, dy, dtheta)
 
-            # Add between factor for loop closure
-            # This says: "we measured that current_id is at relative_pose from match_id"
             graph.add(gtsam.BetweenFactorPose2(
                 match_id, current_id, relative_pose, loop_noise
             ))

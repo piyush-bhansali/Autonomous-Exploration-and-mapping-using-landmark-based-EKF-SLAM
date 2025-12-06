@@ -6,7 +6,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import PointCloud2, PointField, LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
 import numpy as np
 import struct
@@ -38,8 +38,23 @@ class SimpleNavigationNode(Node):
         # NOTE: use_sim_time is automatically declared by ROS 2, don't declare it again!
         self.declare_parameter('robot_name', 'tb3_1')
         self.declare_parameter('robot_radius', 0.22)
+        self.declare_parameter('enable_reactive_avoidance', True)
+        self.declare_parameter('scan_danger_distance', 0.5)
+        self.declare_parameter('scan_emergency_distance', 0.3)
+        self.declare_parameter('scan_angular_range', 60.0)
+        self.declare_parameter('enable_path_deviation_check', True)
+        self.declare_parameter('path_deviation_threshold', 0.8)
+        self.declare_parameter('path_deviation_check_interval', 2.0)
+
         self.robot_name = self.get_parameter('robot_name').value
         self.robot_radius = self.get_parameter('robot_radius').value
+        self.enable_reactive_avoidance = self.get_parameter('enable_reactive_avoidance').value
+        self.scan_danger_distance = self.get_parameter('scan_danger_distance').value
+        self.scan_emergency_distance = self.get_parameter('scan_emergency_distance').value
+        self.scan_angular_range = np.radians(self.get_parameter('scan_angular_range').value)
+        self.enable_path_deviation_check = self.get_parameter('enable_path_deviation_check').value
+        self.path_deviation_threshold = self.get_parameter('path_deviation_threshold').value
+        self.path_deviation_check_interval = self.get_parameter('path_deviation_check_interval').value
 
         # State
         self.state = State.WAIT_FOR_MAP
@@ -63,6 +78,16 @@ class SimpleNavigationNode(Node):
 
         # BUG FIX #15: Thread safety for map updates
         self.map_lock = threading.Lock()
+
+        # Scan-based obstacle avoidance
+        self.scan_data = None
+        self.scan_lock = threading.Lock()
+        self.last_obstacle_warning_time = None
+        self.obstacle_warning_cooldown = 2.0  # seconds between warnings
+
+        # Path deviation detection
+        self.last_deviation_check_time = None
+        self.replan_count = 0
 
         # Dynamic replanning thresholds
         self.replan_score_threshold = 0.30  # Replan if new frontier score improves by >30% (increased from 15% to prevent oscillation)
@@ -102,6 +127,20 @@ class SimpleNavigationNode(Node):
             f'/{self.robot_name}/odom',
             self.odom_callback,
             10
+        )
+
+        # Scan subscriber for reactive obstacle avoidance
+        scan_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,  # Sensor data typically uses BEST_EFFORT
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST
+        )
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            f'/{self.robot_name}/scan',
+            self.scan_callback,
+            scan_qos
         )
 
         # Publishers
@@ -152,6 +191,11 @@ class SimpleNavigationNode(Node):
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
         self.robot_yaw = quaternion_to_yaw(qx, qy, qz, qw)
+
+    def scan_callback(self, msg: LaserScan):
+        """Update scan data for reactive obstacle avoidance"""
+        with self.scan_lock:
+            self.scan_data = msg
 
     def control_loop(self):
         """Main control loop"""
@@ -313,6 +357,28 @@ class SimpleNavigationNode(Node):
             self.get_logger().info('[STATE: EXECUTE_PATH → DETECT_FRONTIERS] Recovering from stuck condition...')
             return
 
+        # PATH DEVIATION CHECK: Replan if robot deviated too far from path
+        is_deviated, deviation_distance = self._check_path_deviation()
+        if is_deviated:
+            self.replan_count += 1
+            self.get_logger().warn(
+                f'[STATE: EXECUTE_PATH] PATH DEVIATION DETECTED! Distance from path: {deviation_distance:.2f}m '
+                f'(threshold: {self.path_deviation_threshold:.2f}m). Replanning... (replan #{self.replan_count})'
+            )
+
+            # Stop the robot briefly
+            cmd = Twist()
+            self.cmd_pub.publish(cmd)
+
+            # Keep current goal but clear path to force replanning
+            self.current_path = None
+            self.current_waypoint_index = 0
+
+            # Transition to PLAN_PATH to create new path to same goal
+            self.state = State.PLAN_PATH
+            self.get_logger().info('[STATE: EXECUTE_PATH → PLAN_PATH] Replanning due to path deviation')
+            return
+
         # Check if path complete
         if self.current_waypoint_index >= len(self.current_path):
             self.get_logger().info(f'[STATE: EXECUTE_PATH] ✓ Path complete! Reached frontier at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
@@ -375,7 +441,7 @@ class SimpleNavigationNode(Node):
             self.current_waypoint_index += 1
             return
 
-        # Compute control
+        # Compute control from path planner
         v, w = self.controller.compute_control(
             self.robot_pos,
             self.robot_yaw,
@@ -383,13 +449,46 @@ class SimpleNavigationNode(Node):
             self.current_waypoint_index
         )
 
+        # REACTIVE OBSTACLE AVOIDANCE: Check scan for immediate obstacles
+        obstacle_detected, min_distance, avoidance_direction = self._check_scan_for_obstacles()
+
+        if obstacle_detected:
+            current_time = self.get_clock().now()
+
+            # Log warning (with cooldown to avoid spam)
+            should_warn = (self.last_obstacle_warning_time is None or
+                          (current_time - self.last_obstacle_warning_time).nanoseconds / 1e9 > self.obstacle_warning_cooldown)
+
+            if should_warn:
+                self.get_logger().warn(
+                    f'[REACTIVE AVOIDANCE] Obstacle detected at {min_distance:.2f}m! '
+                    f'Avoidance: {"LEFT" if avoidance_direction < 0 else "RIGHT" if avoidance_direction > 0 else "STOP"}'
+                )
+                self.last_obstacle_warning_time = current_time
+
+            # Emergency stop if very close
+            if min_distance < self.scan_emergency_distance:
+                v = 0.0
+                w = 0.0
+            # Slow down and steer away if in danger zone
+            else:
+                # Reduce speed proportionally to distance
+                speed_factor = (min_distance - self.scan_emergency_distance) / (self.scan_danger_distance - self.scan_emergency_distance)
+                speed_factor = np.clip(speed_factor, 0.3, 1.0)  # At least 30% speed
+                v = v * speed_factor
+
+                # Add corrective steering (blend with planned steering)
+                correction_gain = 0.4  # How much to steer away (0-1)
+                w = w + correction_gain * avoidance_direction * self.controller.max_w
+
         # Log progress periodically
         if self.current_waypoint_index % 10 == 0:
             progress = (self.current_waypoint_index / len(self.current_path)) * 100
             dist_to_goal = np.linalg.norm(self.robot_pos - self.current_path[-1])
+            obstacle_status = f'AVOIDING (d={min_distance:.2f}m)' if obstacle_detected else 'CLEAR'
             self.get_logger().info(
                 f'[STATE: EXECUTE_PATH] Waypoint {self.current_waypoint_index}/{len(self.current_path)} '
-                f'({progress:.1f}%), dist to goal: {dist_to_goal:.2f}m, v={v:.2f}, w={w:.2f}'
+                f'({progress:.1f}%), dist to goal: {dist_to_goal:.2f}m, v={v:.2f}, w={w:.2f}, scan={obstacle_status}'
             )
 
         # Publish velocity
@@ -464,6 +563,111 @@ class SimpleNavigationNode(Node):
 
         # No replanning needed
         return False, None, ""
+
+    def _check_scan_for_obstacles(self) -> tuple:
+        """
+        Check laser scan for obstacles in front of the robot.
+
+        Returns:
+            (obstacle_detected: bool, min_distance: float, avoidance_direction: float)
+            - obstacle_detected: True if obstacle within danger zone
+            - min_distance: Minimum distance to obstacle in front sector
+            - avoidance_direction: Suggested steering direction (-1=left, 0=straight, 1=right)
+        """
+        if not self.enable_reactive_avoidance:
+            return False, float('inf'), 0.0
+
+        with self.scan_lock:
+            scan = self.scan_data
+
+        if scan is None:
+            # No scan data available - degraded mode
+            return False, float('inf'), 0.0
+
+        # Scan parameters
+        angle_min = scan.angle_min
+        angle_max = scan.angle_max
+        angle_increment = scan.angle_increment
+        ranges = np.array(scan.ranges)
+
+        # Replace inf/nan with max range
+        max_range = scan.range_max
+        ranges = np.where(np.isfinite(ranges), ranges, max_range)
+
+        # Divide scan into sectors: front, left, right
+        num_readings = len(ranges)
+
+        # Front sector: -scan_angular_range/2 to +scan_angular_range/2
+        # Calculate indices for front sector
+        half_angular_range = self.scan_angular_range / 2.0
+
+        # Find indices corresponding to front sector
+        angles = angle_min + np.arange(num_readings) * angle_increment
+        front_mask = np.abs(angles) <= half_angular_range
+        left_mask = (angles > half_angular_range) & (angles <= np.pi/2)
+        right_mask = (angles < -half_angular_range) & (angles >= -np.pi/2)
+
+        # Get minimum distances in each sector
+        front_ranges = ranges[front_mask]
+        left_ranges = ranges[left_mask]
+        right_ranges = ranges[right_mask]
+
+        min_front = np.min(front_ranges) if len(front_ranges) > 0 else max_range
+        min_left = np.min(left_ranges) if len(left_ranges) > 0 else max_range
+        min_right = np.min(right_ranges) if len(right_ranges) > 0 else max_range
+
+        # Determine if obstacle detected
+        obstacle_detected = min_front < self.scan_danger_distance
+
+        # Determine avoidance direction (steer away from closest obstacle)
+        # If obstacle in front, steer towards the more open side
+        avoidance_direction = 0.0
+        if obstacle_detected:
+            if min_left > min_right:
+                avoidance_direction = -1.0  # Steer left (more space on left)
+            else:
+                avoidance_direction = 1.0   # Steer right (more space on right)
+
+        return obstacle_detected, min_front, avoidance_direction
+
+    def _check_path_deviation(self) -> tuple:
+        """
+        Check if robot has deviated too far from the planned path.
+
+        Returns:
+            (is_deviated: bool, min_distance_to_path: float)
+            - is_deviated: True if robot is too far from any point on path
+            - min_distance_to_path: Minimum distance to the path
+        """
+        if not self.enable_path_deviation_check:
+            return False, 0.0
+
+        if self.current_path is None or len(self.current_path) == 0:
+            return False, 0.0
+
+        # Check at regular intervals (not every loop iteration)
+        current_time = self.get_clock().now()
+        if self.last_deviation_check_time is not None:
+            time_since_check = (current_time - self.last_deviation_check_time).nanoseconds / 1e9
+            if time_since_check < self.path_deviation_check_interval:
+                return False, 0.0  # Not time to check yet
+
+        self.last_deviation_check_time = current_time
+
+        # Calculate minimum distance from robot to any point on remaining path
+        # Only check from current waypoint onwards (not behind us)
+        remaining_path = self.current_path[self.current_waypoint_index:]
+
+        if len(remaining_path) == 0:
+            return False, 0.0
+
+        distances = np.linalg.norm(remaining_path - self.robot_pos, axis=1)
+        min_distance = np.min(distances)
+
+        # Check if deviation exceeds threshold
+        is_deviated = min_distance > self.path_deviation_threshold
+
+        return is_deviated, min_distance
 
     def _is_stuck(self) -> bool:
         """

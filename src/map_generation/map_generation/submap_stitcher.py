@@ -87,33 +87,6 @@ class SubmapStitcher:
 
         return transform
 
-    def _transform_points_to_local(self, points_world: np.ndarray, submap_origin_pose: dict) -> np.ndarray:
-        """
-        Transform points from world frame to submap-local frame
-
-        The submap-local frame has its origin at submap_origin_pose (pose_start).
-        This allows all points in the submap to be expressed relative to where
-        the submap began, making the entire submap transformable as a rigid body.
-
-        Args:
-            points_world: N×3 array of points in world frame (tb3_1/odom)
-            submap_origin_pose: Pose dict for the submap origin (pose_start)
-
-        Returns:
-            N×3 array of points in submap-local frame
-        """
-        # _pose_to_matrix gives us T_local_to_world (transforms points FROM local TO world)
-        # We need T_world_to_local, which is the inverse
-        T_local_to_world = self._pose_to_matrix(submap_origin_pose)
-        T_world_to_local = np.linalg.inv(T_local_to_world)
-
-        # Transform points: world → submap-local
-        points_homogeneous = np.column_stack([points_world, np.ones(len(points_world))])
-        points_local_homogeneous = (T_world_to_local @ points_homogeneous.T).T
-        points_local = points_local_homogeneous[:, 0:3]
-
-        return points_local
-
     def process_submap(self, points: np.ndarray, submap_id: int) -> o3d.t.geometry.PointCloud:
 
         points_tensor = o3c.Tensor(points.astype(np.float32), dtype=o3c.float32, device=self.device)
@@ -184,26 +157,31 @@ class SubmapStitcher:
                                        submap_id: int,
                                        start_pose: dict,
                                        end_pose: dict,
-                                       scan_count: int) -> Tuple[bool, Optional[dict]]:
+                                       scan_count: int,
+                                       transformation_matrix: Optional[np.ndarray] = None) -> Tuple[bool, Optional[dict]]:
         """
         Integrate submap into global map using submap-local coordinate frames
 
-        Points come in world frame (tb3_1/odom). We transform them to submap-local
-        frame (relative to pose_start), then store global_transform as the absolute
-        pose of pose_start. This allows GTSAM to optimize submap poses as rigid bodies.
+        NEW ARCHITECTURE: Points now arrive ALREADY in submap-local frame.
+        transformation_matrix provides T_local_to_world, eliminating redundant transformations.
+
+        OLD (removed): points world → local → store → GTSAM → world
+        NEW (current): points local → store → GTSAM → world (one less transformation!)
 
         Args:
-            points: N×3 array in world frame (accumulated from scan-to-map ICP)
+            points: N×3 array in SUBMAP-LOCAL frame (accumulated directly from scan callback)
             submap_id: Unique submap identifier
-            start_pose: Robot pose at submap start (world frame)
-            end_pose: Robot pose at submap end (world frame)
+            start_pose: Robot pose at submap start (world frame, for metadata)
+            end_pose: Robot pose at submap end (world frame, for metadata)
             scan_count: Number of scans in this submap
+            transformation_matrix: T_local_to_world (4×4 matrix) - if None, compute from start_pose
 
         Returns:
             (success, pose_correction)
         """
-        # Step 1: Transform points from world → submap-local frame
-        points_local = self._transform_points_to_local(points, start_pose)
+        # Step 1: Points already in local frame - NO TRANSFORMATION NEEDED!
+        # (Previously: points_local = self._transform_points_to_local(points, start_pose))
+        points_local = points  # Already in submap-local frame!
 
         # Step 2: Process submap (downsample) in local frame
         pcd_tensor = self.process_submap(points_local, submap_id)
@@ -228,10 +206,15 @@ class SubmapStitcher:
             pcd_legacy = pcd_tensor.to_legacy()
             features = self.extract_features(pcd_legacy, submap_id)
 
-        # Step 5: Calculate global_transform as absolute pose of pose_start
-        global_transform = self._pose_to_matrix(start_pose)
+        # Step 5: Use provided transformation matrix (T_local_to_world)
+        # If not provided, compute from start_pose (backward compatibility)
+        if transformation_matrix is not None:
+            global_transform = transformation_matrix
+        else:
+            # Fallback: compute from start_pose (old behavior)
+            global_transform = self._pose_to_matrix(start_pose)
 
-        print(f"\nGlobal transform matrix (pose_start → world):")
+        print(f"\nGlobal transform matrix (local → world):")
         print(f"{global_transform}")
         print(f"Translation: [{global_transform[0,3]:.3f}, {global_transform[1,3]:.3f}, {global_transform[2,3]:.3f}]")
         print(f"Rotation (yaw): {np.arctan2(global_transform[1,0], global_transform[0,0]):.3f} rad")

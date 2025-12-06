@@ -2,11 +2,10 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import LaserScan, PointCloud2, PointField, JointState
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from sensor_msgs.msg import LaserScan, PointCloud2, PointField, JointState, Imu
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
-from sensor_msgs.msg import Imu
 from std_msgs.msg import Header
 from tf2_ros import TransformBroadcaster
 import numpy as np
@@ -14,6 +13,7 @@ import os
 from threading import Lock
 import open3d as o3d
 import open3d.core as o3c
+from scipy.spatial.transform import Rotation
 
 from map_generation.submap_stitcher import SubmapStitcher
 from map_generation.ekf_lib import EKF
@@ -24,8 +24,10 @@ from map_generation.utils import (
 )
 from map_generation.mapping_utils import (
     scan_to_map_icp,
-    transform_scan_to_world_frame,
-    publish_global_map
+    compute_relative_pose,
+    transform_scan_to_relative_frame,
+    publish_global_map,
+    quaternion_to_rotation_matrix
 )
 
 
@@ -34,14 +36,12 @@ class LocalSubmapGenerator(Node):
     def __init__(self):
         super().__init__('local_submap_generator')
 
-        # Declare parameters
-        # NOTE: use_sim_time is automatically declared by ROS 2, don't declare it again!
         self.declare_parameter('robot_name', 'tb3_1')
         self.declare_parameter('scans_per_submap', 50)
         self.declare_parameter('save_directory', './submaps')
         self.declare_parameter('voxel_size', 0.05)
         self.declare_parameter('feature_method', 'hybrid')
-        self.declare_parameter('enable_loop_closure', False)
+        self.declare_parameter('enable_loop_closure', True)
         self.declare_parameter('enable_scan_to_map_icp', True)
 
         # Get parameters
@@ -57,12 +57,11 @@ class LocalSubmapGenerator(Node):
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
 
-        # Initialize EKF (hardcoded to 200 Hz IMU rate)
+        # Initialize EKF 
         self.ekf = EKF()
         self.ekf_initialized = False
 
-        # Store latest raw odometry for ICP correction
-        self.latest_odom_pose = None  # Will store {'x', 'y', 'theta', 'vx'}
+        self.latest_odom_pose = None  
 
         self.stitcher = SubmapStitcher(
             voxel_size=self.voxel_size,
@@ -77,8 +76,7 @@ class LocalSubmapGenerator(Node):
             self.device = o3c.Device("CPU:0")
             self.get_logger().info("GPU not available, using CPU for ICP")
 
-        # Use RELIABLE QoS to match the bridge publisher (fixes QoS mismatch)
-        # Bridge publishes scan with RELIABLE QoS, so subscriber must match
+     
         scan_qos = QoSProfile(
             depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -263,11 +261,8 @@ class LocalSubmapGenerator(Node):
 
         # Update EKF with odometry
         vx = msg.twist.twist.linear.x
-        vy = msg.twist.twist.linear.y
-        vtheta = msg.twist.twist.angular.z
+        
 
-        # Store latest raw odometry for scan transformation and ICP correction
-        # This is BEFORE EKF filtering, so it's the direct sensor measurement
         self.latest_odom_pose = {
             'x': x_odom,
             'y': y_odom,
@@ -287,12 +282,6 @@ class LocalSubmapGenerator(Node):
                 f'EKF initialized at odom pose: ({x_odom:.3f}, {y_odom:.3f}, {np.degrees(theta_odom):.2f}°)'
             )
         else:
-            # NOTE: We NO LONGER update velocity from odometry!
-            # Velocity now comes from cmd_vel callback (commanded velocity)
-            # Odometry is only used for position/orientation corrections
-
-            # EKF UPDATE STEP: Feed odometry measurement (position/orientation only)
-            # Velocity comes from cmd_vel, not odometry
             self.ekf.update(x_odom, y_odom, theta_odom, vx_odom=None)
 
         # Get state from EKF
@@ -330,53 +319,65 @@ class LocalSubmapGenerator(Node):
             self.get_logger().warn('Waiting for odometry before processing scans...', throttle_duration_sec=5.0)
             return
 
-        # Convert scan to world frame using RAW ODOMETRY (not EKF-filtered pose)
-        # This prevents feedback loop: ICP measures error in odometry, not in EKF output
-        points_world = transform_scan_to_world_frame(
-            msg,
-            self.latest_odom_pose
-        )
+        # NEW ARCHITECTURE: Use fixed submap-local frame
+        # Initialize submap_start_pose as fixed reference when starting new submap
+        if self.submap_start_pose is None:
+            self.submap_start_pose = self.current_pose.copy()
 
-        if len(points_world) == 0:
+        # Compute relative pose from fixed submap origin
+        relative_pose = compute_relative_pose(self.current_pose, self.submap_start_pose)
+
+        # Transform scan DIRECTLY to submap-local frame
+        points_local = transform_scan_to_relative_frame(msg, relative_pose)
+
+        if len(points_local) == 0:
             return
 
-        # SCAN-TO-MAP ICP: Refine pose if we have accumulated points
+        # SCAN-TO-MAP ICP: Now works in local frame with identity initial guess!
         if self.enable_scan_to_map_icp and len(self.current_submap_points) >= 5:
             with self.data_lock:
-                # Stack accumulated points
-                accumulated_points = np.vstack(self.current_submap_points)
+                # Stack accumulated points (already in local frame)
+                accumulated_local = np.vstack(self.current_submap_points)
 
-                # Perform ICP to get correction transform and pose update
-                points_world, pose_correction = scan_to_map_icp(
-                    points_world,
-                    accumulated_points,
+                # ICP in local frame - both source and target in same frame
+                # This is much simpler: near-identity initial guess!
+                points_local_corrected, pose_correction = scan_to_map_icp(
+                    points_local,           # Source: new scan (local frame)
+                    accumulated_local,      # Target: accumulated (local frame)
                     self.device,
                     self.voxel_size,
                     self.get_logger()
                 )
 
                 if pose_correction is not None:
-                    # Validate correction magnitude before applying
-                    correction_distance = np.sqrt(pose_correction['dx']**2 + pose_correction['dy']**2)
+                    # Correction is in local frame, but we need to apply to world pose for EKF
+                    # Transform correction from local to world frame
+
+                    # Get rotation of submap_start_pose
+                    R_local_to_world = quaternion_to_rotation_matrix(
+                        self.submap_start_pose['qx'], self.submap_start_pose['qy'],
+                        self.submap_start_pose['qz'], self.submap_start_pose['qw']
+                    )
+
+                    # Rotate correction to world frame
+                    correction_local = np.array([pose_correction['dx'], pose_correction['dy'], 0.0])
+                    correction_world = R_local_to_world @ correction_local
+
+                    # Validate correction magnitude
+                    correction_distance = np.linalg.norm(correction_world[:2])
                     correction_angle = np.abs(pose_correction['dtheta'])
 
-                    # Relaxed thresholds to allow for accumulated drift correction
                     if correction_distance < 0.5 and correction_angle < np.radians(25):
-                        # CRITICAL FIX: Apply ICP correction to RAW ODOMETRY, not EKF output!
-                        # ICP measured the error in the odometry-based scan transformation,
-                        # so we correct the odometry and feed it to EKF as a new measurement
-                        corrected_x = self.latest_odom_pose['x'] + pose_correction['dx']
-                        corrected_y = self.latest_odom_pose['y'] + pose_correction['dy']
+                        # Apply world-frame correction to EKF
+                        corrected_x = self.latest_odom_pose['x'] + correction_world[0]
+                        corrected_y = self.latest_odom_pose['y'] + correction_world[1]
                         corrected_theta = self.latest_odom_pose['theta'] + pose_correction['dtheta']
                         corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
 
-                        # Feed ICP-corrected odometry as a high-accuracy measurement to EKF
-                        # This tells EKF: "odometry says X, but ICP confirms it should be X + correction"
                         self.ekf.update(corrected_x, corrected_y, corrected_theta,
                                       vx_odom=self.latest_odom_pose['vx'],
                                       measurement_type='icp')
 
-                        # Update current_pose from EKF state (for TF publishing and next iteration)
                         state = self.ekf.get_state()
                         qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
 
@@ -388,8 +389,10 @@ class LocalSubmapGenerator(Node):
                         self.current_pose['qz'] = qz
                         self.current_pose['qw'] = qw
 
-                        # Publish updated EKF pose after scan-to-map ICP correction
                         self._publish_ekf_pose()
+
+                        # Use corrected points
+                        points_local = points_local_corrected
                     else:
                         self.get_logger().warn(
                             f'Scan-to-map ICP correction REJECTED (too large): '
@@ -397,8 +400,9 @@ class LocalSubmapGenerator(Node):
                             throttle_duration_sec=5.0
                         )
 
+        # Accumulate in LOCAL frame (not world!)
         with self.data_lock:
-            self.current_submap_points.append(points_world)
+            self.current_submap_points.append(points_local)
             self.scans_in_current_submap += 1
             self.total_scans_processed += 1
 
@@ -444,22 +448,46 @@ class LocalSubmapGenerator(Node):
             scan_count = self.scans_in_current_submap
             end_pose = self.current_pose.copy()
 
-            self.get_logger().info(f'Creating submap {self.submap_id}: {scan_count} scans, {len(points)} points')
+            self.get_logger().info(
+                f'Creating submap {self.submap_id}: {scan_count} scans, {len(points)} points (local frame)'
+            )
+
+            # NEW: Points are in local frame, need transformation matrix
+            # Compute T_local_to_world from submap_start_pose
+            R = quaternion_to_rotation_matrix(
+                self.submap_start_pose['qx'], self.submap_start_pose['qy'],
+                self.submap_start_pose['qz'], self.submap_start_pose['qw']
+            )
+            t = np.array([
+                self.submap_start_pose['x'],
+                self.submap_start_pose['y'],
+                self.submap_start_pose.get('z', 0.0)
+            ])
+
+            T_local_to_world = np.eye(4)
+            T_local_to_world[0:3, 0:3] = R
+            T_local_to_world[0:3, 3] = t
+
+            # For visualization: Transform local points to world temporarily
+            points_homogeneous = np.column_stack([points, np.ones(len(points))])
+            points_world_viz = (T_local_to_world @ points_homogeneous.T).T[:, :3]
 
             # Publish current submap for visualization (yellow in RViz)
             submap_msg = numpy_to_pointcloud2(
-                points,
+                points_world_viz,
                 f'{self.robot_name}/odom',
                 self.get_clock().now().to_msg()
             )
             self.current_submap_pub.publish(submap_msg)
 
+            # Pass points in LOCAL frame + transformation matrix to stitcher
             success, pose_correction = self.stitcher.integrate_submap_to_global_map(
-                points=points,
+                points=points,  # LOCAL frame
                 submap_id=self.submap_id,
                 start_pose=self.submap_start_pose,
                 end_pose=end_pose,
-                scan_count=scan_count
+                scan_count=scan_count,
+                transformation_matrix=T_local_to_world  # NEW parameter
             )
 
             if success:

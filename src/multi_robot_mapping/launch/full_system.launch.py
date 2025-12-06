@@ -17,8 +17,7 @@ import os
 
 
 def generate_launch_description():
-    """Generate complete system launch description"""
-
+    
     # Package directories
     pkg_multi_robot = get_package_share_directory('multi_robot_mapping')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
@@ -65,6 +64,7 @@ def generate_launch_description():
     urdf_file = os.path.join(pkg_multi_robot, 'urdf', 'turtlebot3_waffle_pi.urdf')
     bridge_common_yaml = os.path.join(pkg_multi_robot, 'config', 'tb3_bridge_common.yaml')
     bridge_robot_yaml = os.path.join(pkg_multi_robot, 'config', 'tb3_bridge.yaml')
+    
     # Per-robot RViz configs (supports multi-robot independent visualization)
     rviz_config_tb3_1 = os.path.join(pkg_multi_robot, 'rviz', 'tb3_1_visualization.rviz')
     rviz_config_tb3_2 = os.path.join(pkg_multi_robot, 'rviz', 'tb3_2_visualization.rviz')
@@ -189,8 +189,7 @@ def generate_launch_description():
         parameters=[{'config_file': temp_config}]
     )
 
-    # Robot state publisher
-    # Read URDF and substitute ${namespace} with robot name
+    
     with open(urdf_file, 'r') as f:
         urdf_content = f.read()
     urdf_content = urdf_content.replace('${namespace}', f'{robot_name}/')
@@ -207,10 +206,9 @@ def generate_launch_description():
         remappings=[('/joint_states', f'/{robot_name}/joint_states')]
     )
 
-    # Spawn robot FIRST - EKF needs sensor data to initialize!
-    # Robot must be spawned and publishing sensor data before EKF can start
+    
     robot_spawn_delayed = TimerAction(
-        period=2.0,  # Spawn robot early so sensor data is available for EKF
+        period=2.0, 
         actions=[spawn_robot, robot_state_publisher, robot_bridge]
     )
 
@@ -223,14 +221,14 @@ def generate_launch_description():
         name=f'{robot_name}_submap_generator',
         output='screen',
         parameters=[{
-            'use_sim_time': True,  # CRITICAL: Use Gazebo simulation time for TF timestamps
+            'use_sim_time': True,  
             'robot_name': robot_name,
-            'scans_per_submap': 50,  # 50 scans @ 8.5Hz = ~6s = ~1.2m at 0.2 m/s (OPTIMIZED for real-time!)
+            'scans_per_submap': 50,  
             'save_directory': './submaps',
-            'voxel_size': 0.08,  # 8cm voxel - coarser but faster processing
+            'voxel_size': 0.08,  
             'feature_method': 'hybrid',
-            'enable_loop_closure': False,  # ENABLED to correct accumulated drift
-            'enable_scan_to_map_icp': True  # Enable real-time scan matching
+            'enable_loop_closure': True,  
+            'enable_scan_to_map_icp': True  
         }]
     )
 
@@ -248,7 +246,14 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': True,  # Use Gazebo simulation time
             'robot_name': robot_name,
-            'robot_radius': 0.35  # Increased from 0.22 to maintain larger clearance from obstacles
+            'robot_radius': 0.35,
+            'enable_reactive_avoidance': True,  # Enable scan-based obstacle avoidance
+            'scan_danger_distance': 0.5,  # Start avoiding at 0.5m
+            'scan_emergency_distance': 0.3,  # Emergency stop at 0.3m
+            'scan_angular_range': 60.0,  # Front sector width in degrees
+            'enable_path_deviation_check': True,  # Enable path deviation detection
+            'path_deviation_threshold': 0.8,  # Replan if robot > 0.8m from path
+            'path_deviation_check_interval': 2.0  # Check every 2 seconds
         }],
         condition=launch.conditions.IfCondition(enable_navigation)
     )

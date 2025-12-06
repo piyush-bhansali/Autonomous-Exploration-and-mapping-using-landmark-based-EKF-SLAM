@@ -9,37 +9,6 @@ import open3d.core as o3c
 
 from map_generation.utils import quaternion_to_rotation_matrix, quaternion_to_yaw, numpy_to_pointcloud2
 
-def transform_scan_to_world_frame(
-    scan_msg,
-    pose: dict
-) -> np.ndarray:
-    """Transform laser scan to world frame considering LiDAR mounting offset."""
-
-    lidar_offset = np.array([-0.064, 0.0, 0.121])
-
-    angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, len(scan_msg.ranges))
-    ranges = np.array(scan_msg.ranges)
-
-    valid = (ranges >= scan_msg.range_min) & (ranges <= scan_msg.range_max) & np.isfinite(ranges)
-    if not np.any(valid):
-        return np.array([])
-
-    valid_angles = angles[valid]
-    valid_ranges = ranges[valid]
-
-    x_lidar = valid_ranges * np.cos(valid_angles)
-    y_lidar = valid_ranges * np.sin(valid_angles)
-    z_lidar = np.zeros_like(x_lidar)
-    points_lidar_frame = np.column_stack((x_lidar, y_lidar, z_lidar))
-
-    R_base_to_world = quaternion_to_rotation_matrix(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
-    t_base_world = np.array([pose['x'], pose['y'], pose['z']])
-
-    t_lidar_world = t_base_world + (R_base_to_world @ lidar_offset)
-
-    points_world = (R_base_to_world @ points_lidar_frame.T).T + t_lidar_world
-
-    return points_world
 
 def scan_to_map_icp(
     scan_points_world: np.ndarray,
@@ -411,71 +380,13 @@ def match_geometric_features(
 
 
 
-def estimate_transform_from_points(source: np.ndarray, target: np.ndarray) -> np.ndarray:
-   
-    # Center the points
-    source_center = np.mean(source[:, :2], axis=0)
-    target_center = np.mean(target[:, :2], axis=0)
-
-    source_centered = source[:, :2] - source_center
-    target_centered = target[:, :2] - target_center
-
-    # Compute cross-covariance matrix
-    H = source_centered.T @ target_centered
-
-    # SVD
-    U, _, Vt = np.linalg.svd(H)
-    R_2d = Vt.T @ U.T
-
-    # Ensure proper rotation (det = 1)
-    if np.linalg.det(R_2d) < 0:
-        Vt[-1, :] *= -1
-        R_2d = Vt.T @ U.T
-
-    # Compute translation
-    t_2d = target_center - R_2d @ source_center
-
-    # Build 4×4 homogeneous transform
-    T = np.eye(4)
-    T[0:2, 0:2] = R_2d
-    T[0:2, 3] = t_2d
-
-    return T
-
-
-def estimate_transform_from_poses(pose_from: dict, pose_to: dict) -> np.ndarray:
-    
-    x_from, y_from = pose_from['x'], pose_from['y']
-    x_to, y_to = pose_to['x'], pose_to['y']
-
-    theta_from = quaternion_to_yaw(pose_from['qx'], pose_from['qy'],
-                                   pose_from['qz'], pose_from['qw'])
-    theta_to = quaternion_to_yaw(pose_to['qx'], pose_to['qy'],
-                                 pose_to['qz'], pose_to['qw'])
-
-    # Build 2D transformation matrices
-    cos_from, sin_from = np.cos(theta_from), np.sin(theta_from)
-    cos_to, sin_to = np.cos(theta_to), np.sin(theta_to)
-
-    T_from = np.eye(4)
-    T_from[0:2, 0:2] = [[cos_from, -sin_from], [sin_from, cos_from]]
-    T_from[0:2, 3] = [x_from, y_from]
-
-    T_to = np.eye(4)
-    T_to[0:2, 0:2] = [[cos_to, -sin_to], [sin_to, cos_to]]
-    T_to[0:2, 3] = [x_to, y_to]
-
-    # Relative transformation: T_rel = T_to @ inv(T_from)
-    return T_to @ np.linalg.inv(T_from)
-
-
 def publish_global_map(
     global_points: Optional[np.ndarray],
     publisher,
     clock,
     frame_id: str = 'odom'
 ) -> None:
-    
+
     if global_points is not None and len(global_points) > 0:
         # Publish in odom frame (ICP-corrected points)
         pc2_msg = numpy_to_pointcloud2(
@@ -484,3 +395,116 @@ def publish_global_map(
             clock.now().to_msg()
         )
         publisher.publish(pc2_msg)
+
+
+def compute_relative_pose(current_pose: dict, reference_pose: dict) -> dict:
+    """
+    Compute relative pose from reference to current.
+
+    This calculates: T_ref_to_current = inv(T_world_to_ref) @ T_world_to_current
+
+    Args:
+        current_pose: Current pose in world frame
+        reference_pose: Reference pose in world frame (e.g., submap_start_pose)
+
+    Returns:
+        Relative pose dict with keys: x, y, z, qx, qy, qz, qw
+    """
+    from scipy.spatial.transform import Rotation
+
+    # Build transformation matrices
+    # T_world_to_current
+    R_current = quaternion_to_rotation_matrix(
+        current_pose['qx'], current_pose['qy'],
+        current_pose['qz'], current_pose['qw']
+    )
+    t_current = np.array([current_pose['x'], current_pose['y'], current_pose.get('z', 0.0)])
+
+    T_world_to_current = np.eye(4)
+    T_world_to_current[0:3, 0:3] = R_current
+    T_world_to_current[0:3, 3] = t_current
+
+    # T_world_to_reference
+    R_ref = quaternion_to_rotation_matrix(
+        reference_pose['qx'], reference_pose['qy'],
+        reference_pose['qz'], reference_pose['qw']
+    )
+    t_ref = np.array([reference_pose['x'], reference_pose['y'], reference_pose.get('z', 0.0)])
+
+    T_world_to_ref = np.eye(4)
+    T_world_to_ref[0:3, 0:3] = R_ref
+    T_world_to_ref[0:3, 3] = t_ref
+
+    # Compute relative transform
+    T_ref_to_current = np.linalg.inv(T_world_to_ref) @ T_world_to_current
+
+    # Extract relative position
+    relative_position = T_ref_to_current[0:3, 3]
+
+    # Extract relative orientation as quaternion
+    relative_rotation = Rotation.from_matrix(T_ref_to_current[0:3, 0:3])
+    quat = relative_rotation.as_quat()  # Returns [x, y, z, w]
+
+    return {
+        'x': relative_position[0],
+        'y': relative_position[1],
+        'z': relative_position[2],
+        'qx': quat[0],
+        'qy': quat[1],
+        'qz': quat[2],
+        'qw': quat[3]
+    }
+
+
+def transform_scan_to_relative_frame(
+    scan_msg,
+    relative_pose: dict
+) -> np.ndarray:
+    """
+    Transform laser scan to submap-local frame using relative pose.
+
+    This transforms directly from sensor frame to submap-local frame without
+    going through world frame, eliminating redundant transformations.
+
+    Args:
+        scan_msg: LaserScan message
+        relative_pose: Pose relative to submap origin (from compute_relative_pose)
+
+    Returns:
+        N×3 array of points in submap-local frame
+    """
+    # LiDAR offset from base_link
+    lidar_offset = np.array([-0.064, 0.0, 0.121])
+
+    # Parse scan
+    angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, len(scan_msg.ranges))
+    ranges = np.array(scan_msg.ranges)
+
+    # Filter valid points
+    valid = (ranges >= scan_msg.range_min) & (ranges <= scan_msg.range_max) & np.isfinite(ranges)
+    if not np.any(valid):
+        return np.array([])
+
+    valid_angles = angles[valid]
+    valid_ranges = ranges[valid]
+
+    # Convert to Cartesian in LiDAR frame
+    x_lidar = valid_ranges * np.cos(valid_angles)
+    y_lidar = valid_ranges * np.sin(valid_angles)
+    z_lidar = np.zeros_like(x_lidar)
+    points_lidar_frame = np.column_stack((x_lidar, y_lidar, z_lidar))
+
+    # Build transformation from base to submap-local frame using relative pose
+    R_base_to_local = quaternion_to_rotation_matrix(
+        relative_pose['qx'], relative_pose['qy'],
+        relative_pose['qz'], relative_pose['qw']
+    )
+    t_base_to_local = np.array([relative_pose['x'], relative_pose['y'], relative_pose['z']])
+
+    # Transform LiDAR offset to local frame
+    t_lidar_to_local = t_base_to_local + (R_base_to_local @ lidar_offset)
+
+    # Transform points to submap-local frame
+    points_local = (R_base_to_local @ points_lidar_frame.T).T + t_lidar_to_local
+
+    return points_local
