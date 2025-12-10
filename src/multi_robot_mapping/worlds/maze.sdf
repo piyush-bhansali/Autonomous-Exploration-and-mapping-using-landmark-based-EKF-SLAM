@@ -290,5 +290,15 @@
       </link>
     </model>
 
+    <!-- Test pillar for loop closure detection (in front of tb3_1 spawn) -->
+    <model name="test_pillar_south">
+      <static>true</static>
+      <pose>-8.0 -12.0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><cylinder><radius>0.8</radius><length>1.0</length></cylinder></geometry></collision>
+        <visual name="visual"><geometry><cylinder><radius>0.8</radius><length>1.0</length></cylinder></geometry><material><diffuse>0.9 0.2 0.2 1</diffuse></material></visual>
+      </link>
+    </model>
+
   </world>
 </sdf>

@@ -135,10 +135,13 @@ def match_scan_context_scale_invariant(
     Matches submaps of different sizes by comparing relative occupancy distributions
     rather than absolute range values.
 
+    Note: With fixed max_range (10m), this scale-invariance is less critical but still
+    provides robustness for submaps with varying actual extents.
+
     Args:
         sc1: Scan Context descriptor 1 (flattened or 2D)
         sc2: Scan Context descriptor 2
-        metadata1: Metadata from feature extraction (includes max_range_used, r_99th_percentile)
+        metadata1: Metadata from feature extraction (includes max_range_fixed, r_99th_percentile)
         metadata2: Metadata from feature extraction
         num_rings: Number of radial bins
         num_sectors: Number of angular bins
@@ -384,7 +387,7 @@ def publish_global_map(
     global_points: Optional[np.ndarray],
     publisher,
     clock,
-    frame_id: str = 'odom'
+    frame_id
 ) -> None:
 
     if global_points is not None and len(global_points) > 0:
@@ -398,22 +401,9 @@ def publish_global_map(
 
 
 def compute_relative_pose(current_pose: dict, reference_pose: dict) -> dict:
-    """
-    Compute relative pose from reference to current.
-
-    This calculates: T_ref_to_current = inv(T_world_to_ref) @ T_world_to_current
-
-    Args:
-        current_pose: Current pose in world frame
-        reference_pose: Reference pose in world frame (e.g., submap_start_pose)
-
-    Returns:
-        Relative pose dict with keys: x, y, z, qx, qy, qz, qw
-    """
+    
     from scipy.spatial.transform import Rotation
 
-    # Build transformation matrices
-    # T_world_to_current
     R_current = quaternion_to_rotation_matrix(
         current_pose['qx'], current_pose['qy'],
         current_pose['qz'], current_pose['qw']
@@ -424,7 +414,6 @@ def compute_relative_pose(current_pose: dict, reference_pose: dict) -> dict:
     T_world_to_current[0:3, 0:3] = R_current
     T_world_to_current[0:3, 3] = t_current
 
-    # T_world_to_reference
     R_ref = quaternion_to_rotation_matrix(
         reference_pose['qx'], reference_pose['qy'],
         reference_pose['qz'], reference_pose['qw']
@@ -435,13 +424,10 @@ def compute_relative_pose(current_pose: dict, reference_pose: dict) -> dict:
     T_world_to_ref[0:3, 0:3] = R_ref
     T_world_to_ref[0:3, 3] = t_ref
 
-    # Compute relative transform
     T_ref_to_current = np.linalg.inv(T_world_to_ref) @ T_world_to_current
 
-    # Extract relative position
     relative_position = T_ref_to_current[0:3, 3]
 
-    # Extract relative orientation as quaternion
     relative_rotation = Rotation.from_matrix(T_ref_to_current[0:3, 0:3])
     quat = relative_rotation.as_quat()  # Returns [x, y, z, w]
 

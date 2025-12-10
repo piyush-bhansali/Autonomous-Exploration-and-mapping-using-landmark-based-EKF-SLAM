@@ -26,6 +26,12 @@ class EKF:
             0.0001    # theta: 0.0001 rad² (σ = 0.01 rad ≈ 0.57°)
         ])
 
+        self.R_loop_closure = np.diag([
+            0.0025,   # x: 0.0025 m² (σ = 0.05m = 5cm, less certain than ICP)
+            0.0025,   # y: 0.0025 m² (σ = 0.05m = 5cm)
+            0.0001    # theta: 0.0001 rad² (σ = 0.01 rad ≈ 0.57°)
+        ])
+
         self.Q_imu = np.diag([
             0.0001,   # x position process variance: 0.0001 m² per update (σ = 0.01m per 5ms)
             0.0001,   # y position process variance: 0.0001 m² (σ = 0.01m per 5ms)
@@ -93,8 +99,10 @@ class EKF:
             raise RuntimeError("EKF not initialized")
 
         # Select measurement noise based on source
-        if measurement_type == 'icp':
-            R = self.R_icp  
+        if measurement_type == 'loop_closure':
+            R = self.R_loop_closure
+        elif measurement_type == 'icp':
+            R = self.R_icp
         else:
             R = self.R_odom
 

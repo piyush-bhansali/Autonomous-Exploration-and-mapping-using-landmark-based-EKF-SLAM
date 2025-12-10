@@ -19,7 +19,7 @@ class FeatureExtractor:
 
         # Scan Context parameters
         self.sc_params = {
-            'max_range': 6.0,       # Max range for Scan Context (meters)
+            'max_range': 10.0,      # Max range for Scan Context (meters)
             'num_rings': 20,        # Radial bins
             'num_sectors': 60,      # Angular bins
         }
@@ -31,11 +31,12 @@ class FeatureExtractor:
         }
 
     def extract(self, point_cloud: o3d.geometry.PointCloud) -> Dict:
-        
+
         import time
         start_time = time.time()
 
-        pcd_down = point_cloud.voxel_down_sample(self.voxel_size)
+        # Skip downsample - caller (submap_stitcher) already downsamples in process_submap()
+        pcd_down = point_cloud
 
         if self.method == 'hybrid':
             sc_desc, sc_meta = self._extract_scan_context(pcd_down)
@@ -114,25 +115,19 @@ class FeatureExtractor:
         r = np.sqrt(points_centered[:, 0]**2 + points_centered[:, 1]**2)
         theta = np.arctan2(points_centered[:, 1], points_centered[:, 0])
 
+        # Compute actual extent for metadata (debugging/validation)
         r_99th = np.percentile(r, 99) if len(r) > 0 else 1.0
-        # Use ONLY 99th percentile for adaptive scaling (no fixed minimum)
-        # Each submap adapts to its actual content size
-        max_range = max(r_99th * 1.1, 0.5)  # 10% margin, minimum 0.5m (safety)
+
+        max_range = self.sc_params['max_range']
 
         num_rings = self.sc_params['num_rings']
         num_sectors = self.sc_params['num_sectors']
 
         scan_context = np.zeros((num_rings, num_sectors))
 
-        points_used = 0
-        points_discarded = 0
-
         for i in range(len(points)):
             if r[i] > max_range:
-                points_discarded += 1
                 continue
-
-            points_used += 1
 
             # Bin indices
             ring_idx = int(r[i] / max_range * num_rings)
@@ -148,25 +143,15 @@ class FeatureExtractor:
         # Flatten to 1D descriptor
         descriptor = scan_context.flatten()
 
-        # Compute descriptor density (how many bins are occupied)
-        occupancy = np.sum(scan_context > 0) / (num_rings * num_sectors)
+        # Validation: warn if submap is unusually small
+        if r_99th < 1.0:
+            # Very small submap - likely just started exploring
+            pass  # Normal at start, no warning needed
 
-        # Compute extent for scale normalization
-        extent_x = np.max(points_2d[:, 0]) - np.min(points_2d[:, 0]) if len(points_2d) > 0 else 0.0
-        extent_y = np.max(points_2d[:, 1]) - np.min(points_2d[:, 1]) if len(points_2d) > 0 else 0.0
-
+        # Minimal metadata - only structural information
         metadata = {
-            'descriptor_dim': len(descriptor),
             'num_rings': num_rings,
-            'num_sectors': num_sectors,
-            'max_range_used': float(max_range),
-            'r_99th_percentile': float(r_99th),
-            'extent_x': float(extent_x),
-            'extent_y': float(extent_y),
-            'center': center.tolist(),
-            'points_used': points_used,
-            'points_discarded': points_discarded,
-            'occupancy': float(occupancy)
+            'num_sectors': num_sectors
         }
 
         return descriptor.reshape(1, -1), metadata

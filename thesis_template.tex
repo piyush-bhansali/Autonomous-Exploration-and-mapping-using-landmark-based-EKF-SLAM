@@ -1,0 +1,193 @@
+% LaTeX Template for Thesis Technical Report
+% Optimized for academic submission
+
+\documentclass[11pt,a4paper]{article}
+
+% ============================================================================
+% PACKAGES
+% ============================================================================
+
+% Typography and formatting
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{
+    a4paper,
+    left=1.5in,
+    right=1in,
+    top=1in,
+    bottom=1in
+}
+
+% Math and equations
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{mathtools}
+\usepackage{bm}  % Bold math symbols
+
+% Graphics and figures
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric}
+
+% Tables
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+
+% Code listings
+\usepackage{listings}
+\usepackage{xcolor}
+
+% Algorithms
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+% References and citations
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=cyan,
+    citecolor=green,
+    pdftitle={Multi-Robot SLAM Mapping Module},
+    pdfauthor={Piyush Bhansali}
+}
+
+% Header and footer
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Multi-Robot SLAM Mapping Module}
+\lhead{P. Bhansali}
+\rfoot{Page \thepage}
+
+% Section formatting
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+
+% ============================================================================
+% CODE LISTING STYLE
+% ============================================================================
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{pythonstyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    language=Python
+}
+
+\lstset{style=pythonstyle}
+
+% ============================================================================
+% CUSTOM COMMANDS
+% ============================================================================
+
+% Math operators
+\DeclareMathOperator{\argmin}{argmin}
+\DeclareMathOperator{\argmax}{argmax}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\trace}{tr}
+
+% Special sets
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\SE}{\text{SE}}
+
+% Vectors and matrices
+\newcommand{\vect}[1]{\boldsymbol{#1}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+
+% Theorem environments
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[section]
+\newtheorem{example}{Example}[section]
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+% ============================================================================
+% DOCUMENT CONTENT
+% ============================================================================
+
+\begin{document}
+
+% Title page
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Huge\bfseries Multi-Robot SLAM Mapping Module\\[0.5cm]}
+    {\Large Technical Report}
+
+    \vspace{1.5cm}
+
+    {\Large\itshape Piyush Bhansali}
+
+    \vspace{1cm}
+
+    {\large Thesis Work\\
+    December 2025}
+
+    \vfill
+
+    {\large ROS2 Jazzy Multi-Robot SLAM Framework}
+
+    \vspace{1cm}
+
+    {\large \today}
+
+\end{titlepage}
+
+% Table of contents
+\tableofcontents
+\newpage
+
+% Abstract
+\begin{abstract}
+This report presents a comprehensive multi-robot Simultaneous Localization and Mapping (SLAM) system designed for autonomous exploration in structured indoor environments. The system employs a submap-based mapping approach with hybrid feature extraction, multi-stage loop closure detection, and pose graph optimization using GTSAM. Key contributions include: (1) hybrid feature representation combining Scan Context with geometric features, (2) two-stage loop closure detection with coarse Scan Context filtering and fine geometric verification, (3) scale-invariant matching for robust place recognition, (4) selective loop closure with geometric distinctiveness filtering, and (5) real-time pose correction via Extended Kalman Filter integration. The system achieves sub-5cm positional accuracy with loop closure, 85\%+ loop closure detection rate on distinctive features, and operates in real-time at 10 Hz.
+\end{abstract}
+
+\newpage
+
+% ============================================================================
+% MAIN CONTENT GOES HERE
+% Include the converted markdown content
+% ============================================================================
+
+$body$
+
+% ============================================================================
+% BIBLIOGRAPHY (if needed)
+% ============================================================================
+
+\bibliographystyle{IEEEtran}
+% \bibliography{references}  % Uncomment if you have a .bib file
+
+\end{document}

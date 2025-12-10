@@ -37,7 +37,7 @@ class LocalSubmapGenerator(Node):
         super().__init__('local_submap_generator')
 
         self.declare_parameter('robot_name', 'tb3_1')
-        self.declare_parameter('scans_per_submap', 50)
+        self.declare_parameter('scans_per_submap', 30)
         self.declare_parameter('save_directory', './submaps')
         self.declare_parameter('voxel_size', 0.05)
         self.declare_parameter('feature_method', 'hybrid')
@@ -176,7 +176,7 @@ class LocalSubmapGenerator(Node):
         )
 
     def _publish_ekf_pose(self):
-        """Publish current EKF-estimated pose and trajectory."""
+        
         if self.current_pose is None:
             return
 
@@ -243,8 +243,6 @@ class LocalSubmapGenerator(Node):
 
     def cmd_vel_callback(self, msg):
        
-        # Update velocity BEFORE EKF initialization
-        # This ensures velocity is available when EKF starts
         self.ekf.vx = msg.linear.x
         self.ekf.vy = msg.linear.y
 
@@ -314,33 +312,25 @@ class LocalSubmapGenerator(Node):
 
     def scan_callback(self, msg):
 
-        # Wait for raw odometry (not EKF) to be available
         if self.latest_odom_pose is None:
             self.get_logger().warn('Waiting for odometry before processing scans...', throttle_duration_sec=5.0)
             return
 
-        # NEW ARCHITECTURE: Use fixed submap-local frame
-        # Initialize submap_start_pose as fixed reference when starting new submap
         if self.submap_start_pose is None:
             self.submap_start_pose = self.current_pose.copy()
 
-        # Compute relative pose from fixed submap origin
         relative_pose = compute_relative_pose(self.current_pose, self.submap_start_pose)
 
-        # Transform scan DIRECTLY to submap-local frame
         points_local = transform_scan_to_relative_frame(msg, relative_pose)
 
         if len(points_local) == 0:
             return
 
-        # SCAN-TO-MAP ICP: Now works in local frame with identity initial guess!
         if self.enable_scan_to_map_icp and len(self.current_submap_points) >= 5:
             with self.data_lock:
-                # Stack accumulated points (already in local frame)
+                
                 accumulated_local = np.vstack(self.current_submap_points)
 
-                # ICP in local frame - both source and target in same frame
-                # This is much simpler: near-identity initial guess!
                 points_local_corrected, pose_correction = scan_to_map_icp(
                     points_local,           # Source: new scan (local frame)
                     accumulated_local,      # Target: accumulated (local frame)
@@ -350,25 +340,20 @@ class LocalSubmapGenerator(Node):
                 )
 
                 if pose_correction is not None:
-                    # Correction is in local frame, but we need to apply to world pose for EKF
-                    # Transform correction from local to world frame
-
-                    # Get rotation of submap_start_pose
+                   
                     R_local_to_world = quaternion_to_rotation_matrix(
                         self.submap_start_pose['qx'], self.submap_start_pose['qy'],
                         self.submap_start_pose['qz'], self.submap_start_pose['qw']
                     )
 
-                    # Rotate correction to world frame
                     correction_local = np.array([pose_correction['dx'], pose_correction['dy'], 0.0])
                     correction_world = R_local_to_world @ correction_local
 
-                    # Validate correction magnitude
                     correction_distance = np.linalg.norm(correction_world[:2])
                     correction_angle = np.abs(pose_correction['dtheta'])
 
                     if correction_distance < 0.5 and correction_angle < np.radians(25):
-                        # Apply world-frame correction to EKF
+                       
                         corrected_x = self.latest_odom_pose['x'] + correction_world[0]
                         corrected_y = self.latest_odom_pose['y'] + correction_world[1]
                         corrected_theta = self.latest_odom_pose['theta'] + pose_correction['dtheta']
@@ -391,7 +376,6 @@ class LocalSubmapGenerator(Node):
 
                         self._publish_ekf_pose()
 
-                        # Use corrected points
                         points_local = points_local_corrected
                     else:
                         self.get_logger().warn(
@@ -400,7 +384,6 @@ class LocalSubmapGenerator(Node):
                             throttle_duration_sec=5.0
                         )
 
-        # Accumulate in LOCAL frame (not world!)
         with self.data_lock:
             self.current_submap_points.append(points_local)
             self.scans_in_current_submap += 1
@@ -452,8 +435,7 @@ class LocalSubmapGenerator(Node):
                 f'Creating submap {self.submap_id}: {scan_count} scans, {len(points)} points (local frame)'
             )
 
-            # NEW: Points are in local frame, need transformation matrix
-            # Compute T_local_to_world from submap_start_pose
+            
             R = quaternion_to_rotation_matrix(
                 self.submap_start_pose['qx'], self.submap_start_pose['qy'],
                 self.submap_start_pose['qz'], self.submap_start_pose['qw']
@@ -468,11 +450,9 @@ class LocalSubmapGenerator(Node):
             T_local_to_world[0:3, 0:3] = R
             T_local_to_world[0:3, 3] = t
 
-            # For visualization: Transform local points to world temporarily
             points_homogeneous = np.column_stack([points, np.ones(len(points))])
             points_world_viz = (T_local_to_world @ points_homogeneous.T).T[:, :3]
 
-            # Publish current submap for visualization (yellow in RViz)
             submap_msg = numpy_to_pointcloud2(
                 points_world_viz,
                 f'{self.robot_name}/odom',
@@ -480,9 +460,8 @@ class LocalSubmapGenerator(Node):
             )
             self.current_submap_pub.publish(submap_msg)
 
-            # Pass points in LOCAL frame + transformation matrix to stitcher
             success, pose_correction = self.stitcher.integrate_submap_to_global_map(
-                points=points,  # LOCAL frame
+                points=points, 
                 submap_id=self.submap_id,
                 start_pose=self.submap_start_pose,
                 end_pose=end_pose,
@@ -491,15 +470,46 @@ class LocalSubmapGenerator(Node):
             )
 
             if success:
-                # Apply submap-to-map ICP correction to robot pose
-                if pose_correction is not None:
-                    # Validate correction magnitude (already validated in stitcher, but double-check)
+              
+                if pose_correction is not None and 'loop_closure' in pose_correction:
+                    lc_correction = pose_correction['loop_closure']
+
+                    corrected_x = self.current_pose['x'] + lc_correction['dx']
+                    corrected_y = self.current_pose['y'] + lc_correction['dy']
+                    corrected_theta = self.current_pose['theta'] + lc_correction['dtheta']
+                    corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
+
+                    self.ekf.update(corrected_x, corrected_y, corrected_theta,
+                                  vx_odom=None, measurement_type='loop_closure')
+
+                    state = self.ekf.get_state()
+                    qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
+
+                    self.current_pose['x'] = state['x']
+                    self.current_pose['y'] = state['y']
+                    self.current_pose['theta'] = state['theta']
+                    self.current_pose['qx'] = qx
+                    self.current_pose['qy'] = qy
+                    self.current_pose['qz'] = qz
+                    self.current_pose['qw'] = qw
+
+                    self.get_logger().warn(
+                        f'✓✓✓ LOOP CLOSURE POSE CORRECTION APPLIED ✓✓✓\n'
+                        f'    Submap {lc_correction["submap_id"]} matched with submap {lc_correction["loop_match_id"]}\n'
+                        f'    Position correction: dx={lc_correction["dx"]:.3f}m, dy={lc_correction["dy"]:.3f}m\n'
+                        f'    Orientation correction: dθ={np.degrees(lc_correction["dtheta"]):.2f}°\n'
+                        f'    New robot pose: ({state["x"]:.3f}, {state["y"]:.3f}, {np.degrees(state["theta"]):.2f}°)'
+                    )
+
+                    self._publish_ekf_pose()
+
+                elif pose_correction is not None:
+                   
                     correction_distance = np.sqrt(pose_correction['dx']**2 + pose_correction['dy']**2)
                     correction_angle = np.abs(pose_correction['dtheta'])
 
-                    # Submap ICP corrections can be large with accumulated drift, use lenient thresholds
                     if correction_distance < 1.0 and correction_angle < np.radians(30):
-                        # Apply correction through EKF update (not direct addition!)
+                        
                         corrected_x = self.current_pose['x'] + pose_correction['dx']
                         corrected_y = self.current_pose['y'] + pose_correction['dy']
                         corrected_theta = self.current_pose['theta'] + pose_correction['dtheta']
@@ -507,7 +517,6 @@ class LocalSubmapGenerator(Node):
 
                         self.ekf.update(corrected_x, corrected_y, corrected_theta, vx_odom=None, measurement_type='icp')
 
-                        # Update current_pose from EKF state
                         state = self.ekf.get_state()
                         qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
 
@@ -524,7 +533,6 @@ class LocalSubmapGenerator(Node):
                             f'dy={pose_correction["dy"]:.3f}m, dθ={np.degrees(pose_correction["dtheta"]):.2f}°'
                         )
 
-                        # Publish updated EKF pose after submap-to-map ICP correction
                         self._publish_ekf_pose()
                     else:
                         self.get_logger().warn(
@@ -550,7 +558,6 @@ class LocalSubmapGenerator(Node):
                     frame_id=f'{self.robot_name}/odom'
                 )
 
-            # Reset for next submap - use same pose as end_pose for continuity
             self.current_submap_points = []
             self.scans_in_current_submap = 0
             self.submap_start_pose = end_pose

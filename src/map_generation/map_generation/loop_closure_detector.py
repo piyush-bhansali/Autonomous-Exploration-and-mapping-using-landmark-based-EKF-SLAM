@@ -63,6 +63,7 @@ class LoopClosureDetector:
         self.stats['num_checks'] += 1
 
         # PRE-FILTER: Check if current submap is distinctive enough
+        current_id = current_submap['id']
         if current_submap['features'] is not None and 'geometric' in current_submap['features']:
             geom_descriptors = current_submap['features']['geometric']
             if len(geom_descriptors) > 0:
@@ -70,7 +71,7 @@ class LoopClosureDetector:
 
                 if not is_distinctive:
                     # Skip loop closure for corridors/featureless areas
-                    # print(f"  Skipping loop closure: {metrics['reason']}")
+                    print(f"  [Loop Closure] Submap {current_id} skipped: {metrics['reason']}")
                     return None
 
         # Stage 1: Spatial + Scan Context Pre-filtering
@@ -81,9 +82,11 @@ class LoopClosureDetector:
         )
 
         if len(candidates) == 0:
+            print(f"  [Loop Closure] Submap {current_id}: No candidates found in Stage 1 (Scan Context)")
             return None
 
         self.stats['num_candidates'] += len(candidates)
+        print(f"  [Loop Closure] Submap {current_id}: Found {len(candidates)} candidates from Stage 1")
 
         # Stage 2: Geometric Feature Verification
         loop_closure = self._stage2_fine_verification(
@@ -93,6 +96,8 @@ class LoopClosureDetector:
 
         if loop_closure is not None:
             self.stats['num_accepted'] += 1
+        else:
+            print(f"  [Loop Closure] Submap {current_id}: No valid loop closure after Stage 2 (Geometric+ICP)")
 
         return loop_closure
 

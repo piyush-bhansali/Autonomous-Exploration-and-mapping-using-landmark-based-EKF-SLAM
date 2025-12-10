@@ -24,21 +24,19 @@ def numpy_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud
         PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
     ]
 
-    # Vectorized packing (much faster than Python loop)
-    # Ensure float32 dtype and flatten to 1D byte array
     points_flat = points.astype(np.float32).flatten()
     cloud_data = points_flat.tobytes()
 
     # Build PointCloud2 message
     msg = PointCloud2()
     msg.header = header
-    msg.height = 1  # Unorganized cloud
+    msg.height = 1 
     msg.width = len(points)
     msg.fields = fields
     msg.is_bigendian = False
-    msg.point_step = 12  # 3 floats × 4 bytes = 12 bytes per point
+    msg.point_step = 12 
     msg.row_step = msg.point_step * len(points)
-    msg.is_dense = True  # All points valid (filtered before conversion)
+    msg.is_dense = True 
     msg.data = cloud_data
 
     return msg

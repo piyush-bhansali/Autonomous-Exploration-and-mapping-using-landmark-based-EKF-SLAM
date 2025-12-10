@@ -54,8 +54,9 @@ class SimpleFrontierDetector:
         for candidate in candidates:
             # Check 1: Not too close to obstacles
             dist, _ = kdtree.query(candidate)
-            # TUNED FOR NARROW GAPS: 2.0× robot radius allows detection of corridors ≥0.5m wide
-            if dist < self.robot_radius * 2.0:  # 0.44m clearance (minimum navigable gap)
+            # Increased from 2.0× to 3.0× robot radius for safer frontier selection
+            # With robot_radius=0.22m, this requires 0.66m clearance (was 0.44m)
+            if dist < self.robot_radius * 3.0:  # 0.66m clearance
                 continue  # Too close to wall
 
             # Check 2: Has open direction (GAP FILTERING)
@@ -81,9 +82,9 @@ class SimpleFrontierDetector:
     def _sample_boundary(self,
                         x_min: float, x_max: float,
                         y_min: float, y_max: float) -> List[np.ndarray]:
-        
-        offset = 0.2  
-        spacing = 0.4  
+
+        offset = 0.5  # Increased from 0.2m: place frontiers 0.5m inside boundary (more conservative)
+        spacing = 0.5  # Increased from 0.4m: reduce frontier density  
 
         candidates = []
 
@@ -232,7 +233,9 @@ class SimpleFrontierDetector:
         # Convert to numpy array for DBSCAN
         points = np.array(candidates)
 
-        clustering = DBSCAN(eps=0.4, min_samples=2).fit(points)
+        # DBSCAN clustering: eps=1.0m allows frontiers up to 1m apart to be grouped
+        # Increased from 0.4m to reduce oscillation between nearby frontiers
+        clustering = DBSCAN(eps=1.0, min_samples=2).fit(points)
 
         labels = clustering.labels_
 
@@ -283,9 +286,9 @@ class SimpleFrontierDetector:
             size_score = min(cluster_size / 5.0, 1.0)
 
             score = (
-                0.60 * travel_score +    # Distance (primary - 50%)
-                0.30 * heading_score +   # Heading (reduced from 40% to 30% to prevent oscillation)
-                0.10 * size_score        # Size (increased from 10% to 20%)
+                0.70 * travel_score +    # Distance (primary - 70%, increased from 60% to prioritize distance)
+                0.15 * heading_score +   # Heading (reduced from 30% to 15% to prevent oscillation)
+                0.15 * size_score        # Size (increased from 10% to 15% to favor larger frontiers)
             )
 
             frontiers.append(SimpleFrontier(centroid, score, cluster_size))

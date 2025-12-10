@@ -67,7 +67,7 @@ class SmoothedPurePursuit:
         # Higher angular velocity → lower linear velocity
         omega_magnitude = abs(self.omega_smooth)
         velocity_scale = 1.0 - self.velocity_gain * (omega_magnitude / self.max_w)
-        velocity_scale = np.clip(velocity_scale, 0.5, 1.0)  # Keep between 50% and 100% speed
+        velocity_scale = np.clip(velocity_scale, 0.3, 1.0)  # Keep between 30% and 100% speed (reduced from 50% to allow more slowdown)
 
         v_adaptive = self.v_max * velocity_scale
         v_adaptive = np.clip(v_adaptive, self.v_min, self.v_max)

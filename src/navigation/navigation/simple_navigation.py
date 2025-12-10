@@ -43,8 +43,8 @@ class SimpleNavigationNode(Node):
         self.declare_parameter('scan_emergency_distance', 0.3)
         self.declare_parameter('scan_angular_range', 60.0)
         self.declare_parameter('enable_path_deviation_check', True)
-        self.declare_parameter('path_deviation_threshold', 0.8)
-        self.declare_parameter('path_deviation_check_interval', 2.0)
+        self.declare_parameter('path_deviation_threshold', 1.5)
+        self.declare_parameter('path_deviation_check_interval', 4.0)
 
         self.robot_name = self.get_parameter('robot_name').value
         self.robot_radius = self.get_parameter('robot_radius').value
@@ -90,20 +90,23 @@ class SimpleNavigationNode(Node):
         self.replan_count = 0
 
         # Dynamic replanning thresholds
-        self.replan_score_threshold = 0.30  # Replan if new frontier score improves by >30% (increased from 15% to prevent oscillation)
-        self.replan_distance_threshold = 3.0  # Replan if new frontier is >3m closer
+        self.replan_score_threshold = 0.50  # Replan if new frontier score improves by >50% (increased from 30% to prevent oscillation)
+        self.replan_distance_threshold = 4.0  # Replan if new frontier is >4m closer
+
+        # Minimum frontier distance to prevent selecting frontiers too close (especially after corridor exit)
+        self.min_frontier_distance = 2.0  # Force frontiers to be at least 2.0m away
 
         # Components (created when map received)
         self.frontier_detector = SimpleFrontierDetector(self.robot_radius)
         self.path_planner = None
         self.controller = SmoothedPurePursuit(
-            lookahead_distance=0.6,
-            max_linear_velocity=0.2,
-            min_linear_velocity=0.1,
-            max_angular_velocity=0.8,
-            angular_smoothing_factor=0.3,
+            lookahead_distance=0.8,
+            max_linear_velocity=0.18,
+            min_linear_velocity=0.08,
+            max_angular_velocity=0.5,
+            angular_smoothing_factor=0.6,
             goal_tolerance=0.3,
-            velocity_gain=0.5
+            velocity_gain=0.7
         )
 
         # QoS for map
@@ -259,13 +262,13 @@ class SimpleNavigationNode(Node):
                 dist = np.linalg.norm(f.position - exp_pos)
                 min_dist_to_explored = min(min_dist_to_explored, dist)
 
-            if min_dist_to_explored > 2.0 or len(self.explored_positions) == 0:
+            if min_dist_to_explored > 3.0 or len(self.explored_positions) == 0:
                 unexplored.append(f)
             else:
                 self.get_logger().debug(f'  Frontier at [{f.position[0]:.2f}, {f.position[1]:.2f}] too close to explored position (dist={min_dist_to_explored:.2f}m)')
 
         if len(unexplored) == 0:
-            self.get_logger().warn(f'[STATE: DETECT_FRONTIERS] All {len(frontiers)} frontiers already explored (within 2.0m of {len(self.explored_positions)} explored positions)')
+            self.get_logger().warn(f'[STATE: DETECT_FRONTIERS] All {len(frontiers)} frontiers already explored (within 3.0m of {len(self.explored_positions)} explored positions)')
             for i, exp_pos in enumerate(self.explored_positions):
                 self.get_logger().warn(f'  Explored position #{i+1}: [{exp_pos[0]:.2f}, {exp_pos[1]:.2f}]')
             self.state = State.DONE
@@ -273,13 +276,39 @@ class SimpleNavigationNode(Node):
 
         self.get_logger().info(f'[STATE: DETECT_FRONTIERS] {len(unexplored)} unexplored frontiers available (filtered {len(frontiers) - len(unexplored)})')
 
-        # Select best frontier
-        best_frontier = unexplored[0]
-        self.current_goal = best_frontier.position
+        # Filter frontiers that are too close (minimum distance requirement)
+        distant_frontiers = []
+        for f in unexplored:
+            dist = np.linalg.norm(f.position - self.robot_pos)
+            if dist >= self.min_frontier_distance:
+                distant_frontiers.append(f)
+            else:
+                self.get_logger().debug(
+                    f'  Frontier at [{f.position[0]:.2f}, {f.position[1]:.2f}] too close '
+                    f'(dist={dist:.2f}m < min={self.min_frontier_distance}m)'
+                )
+
+        # If no distant frontiers, use closest available (fallback)
+        if len(distant_frontiers) == 0:
+            self.get_logger().warn(
+                f'[STATE: DETECT_FRONTIERS] All {len(unexplored)} frontiers < {self.min_frontier_distance}m. '
+                f'Using closest available frontier.'
+            )
+            distant_frontiers = unexplored
 
         self.get_logger().info(
-            f'[STATE: DETECT_FRONTIERS] Selected frontier #{1} at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}] '
-            f'(score={best_frontier.score:.3f})'
+            f'[STATE: DETECT_FRONTIERS] {len(distant_frontiers)} frontiers meet distance requirement '
+            f'(≥{self.min_frontier_distance}m)'
+        )
+
+        # Select best frontier from distant ones
+        best_frontier = distant_frontiers[0]
+        self.current_goal = best_frontier.position
+        dist_to_selected = np.linalg.norm(self.current_goal - self.robot_pos)
+
+        self.get_logger().info(
+            f'[STATE: DETECT_FRONTIERS] Selected frontier at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}] '
+            f'(dist={dist_to_selected:.2f}m, score={best_frontier.score:.3f})'
         )
 
         # Transition to planning
@@ -437,7 +466,7 @@ class SimpleNavigationNode(Node):
         waypoint = self.current_path[self.current_waypoint_index]
         dist_to_waypoint = np.linalg.norm(self.robot_pos - waypoint)
 
-        if dist_to_waypoint < 0.15:  # Waypoint tolerance (reduced for better tracking)
+        if dist_to_waypoint < 0.25:  # Waypoint tolerance (increased for better handling of sharp turns)
             self.current_waypoint_index += 1
             return
 
@@ -466,10 +495,25 @@ class SimpleNavigationNode(Node):
                 )
                 self.last_obstacle_warning_time = current_time
 
-            # Emergency stop if very close
+            # Emergency stop if very close - force replanning
             if min_distance < self.scan_emergency_distance:
-                v = 0.0
-                w = 0.0
+                self.get_logger().error(
+                    f'[EMERGENCY STOP] Obstacle at {min_distance:.2f}m < emergency threshold {self.scan_emergency_distance:.2f}m!'
+                )
+
+                # STOP immediately
+                cmd = Twist()
+                self.cmd_pub.publish(cmd)
+
+                # Force replanning by clearing current goal and path
+                self.current_path = None
+                self.current_goal = None
+                self.current_waypoint_index = 0
+
+                # Transition to detect new frontiers
+                self.state = State.DETECT_FRONTIERS
+                self.get_logger().warn('[EMERGENCY] Clearing blocked goal and searching for alternative frontiers!')
+                return
             # Slow down and steer away if in danger zone
             else:
                 # Reduce speed proportionally to distance
@@ -478,7 +522,7 @@ class SimpleNavigationNode(Node):
                 v = v * speed_factor
 
                 # Add corrective steering (blend with planned steering)
-                correction_gain = 0.4  # How much to steer away (0-1)
+                correction_gain = 0.25  # How much to steer away (0-1), reduced from 0.4 for gentler avoidance
                 w = w + correction_gain * avoidance_direction * self.controller.max_w
 
         # Log progress periodically
@@ -521,7 +565,7 @@ class SimpleNavigationNode(Node):
                 dist = np.linalg.norm(f.position - exp_pos)
                 min_dist_to_explored = min(min_dist_to_explored, dist)
 
-            if min_dist_to_explored > 2.0 or len(self.explored_positions) == 0:
+            if min_dist_to_explored > 3.0 or len(self.explored_positions) == 0:
                 unexplored.append(f)
 
         if len(unexplored) == 0:
