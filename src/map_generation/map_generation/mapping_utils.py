@@ -82,73 +82,13 @@ def scan_to_map_icp(
         return scan_points_world, None
 
 
-def match_scan_context(sc1: np.ndarray, sc2: np.ndarray, num_sectors: int = 60) -> Tuple[float, int]:
-    """
-    Original Scan Context matching (kept for backward compatibility)
-    """
-    # Reshape to 2D grid (rings × sectors) if needed
-    if sc1.ndim == 1:
-        sc1 = sc1.reshape(-1, num_sectors)
-    elif sc1.shape[0] == 1:
-        sc1 = sc1.reshape(-1, num_sectors)
-
-    if sc2.ndim == 1:
-        sc2 = sc2.reshape(-1, num_sectors)
-    elif sc2.shape[0] == 1:
-        sc2 = sc2.reshape(-1, num_sectors)
-
-    best_sim = -1
-    best_shift = 0
-
-    # Try all circular shifts
-    for shift in range(num_sectors):
-        sc2_shifted = np.roll(sc2, shift, axis=1)
-
-        # Cosine similarity
-        sc1_flat = sc1.flatten()
-        sc2_flat = sc2_shifted.flatten()
-
-        norm1 = np.linalg.norm(sc1_flat)
-        norm2 = np.linalg.norm(sc2_flat)
-
-        if norm1 > 0 and norm2 > 0:
-            similarity = np.dot(sc1_flat, sc2_flat) / (norm1 * norm2)
-
-            if similarity > best_sim:
-                best_sim = similarity
-                best_shift = shift
-
-    return best_sim, best_shift
-
-
-def match_scan_context_scale_invariant(
+def match_scan_context_cosine(
     sc1: np.ndarray,
     sc2: np.ndarray,
-    metadata1: dict,
-    metadata2: dict,
     num_rings: int = 20,
     num_sectors: int = 60
 ) -> Tuple[float, int]:
-    """
-    Scale-invariant Scan Context matching
-
-    Matches submaps of different sizes by comparing relative occupancy distributions
-    rather than absolute range values.
-
-    Note: With fixed max_range (10m), this scale-invariance is less critical but still
-    provides robustness for submaps with varying actual extents.
-
-    Args:
-        sc1: Scan Context descriptor 1 (flattened or 2D)
-        sc2: Scan Context descriptor 2
-        metadata1: Metadata from feature extraction (includes max_range_fixed, r_99th_percentile)
-        metadata2: Metadata from feature extraction
-        num_rings: Number of radial bins
-        num_sectors: Number of angular bins
-
-    Returns:
-        (similarity_score, best_rotation_shift)
-    """
+    
     # Reshape to 2D grids
     if sc1.ndim == 1:
         grid1 = sc1.reshape(num_rings, num_sectors)
@@ -164,30 +104,14 @@ def match_scan_context_scale_invariant(
     else:
         grid2 = sc2
 
-    # Compute radial occupancy distribution (scale-invariant!)
-    ring_occupancy1 = np.sum(grid1, axis=1)  # Sum over sectors
-    ring_occupancy2 = np.sum(grid2, axis=1)
-
-    # Normalize to make distribution comparable
-    sum1 = np.sum(ring_occupancy1)
-    sum2 = np.sum(ring_occupancy2)
-
-    if sum1 > 0:
-        ring_occupancy1 = ring_occupancy1 / sum1
-    if sum2 > 0:
-        ring_occupancy2 = ring_occupancy2 / sum2
-
-    # Compare distributions (1.0 = identical, 0.0 = completely different)
-    radial_similarity = 1.0 - np.mean(np.abs(ring_occupancy1 - ring_occupancy2))
-
-    # Search for best rotation with angular pattern matching
-    best_angular_sim = -1
+    best_sim = -1
     best_shift = 0
 
+    # Try all circular shifts (rotation-invariant)
     for shift in range(num_sectors):
         grid2_shifted = np.roll(grid2, shift, axis=1)
 
-        # Cosine similarity on full descriptor
+        # Cosine similarity
         flat1 = grid1.flatten()
         flat2 = grid2_shifted.flatten()
 
@@ -195,18 +119,13 @@ def match_scan_context_scale_invariant(
         norm2 = np.linalg.norm(flat2)
 
         if norm1 > 0 and norm2 > 0:
-            angular_sim = np.dot(flat1, flat2) / (norm1 * norm2)
+            similarity = np.dot(flat1, flat2) / (norm1 * norm2)
 
-            if angular_sim > best_angular_sim:
-                best_angular_sim = angular_sim
+            if similarity > best_sim:
+                best_sim = similarity
                 best_shift = shift
 
-    # Combined score: radial distribution (scale-invariant) + angular pattern
-    # Radial similarity ensures we match similar structures regardless of size
-    # Angular similarity ensures rotation alignment
-    combined_similarity = 0.4 * radial_similarity + 0.6 * best_angular_sim
-
-    return combined_similarity, best_shift
+    return best_sim, best_shift
 
 
 def match_scan_context_with_voting(
@@ -216,22 +135,7 @@ def match_scan_context_with_voting(
     num_sectors: int = 60,
     threshold: float = 0.5
 ) -> Tuple[float, int, Optional[np.ndarray]]:
-    """
-    Majority voting Scan Context matching
-
-    Requires that >50% of bins agree (both occupied or both free)
-    to reduce false positives from partial matches like corridor ends.
-
-    Args:
-        sc1: Scan Context descriptor 1
-        sc2: Scan Context descriptor 2
-        num_rings: Number of radial bins
-        num_sectors: Number of angular bins
-        threshold: Minimum agreement ratio (default 0.5 = 50%)
-
-    Returns:
-        (agreement_ratio, best_rotation_shift, agreement_mask)
-    """
+    
     # Reshape to 2D grids
     if sc1.ndim == 1:
         grid1 = sc1.reshape(num_rings, num_sectors)
@@ -279,22 +183,7 @@ def is_distinctive_submap(
     min_distinctiveness: float = 0.25,
     min_keypoints: int = 15
 ) -> Tuple[bool, Dict]:
-    """
-    Check if submap has enough geometric features for reliable loop closure
-
-    Rejects:
-    - Long corridors (high linearity, low scattering)
-    - Planar walls (high planarity, uniform features)
-    - Featureless spaces (low variance in descriptors)
-
-    Args:
-        geometric_descriptors: N×4 array [linearity, planarity, scattering, avg_dist]
-        min_distinctiveness: Minimum feature variance threshold
-        min_keypoints: Minimum number of keypoints required
-
-    Returns:
-        (is_distinctive, metrics_dict)
-    """
+    
     if len(geometric_descriptors) < min_keypoints:
         return False, {'reason': 'too_few_keypoints', 'num_keypoints': len(geometric_descriptors)}
 
@@ -446,19 +335,7 @@ def transform_scan_to_relative_frame(
     scan_msg,
     relative_pose: dict
 ) -> np.ndarray:
-    """
-    Transform laser scan to submap-local frame using relative pose.
-
-    This transforms directly from sensor frame to submap-local frame without
-    going through world frame, eliminating redundant transformations.
-
-    Args:
-        scan_msg: LaserScan message
-        relative_pose: Pose relative to submap origin (from compute_relative_pose)
-
-    Returns:
-        N×3 array of points in submap-local frame
-    """
+    
     # LiDAR offset from base_link
     lidar_offset = np.array([-0.064, 0.0, 0.121])
 

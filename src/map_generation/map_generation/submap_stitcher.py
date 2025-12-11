@@ -66,8 +66,8 @@ class SubmapStitcher:
 
         return pcd_tensor
 
-    def extract_features(self, pcd: o3d.geometry.PointCloud, submap_id: int) -> Optional[Dict]:
-
+    def extract_features(self, pcd: o3d.t.geometry.PointCloud, submap_id: int) -> Optional[Dict]:
+       
         try:
             features = self.feature_extractor.extract(pcd)
 
@@ -146,8 +146,8 @@ class SubmapStitcher:
 
         features = None
         if self.enable_loop_closure:
-            pcd_legacy = pcd_tensor.to_legacy()
-            features = self.extract_features(pcd_legacy, submap_id)
+            # Pass Tensor PointCloud directly (GPU-accelerated feature extraction)
+            features = self.extract_features(pcd_tensor, submap_id)
 
         global_transform = transformation_matrix
 
@@ -339,12 +339,12 @@ class SubmapStitcher:
         return True, pose_correction
 
     def save_global_map(self, filepath: str):
-        """Save the global map with final cleanup"""
+        """Save the global map using Tensor I/O (no Legacy conversion)"""
         if len(self.global_map_tensor.point.positions) == 0:
             return
 
-        global_map_legacy = self.global_map_tensor.to_legacy()
-        o3d.io.write_point_cloud(filepath, global_map_legacy)
+        # Use Tensor I/O API (no conversion needed)
+        o3d.t.io.write_point_cloud(filepath, self.global_map_tensor, write_ascii=False, compressed=False)
 
     def get_global_map_points(self) -> Optional[np.ndarray]:
         

@@ -9,8 +9,7 @@ from scipy.spatial import KDTree
 
 # Import shared mapping utilities
 from map_generation.mapping_utils import (
-    match_scan_context,
-    match_scan_context_scale_invariant,
+    match_scan_context_cosine,
     match_scan_context_with_voting,
     match_geometric_features,
     is_distinctive_submap
@@ -132,13 +131,6 @@ class LoopClosureDetector:
         else:
             spatial_candidates = range(len(submap_database))
 
-        # Get current metadata for scale-invariant matching
-        current_metadata = current_features.get('metadata', {})
-        if 'scan_context' in current_metadata:
-            sc_metadata_current = current_metadata['scan_context']
-        else:
-            sc_metadata_current = {}
-
         # Scan Context matching on spatially filtered candidates
         for idx in spatial_candidates:
             if idx >= len(submap_database):
@@ -164,16 +156,10 @@ class LoopClosureDetector:
                 continue
 
             sc_candidate = candidate['features']['scan_context']
-            candidate_metadata = candidate['features'].get('metadata', {})
-            if 'scan_context' in candidate_metadata:
-                sc_metadata_candidate = candidate_metadata['scan_context']
-            else:
-                sc_metadata_candidate = {}
 
-            # Scale-invariant Scan Context matching
-            similarity, best_rotation = match_scan_context_scale_invariant(
-                sc_current, sc_candidate,
-                sc_metadata_current, sc_metadata_candidate
+            # Cosine similarity Scan Context matching (rotation-invariant)
+            similarity, best_rotation = match_scan_context_cosine(
+                sc_current, sc_candidate
             )
 
             # Majority voting check (additional robustness)

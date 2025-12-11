@@ -5,7 +5,7 @@ import open3d as o3d
 from typing import Dict, Tuple
 
 # Import shared mapping utilities
-from map_generation.mapping_utils import match_scan_context, match_geometric_features
+from map_generation.mapping_utils import match_geometric_features
 
 
 class FeatureExtractor:
@@ -26,18 +26,26 @@ class FeatureExtractor:
             'min_neighbors': 5
         }
 
-    def extract(self, point_cloud: o3d.geometry.PointCloud) -> Dict:
+    def extract(self, point_cloud: o3d.t.geometry.PointCloud) -> Dict:
+        """
+        Extract features from Tensor PointCloud using GPU-accelerated operations.
 
+        Args:
+            point_cloud: Tensor PointCloud (GPU or CPU)
+
+        Returns:
+            Dictionary containing features and metadata
+        """
         import time
         start_time = time.time()
 
-        pcd_down = point_cloud
+        # All operations now use Tensor API directly (no Legacy conversion!)
 
         if self.method == 'hybrid':
-            sc_desc, sc_meta = self._extract_scan_context(pcd_down)
-            keypoints, keypoint_indices = self._extract_keypoints_uniform(pcd_down)
-            if len(keypoints.points) > 0:
-                geom_desc, geom_meta = self._extract_geometric(pcd_down, keypoint_indices)
+            sc_desc, sc_meta = self._extract_scan_context(point_cloud)
+            keypoint_indices = self._extract_keypoints_uniform(point_cloud)
+            if len(keypoint_indices) > 0:
+                geom_desc, geom_meta = self._extract_geometric(point_cloud, keypoint_indices)
             else:
                 geom_desc = np.array([])
                 geom_meta = {'num_keypoints': 0, 'descriptor_dim': 0}
@@ -57,7 +65,7 @@ class FeatureExtractor:
             }
 
         elif self.method == 'scan_context':
-            sc_desc, sc_meta = self._extract_scan_context(pcd_down)
+            sc_desc, sc_meta = self._extract_scan_context(point_cloud)
             elapsed = time.time() - start_time
 
             return {
@@ -72,9 +80,9 @@ class FeatureExtractor:
             }
 
         elif self.method == 'geometric':
-            keypoints, keypoint_indices = self._extract_keypoints_uniform(pcd_down)
-            if len(keypoints.points) > 0:
-                geom_desc, geom_meta = self._extract_geometric(pcd_down, keypoint_indices)
+            keypoint_indices = self._extract_keypoints_uniform(point_cloud)
+            if len(keypoint_indices) > 0:
+                geom_desc, geom_meta = self._extract_geometric(point_cloud, keypoint_indices)
             else:
                 geom_desc = np.array([])
                 geom_meta = {'num_keypoints': 0, 'descriptor_dim': 0}
@@ -95,9 +103,18 @@ class FeatureExtractor:
         else:
             raise ValueError(f"Unknown feature method: {self.method}. Use 'hybrid', 'scan_context' or 'geometric'")
 
-    def _extract_scan_context(self, pcd: o3d.geometry.PointCloud) -> Tuple[np.ndarray, Dict]:
-        
-        points = np.asarray(pcd.points)
+    def _extract_scan_context(self, pcd: o3d.t.geometry.PointCloud) -> Tuple[np.ndarray, Dict]:
+        """
+        Extract Scan Context descriptor from Tensor PointCloud.
+
+        Args:
+            pcd: Tensor PointCloud (GPU or CPU)
+
+        Returns:
+            (descriptor, metadata) tuple
+        """
+        # Convert to NumPy once (efficient single transfer)
+        points = pcd.point.positions.cpu().numpy()
         points_2d = points[:, :2]
         center = np.mean(points_2d, axis=0)
         points_centered = points_2d - center
@@ -133,7 +150,7 @@ class FeatureExtractor:
         descriptor = scan_context.flatten()
 
         if r_99th < 1.0:
-            pass  
+            pass
 
         metadata = {
             'num_rings': num_rings,
@@ -142,30 +159,58 @@ class FeatureExtractor:
 
         return descriptor.reshape(1, -1), metadata
 
-    def _extract_keypoints_uniform(self, pcd: o3d.geometry.PointCloud,
-                                   ratio: float = 0.1) -> Tuple[o3d.geometry.PointCloud, np.ndarray]:
-        
-        num_points = len(pcd.points)
-        num_keypoints = max(int(num_points * ratio), 50)  
+    def _extract_keypoints_uniform(self, pcd: o3d.t.geometry.PointCloud,
+                                   ratio: float = 0.1) -> np.ndarray:
+        """
+        Extract keypoint indices using uniform sampling from Tensor PointCloud.
+
+        Args:
+            pcd: Tensor PointCloud
+            ratio: Ratio of points to sample as keypoints
+
+        Returns:
+            Array of keypoint indices
+        """
+        num_points = len(pcd.point.positions)
+        num_keypoints = max(int(num_points * ratio), 50)
 
         # Uniform sampling
         indices = np.random.choice(num_points, min(num_keypoints, num_points), replace=False)
         indices = np.sort(indices)
 
-        keypoints = pcd.select_by_index(indices.tolist())
-        return keypoints, indices
+        return indices
 
-    def _extract_geometric(self, pcd: o3d.geometry.PointCloud,
+    def _extract_geometric(self, pcd: o3d.t.geometry.PointCloud,
                           keypoint_indices: np.ndarray) -> Tuple[np.ndarray, Dict]:
+        """
+        Extract geometric features using GPU-accelerated Tensor NNS.
 
-        points = np.asarray(pcd.points)
-        pcd_tree = o3d.geometry.KDTreeFlann(pcd)
+        Args:
+            pcd: Tensor PointCloud (GPU or CPU)
+            keypoint_indices: Indices of keypoints in the point cloud
+
+        Returns:
+            (descriptors, metadata) tuple
+        """
+        import open3d.core as o3c
+
+        # Build GPU-accelerated NNS index
+        nns = o3d.core.nns.NearestNeighborSearch(pcd.point.positions)
+        nns.knn_index()
+
+        # Transfer points to CPU once (more efficient than multiple transfers)
+        points = pcd.point.positions.cpu().numpy()
 
         descriptors = []
 
         for idx in keypoint_indices:
-            # Find neighbors
-            [k, neighbor_idx, _] = pcd_tree.search_knn_vector_3d(pcd.points[idx], 30)
+            # Query on GPU (or CPU if device is CPU)
+            query_pt = pcd.point.positions[idx].reshape(1, 3)
+            indices, distances = nns.knn_search(query_pt, knn=30)
+
+            # Get neighbor indices
+            neighbor_idx = indices[0].cpu().numpy()
+            k = len(neighbor_idx)
 
             if k < self.geom_params['min_neighbors']:
                 descriptors.append(np.zeros(4))
@@ -173,11 +218,12 @@ class FeatureExtractor:
 
             neighbor_points = points[neighbor_idx, :]
 
+            # Compute covariance and eigenvalues (CPU computation)
             cov = np.cov(neighbor_points.T)
             eigenvalues = np.linalg.eigvalsh(cov)
             eigenvalues = np.sort(eigenvalues)[::-1]
 
-            lambda1, lambda2, lambda3 = eigenvalues + 1e-10  
+            lambda1, lambda2, lambda3 = eigenvalues + 1e-10
 
             linearity = (lambda1 - lambda2) / lambda1
             planarity = (lambda2 - lambda3) / lambda1
