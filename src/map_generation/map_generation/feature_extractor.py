@@ -10,23 +10,19 @@ from map_generation.mapping_utils import match_scan_context, match_geometric_fea
 
 class FeatureExtractor:
     
-    def __init__(self,
-                 method: str = 'hybrid',
-                 voxel_size: float = 0.05):
-        
+    def __init__(self, method: str = 'hybrid'):
+
         self.method = method
-        self.voxel_size = voxel_size
 
         # Scan Context parameters
         self.sc_params = {
-            'max_range': 10.0,      # Max range for Scan Context (meters)
-            'num_rings': 20,        # Radial bins
-            'num_sectors': 60,      # Angular bins
+            'max_range': 10.0,      
+            'num_rings': 20,        
+            'num_sectors': 60,      
         }
 
         # Geometric feature parameters
         self.geom_params = {
-            'neighbor_radius': voxel_size * 5,
             'min_neighbors': 5
         }
 
@@ -35,7 +31,6 @@ class FeatureExtractor:
         import time
         start_time = time.time()
 
-        # Skip downsample - caller (submap_stitcher) already downsamples in process_submap()
         pcd_down = point_cloud
 
         if self.method == 'hybrid':
@@ -53,7 +48,6 @@ class FeatureExtractor:
                 'method': 'hybrid',
                 'scan_context': sc_desc,
                 'geometric': geom_desc,
-                'keypoints': keypoints,
                 'keypoint_indices': keypoint_indices,
                 'metadata': {
                     'scan_context': sc_meta,
@@ -63,7 +57,6 @@ class FeatureExtractor:
             }
 
         elif self.method == 'scan_context':
-            # Extract only Scan Context
             sc_desc, sc_meta = self._extract_scan_context(pcd_down)
             elapsed = time.time() - start_time
 
@@ -71,7 +64,6 @@ class FeatureExtractor:
                 'method': 'scan_context',
                 'scan_context': sc_desc,
                 'descriptors': sc_desc,
-                'keypoints': o3d.geometry.PointCloud(),
                 'keypoint_indices': np.array([]),
                 'metadata': {
                     **sc_meta,
@@ -80,7 +72,6 @@ class FeatureExtractor:
             }
 
         elif self.method == 'geometric':
-            # Extract only geometric features
             keypoints, keypoint_indices = self._extract_keypoints_uniform(pcd_down)
             if len(keypoints.points) > 0:
                 geom_desc, geom_meta = self._extract_geometric(pcd_down, keypoint_indices)
@@ -94,7 +85,6 @@ class FeatureExtractor:
                 'method': 'geometric',
                 'geometric': geom_desc,
                 'descriptors': geom_desc,
-                'keypoints': keypoints,
                 'keypoint_indices': keypoint_indices,
                 'metadata': {
                     **geom_meta,
@@ -140,15 +130,11 @@ class FeatureExtractor:
             # Occupancy (can also use max height for 3D)
             scan_context[ring_idx, sector_idx] = 1.0
 
-        # Flatten to 1D descriptor
         descriptor = scan_context.flatten()
 
-        # Validation: warn if submap is unusually small
         if r_99th < 1.0:
-            # Very small submap - likely just started exploring
-            pass  # Normal at start, no warning needed
+            pass  
 
-        # Minimal metadata - only structural information
         metadata = {
             'num_rings': num_rings,
             'num_sectors': num_sectors
@@ -185,22 +171,18 @@ class FeatureExtractor:
                 descriptors.append(np.zeros(4))
                 continue
 
-            # Get neighbor points
             neighbor_points = points[neighbor_idx, :]
 
-            # Compute covariance matrix
             cov = np.cov(neighbor_points.T)
             eigenvalues = np.linalg.eigvalsh(cov)
             eigenvalues = np.sort(eigenvalues)[::-1]
 
-            # Geometric features
-            lambda1, lambda2, lambda3 = eigenvalues + 1e-10  # Avoid division by zero
+            lambda1, lambda2, lambda3 = eigenvalues + 1e-10  
 
             linearity = (lambda1 - lambda2) / lambda1
             planarity = (lambda2 - lambda3) / lambda1
             scattering = lambda3 / lambda1
 
-            # Local point density as curvature estimate
             avg_dist = np.mean(np.linalg.norm(neighbor_points - points[idx], axis=1))
 
             descriptor = np.array([linearity, planarity, scattering, avg_dist])
@@ -219,7 +201,6 @@ class FeatureExtractor:
         """Return empty result when feature extraction fails"""
         return {
             'method': self.method,
-            'keypoints': o3d.geometry.PointCloud(),
             'keypoint_indices': np.array([]),
             'descriptors': np.array([]),
             'metadata': {

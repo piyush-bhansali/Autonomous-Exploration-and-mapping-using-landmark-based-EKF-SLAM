@@ -58,6 +58,7 @@ class SimpleNavigationNode(Node):
 
         # State
         self.state = State.WAIT_FOR_MAP
+        self.previous_state = None  # Track previous state for replan logic
         self.robot_pos = None
         self.robot_yaw = None
         self.map_points = None
@@ -312,6 +313,7 @@ class SimpleNavigationNode(Node):
         )
 
         # Transition to planning
+        self.previous_state = self.state
         self.state = State.PLAN_PATH
         self.get_logger().info('[STATE: DETECT_FRONTIERS → PLAN_PATH]')
 
@@ -346,7 +348,20 @@ class SimpleNavigationNode(Node):
 
         # Start path execution
         self.current_path = path
-        self.current_waypoint_index = 0
+
+        # BUG FIX #16: Resume from nearest waypoint when replanning (prevents U-turns)
+        if self.previous_state == State.EXECUTE_PATH:
+            # Replanning during execution - resume from nearest forward waypoint
+            self.current_waypoint_index = self._find_nearest_waypoint_index(path)
+            self.get_logger().info(
+                f'[STATE: PLAN_PATH] Replanning: Resuming from waypoint {self.current_waypoint_index}/{len(path)} '
+                f'(nearest to robot position)'
+            )
+        else:
+            # New path - start from beginning
+            self.current_waypoint_index = 0
+            self.get_logger().info('[STATE: PLAN_PATH] New path: Starting from waypoint 0')
+
         self.state = State.EXECUTE_PATH
 
         # Initialize stuck detection timers
@@ -362,6 +377,37 @@ class SimpleNavigationNode(Node):
         for i in range(len(path) - 1):
             total += np.linalg.norm(path[i+1] - path[i])
         return total
+
+    def _find_nearest_waypoint_index(self, path: np.ndarray) -> int:
+        """
+        Find the nearest waypoint ahead of the robot for path resumption.
+
+        Used when replanning to avoid U-turns - robot continues from nearest
+        forward waypoint instead of returning to path start.
+
+        Args:
+            path: Array of waypoints [N x 2]
+
+        Returns:
+            Index of nearest forward waypoint (0 if none found)
+        """
+        if path is None or len(path) == 0:
+            return 0
+
+        # Calculate distances from robot to all waypoints
+        distances = np.linalg.norm(path - self.robot_pos, axis=1)
+
+        # Find closest waypoint
+        nearest_idx = np.argmin(distances)
+
+        # Check if we should look ahead (skip waypoints behind us)
+        # If nearest waypoint is very close (<0.3m), try next waypoint
+        if nearest_idx < len(path) - 1 and distances[nearest_idx] < 0.3:
+            # Check if next waypoint is also close
+            if distances[nearest_idx + 1] < 1.0:
+                return nearest_idx + 1
+
+        return nearest_idx
 
     def _handle_execute_path(self):
         """Execute path using pure pursuit"""
@@ -404,6 +450,7 @@ class SimpleNavigationNode(Node):
             self.current_waypoint_index = 0
 
             # Transition to PLAN_PATH to create new path to same goal
+            self.previous_state = self.state
             self.state = State.PLAN_PATH
             self.get_logger().info('[STATE: EXECUTE_PATH → PLAN_PATH] Replanning due to path deviation')
             return
@@ -424,6 +471,7 @@ class SimpleNavigationNode(Node):
             self.current_goal = None
 
             # Transition to detect new frontiers
+            self.previous_state = self.state
             self.state = State.DETECT_FRONTIERS
             self.get_logger().info('[STATE: EXECUTE_PATH → DETECT_FRONTIERS] Searching for next frontier...')
             return
@@ -458,6 +506,7 @@ class SimpleNavigationNode(Node):
                 self.current_goal = new_goal.copy()
 
                 # Transition to PLAN_PATH to create new path
+                self.previous_state = self.state
                 self.state = State.PLAN_PATH
                 self.get_logger().info('[STATE: EXECUTE_PATH → PLAN_PATH] Replanning to better frontier')
                 return

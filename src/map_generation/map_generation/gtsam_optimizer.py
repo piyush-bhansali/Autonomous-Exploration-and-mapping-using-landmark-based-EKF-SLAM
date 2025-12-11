@@ -9,7 +9,7 @@ class GTSAMOptimizer:
     
     def __init__(self,
                  translation_noise_sigma: float = 0.1,
-                 rotation_noise_sigma: float = 0.1,
+                 rotation_noise_sigma: float = 0.05,
                  max_translation: float = 5.0,
                  max_rotation: float = np.pi):
         

@@ -3,6 +3,7 @@
 
 import numpy as np
 import open3d as o3d
+import open3d.core as o3c
 from typing import List, Optional, Tuple, Dict
 from scipy.spatial import KDTree
 
@@ -62,7 +63,6 @@ class LoopClosureDetector:
 
         self.stats['num_checks'] += 1
 
-        # PRE-FILTER: Check if current submap is distinctive enough
         current_id = current_submap['id']
         if current_submap['features'] is not None and 'geometric' in current_submap['features']:
             geom_descriptors = current_submap['features']['geometric']
@@ -206,7 +206,6 @@ class LoopClosureDetector:
             return None
 
         geom_current = current_features['geometric']
-        keypoints_current = current_features['keypoints']
 
         # Try each candidate in order of similarity
         for i, candidate in enumerate(candidates):
@@ -233,8 +232,9 @@ class LoopClosureDetector:
             current_keypoint_indices = current_features['keypoint_indices']
             candidate_keypoint_indices = candidate_features['keypoint_indices']
 
-            current_points = np.asarray(current_submap['point_cloud'].points)
-            candidate_points = np.asarray(candidate_submap['point_cloud'].points)
+            # Access Tensor PointCloud positions
+            current_points = current_submap['point_cloud'].point.positions.cpu().numpy()
+            candidate_points = candidate_submap['point_cloud'].point.positions.cpu().numpy()
 
             # Extract matched keypoint positions
             source_pts = []
@@ -376,26 +376,34 @@ class LoopClosureDetector:
 
         return T
 
-    def _refine_with_icp(self, source_pcd: o3d.geometry.PointCloud,
-                        target_pcd: o3d.geometry.PointCloud,
+    def _refine_with_icp(self, source_pcd: o3d.t.geometry.PointCloud,
+                        target_pcd: o3d.t.geometry.PointCloud,
                         initial_transform: np.ndarray) -> Tuple[np.ndarray, float]:
         """
-        Refine transformation using ICP
+        Refine transformation using GPU-accelerated Tensor ICP
 
         Returns:
             (refined_transform, fitness)
         """
-        # Use Open3D's ICP
-        reg_result = o3d.pipelines.registration.registration_icp(
-            source_pcd,
-            target_pcd,
+        # Convert initial transform to Tensor (use device from source point cloud)
+        device = source_pcd.device
+        init_transform_tensor = o3c.Tensor(initial_transform, dtype=o3c.float32, device=device)
+
+        # Use Tensor ICP (GPU-accelerated)
+        reg_result = o3d.t.pipelines.registration.icp(
+            source=source_pcd,
+            target=target_pcd,
             max_correspondence_distance=0.5,
-            init=initial_transform,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-            criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100)
+            init_source_to_target=init_transform_tensor,
+            estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
+            criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(max_iteration=100)
         )
 
-        return reg_result.transformation, reg_result.fitness
+        # Convert result back to NumPy
+        transform = reg_result.transformation.cpu().numpy()
+        fitness = float(reg_result.fitness)
+
+        return transform, fitness
 
     def get_statistics(self) -> dict:
         """Get loop closure detection statistics"""

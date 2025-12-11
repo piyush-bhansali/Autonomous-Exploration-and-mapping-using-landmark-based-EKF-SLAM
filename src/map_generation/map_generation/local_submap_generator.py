@@ -37,7 +37,7 @@ class LocalSubmapGenerator(Node):
         super().__init__('local_submap_generator')
 
         self.declare_parameter('robot_name', 'tb3_1')
-        self.declare_parameter('scans_per_submap', 30)
+        self.declare_parameter('scans_per_submap', 80)
         self.declare_parameter('save_directory', './submaps')
         self.declare_parameter('voxel_size', 0.05)
         self.declare_parameter('feature_method', 'hybrid')

@@ -40,10 +40,9 @@ class SubmapStitcher:
         self._cached_numpy_map = None
         self._map_dirty = True
 
-        # Feature extraction (GPU always enabled)
+        # Feature extraction (downsampling done in process_submap)
         self.feature_extractor = FeatureExtractor(
-            method=feature_extraction_method,
-            voxel_size=voxel_size
+            method=feature_extraction_method
         )
 
         # Loop closure
@@ -163,17 +162,14 @@ class SubmapStitcher:
             pcd_world_tensor = pcd_tensor.transform(transform_tensor)
             self.global_map_tensor = pcd_world_tensor
 
-            # Store at full resolution (0.05m) for better loop closure accuracy
-            stored_pcd = pcd_tensor.to_legacy()
-
             submap_data = {
                 'id': submap_id,
-                'point_cloud': stored_pcd,  # In submap-local frame
+                'point_cloud': pcd_tensor,  
                 'features': features,
                 'pose_start': start_pose,
                 'pose_end': end_pose,
                 'pose_center': pose_center,
-                'global_transform': global_transform,  # Absolute pose of pose_start
+                'global_transform': global_transform,  
                 'scan_count': scan_count,
                 'timestamp_created': time.time()
             }
@@ -181,39 +177,33 @@ class SubmapStitcher:
             self.submaps.append(submap_data)
             self.transforms.append(global_transform)
 
-            # Add to loop closure spatial index
             if self.loop_closure_detector is not None:
                 self.loop_closure_detector.add_submap_to_index(
                     submap_id,
                     np.array([pose_center['x'], pose_center['y']])
                 )
 
-            return True, None  # No correction for first submap
+            return True, None  
 
         success, global_transform_refined, fitness = self.align_submap_with_icp(
             source=pcd_tensor,
             target=self.global_map_tensor,
-            initial_guess=global_transform  # Use odometry estimate as starting point
+            initial_guess=global_transform  
         )
 
-        # Calculate ICP correction (difference from odometry-based placement)
         icp_correction = np.linalg.inv(global_transform) @ global_transform_refined
         correction_translation = np.linalg.norm(icp_correction[:2, 3])
         correction_rotation = np.abs(np.arctan2(icp_correction[1, 0], icp_correction[0, 0]))
 
-        # Relaxed thresholds to allow larger corrections for accumulated drift
         if correction_translation > 1.0 or correction_rotation > np.radians(20):
-            # ICP correction too large - reject and use odometry
             global_transform_refined = global_transform
             success = False
 
         if not success or fitness < self.icp_fitness_threshold:
-            # ICP failed - use odometry
             global_transform_refined = global_transform
 
-        # Extract pose correction for robot pose update (relative to odometry)
         pose_correction = None
-        if success and correction_translation > 0.01:  # Only if non-trivial correction (>1cm)
+        if success and correction_translation > 0.01:  
             pose_correction = {
                 'dx': icp_correction[0, 3],
                 'dy': icp_correction[1, 3],
@@ -222,17 +212,15 @@ class SubmapStitcher:
         transform_refined_tensor = o3c.Tensor(global_transform_refined, dtype=o3c.float32, device=self.device)
         pcd_aligned_tensor = pcd_tensor.transform(transform_refined_tensor)
 
-        # Store at full resolution (0.05m) for better loop closure accuracy
-        stored_pcd = pcd_tensor.to_legacy()
 
         submap_data = {
             'id': submap_id,
-            'point_cloud': stored_pcd,  # In submap-local frame
+            'point_cloud': pcd_tensor,  # In submap-local frame
             'features': features,
             'pose_start': start_pose,
             'pose_end': end_pose,
             'pose_center': pose_center,
-            'global_transform': global_transform_refined,  # Absolute pose of pose_start (refined by ICP)
+            'global_transform': global_transform_refined,  
             'scan_count': scan_count,
             'timestamp_created': time.time()
         }
@@ -376,26 +364,19 @@ class SubmapStitcher:
 
         # Re-stitch all submaps with optimized transforms
         for submap in self.submaps:
-            # Transform submap to optimized pose (use tensor operations)
-            pcd_legacy = o3d.geometry.PointCloud(submap['point_cloud'])
-            pcd_legacy.transform(submap['global_transform'])
+            
+            pcd_tensor = submap['point_cloud']  
+            transform_tensor = o3c.Tensor(submap['global_transform'], dtype=o3c.float32, device=self.device)
+            pcd_transformed = pcd_tensor.transform(transform_tensor)
 
-            # Convert to tensor and add to global map
-            pcd_tensor = o3d.t.geometry.PointCloud.from_legacy(
-                pcd_legacy, dtype=o3c.float32, device=self.device
-            )
-
-            # Concatenate with existing global map
             if len(self.global_map_tensor.point.positions) == 0:
-                self.global_map_tensor = pcd_tensor
+                self.global_map_tensor = pcd_transformed
             else:
                 self.global_map_tensor.point.positions = o3c.concatenate([
                     self.global_map_tensor.point.positions,
-                    pcd_tensor.point.positions
+                    pcd_transformed.point.positions
                 ], axis=0)
 
-        # Final downsample to prevent duplicates
         self.global_map_tensor = self.global_map_tensor.voxel_down_sample(self.voxel_size)
 
-        # Invalidate cache after rebuilding global map
         self._map_dirty = True
