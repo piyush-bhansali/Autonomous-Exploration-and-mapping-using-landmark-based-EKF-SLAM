@@ -221,9 +221,9 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'robot_name': robot_name,
-                'scans_per_submap': 50,
+                'scans_per_submap': 80,
                 'save_directory': './submaps',
-                'voxel_size': 0.08,
+                'voxel_size': 0.05,
                 'feature_method': 'hybrid',
                 'enable_loop_closure': True,
                 'enable_scan_to_map_icp': True

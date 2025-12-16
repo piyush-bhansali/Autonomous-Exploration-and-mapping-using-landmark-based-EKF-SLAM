@@ -64,7 +64,9 @@ class SimpleNavigationNode(Node):
         self.map_points = None
         self.current_path = None
         self.current_waypoint_index = 0
-        self.explored_positions = []  # Track visited frontiers
+        # Track unreachable frontiers with context (position-dependent)
+        # Each entry: {'frontier_pos': [x,y], 'robot_pos': [x,y], 'has_alternatives': bool}
+        self.unreachable_frontiers = []
         self.current_goal = None
         self.all_frontiers = []  # Store all detected frontiers for continuous visualization
 
@@ -86,6 +88,11 @@ class SimpleNavigationNode(Node):
         self.last_obstacle_warning_time = None
         self.obstacle_warning_cooldown = 2.0  # seconds between warnings
 
+        # Frontier detection caching (avoid redundant expensive calls)
+        self.cached_frontiers = []
+        self.frontier_cache_time = None
+        self.frontier_cache_duration = 0.5  # seconds - cache valid for 0.5s
+
         # Path deviation detection
         self.last_deviation_check_time = None
         self.replan_count = 0
@@ -97,11 +104,10 @@ class SimpleNavigationNode(Node):
         # Minimum frontier distance to prevent selecting frontiers too close (especially after corridor exit)
         self.min_frontier_distance = 2.0  # Force frontiers to be at least 2.0m away
 
-        # Components (created when map received)
+        # Components
         self.frontier_detector = SimpleFrontierDetector(self.robot_radius)
-        self.path_planner = None
         self.controller = SmoothedPurePursuit(
-            lookahead_distance=0.8,
+            lookahead_distance=1.2,  # Constant higher lookahead for smoother paths
             max_linear_velocity=0.18,
             min_linear_velocity=0.08,
             max_angular_velocity=0.5,
@@ -169,14 +175,6 @@ class SimpleNavigationNode(Node):
         with self.map_lock:
             self.map_points = points
 
-            # Create/update path planner
-            self.path_planner = RRTStar(
-                self.map_points,
-                robot_radius=self.robot_radius,
-                step_size=0.4,
-                goal_bias=0.5
-            )
-
         # Transition from WAIT_FOR_MAP if needed
         if self.state == State.WAIT_FOR_MAP:
             self.state = State.DETECT_FRONTIERS
@@ -197,9 +195,12 @@ class SimpleNavigationNode(Node):
         self.robot_yaw = quaternion_to_yaw(qx, qy, qz, qw)
 
     def scan_callback(self, msg: LaserScan):
-        """Update scan data for reactive obstacle avoidance"""
+        """Update scan data for reactive obstacle avoidance and RRT* obstacles"""
         with self.scan_lock:
             self.scan_data = msg
+
+        # Note: Scan conversion to points happens lazily in _get_combined_obstacle_map()
+        # to avoid wasting CPU on scans that never get used for planning
 
     def control_loop(self):
         """Main control loop"""
@@ -233,17 +234,11 @@ class SimpleNavigationNode(Node):
 
     def _handle_detect_frontiers(self):
         """Detect frontiers and select best one"""
-        # BUG FIX #15: Acquire lock when reading map_points
-        with self.map_lock:
-            map_points_copy = self.map_points.copy() if self.map_points is not None else None
+        # Get frontiers (uses cache if valid)
+        frontiers = self._get_frontiers(force_refresh=True)  # Force refresh in DETECT_FRONTIERS state
 
-        if map_points_copy is None:
-            return
-
-        self.get_logger().info(f'[STATE: DETECT_FRONTIERS] Map: {len(map_points_copy)} points, Explored: {len(self.explored_positions)} positions')
-
-        # Detect frontiers
-        frontiers = self.frontier_detector.detect(map_points_copy, self.robot_pos, self.robot_yaw)
+        if len(frontiers) == 0 and self.map_points is not None:
+            self.get_logger().info(f'[STATE: DETECT_FRONTIERS] Map: {len(self.map_points)} points, Unreachable records: {len(self.unreachable_frontiers)}')
 
         # Store for continuous visualization
         self.all_frontiers = frontiers
@@ -255,31 +250,31 @@ class SimpleNavigationNode(Node):
 
         self.get_logger().info(f'[STATE: DETECT_FRONTIERS] Found {len(frontiers)} total frontiers')
 
-        # Filter out explored frontiers (use 2.0m threshold to avoid revisiting)
-        unexplored = []
-        for f in frontiers:
-            min_dist_to_explored = float('inf')
-            for exp_pos in self.explored_positions:
-                dist = np.linalg.norm(f.position - exp_pos)
-                min_dist_to_explored = min(min_dist_to_explored, dist)
+        # Filter out unreachable frontiers (position-dependent filtering)
+        reachable = self._filter_unreachable_frontiers(frontiers, self.robot_pos)
 
-            if min_dist_to_explored > 3.0 or len(self.explored_positions) == 0:
-                unexplored.append(f)
-            else:
-                self.get_logger().debug(f'  Frontier at [{f.position[0]:.2f}, {f.position[1]:.2f}] too close to explored position (dist={min_dist_to_explored:.2f}m)')
-
-        if len(unexplored) == 0:
-            self.get_logger().warn(f'[STATE: DETECT_FRONTIERS] All {len(frontiers)} frontiers already explored (within 3.0m of {len(self.explored_positions)} explored positions)')
-            for i, exp_pos in enumerate(self.explored_positions):
-                self.get_logger().warn(f'  Explored position #{i+1}: [{exp_pos[0]:.2f}, {exp_pos[1]:.2f}]')
+        if len(reachable) == 0:
+            self.get_logger().warn(
+                f'[STATE: DETECT_FRONTIERS] All {len(frontiers)} frontiers unreachable from current position '
+                f'({len(self.unreachable_frontiers)} unreachable records)'
+            )
+            for i, ur in enumerate(self.unreachable_frontiers):
+                self.get_logger().warn(
+                    f'  Unreachable #{i+1}: frontier=[{ur["frontier_pos"][0]:.2f}, {ur["frontier_pos"][1]:.2f}], '
+                    f'from_position=[{ur["robot_pos"][0]:.2f}, {ur["robot_pos"][1]:.2f}], '
+                    f'had_alternatives={ur["has_alternatives"]}'
+                )
             self.state = State.DONE
             return
 
-        self.get_logger().info(f'[STATE: DETECT_FRONTIERS] {len(unexplored)} unexplored frontiers available (filtered {len(frontiers) - len(unexplored)})')
+        self.get_logger().info(
+            f'[STATE: DETECT_FRONTIERS] {len(reachable)} reachable frontiers available '
+            f'(filtered {len(frontiers) - len(reachable)} unreachable)'
+        )
 
         # Filter frontiers that are too close (minimum distance requirement)
         distant_frontiers = []
-        for f in unexplored:
+        for f in reachable:
             dist = np.linalg.norm(f.position - self.robot_pos)
             if dist >= self.min_frontier_distance:
                 distant_frontiers.append(f)
@@ -292,10 +287,10 @@ class SimpleNavigationNode(Node):
         # If no distant frontiers, use closest available (fallback)
         if len(distant_frontiers) == 0:
             self.get_logger().warn(
-                f'[STATE: DETECT_FRONTIERS] All {len(unexplored)} frontiers < {self.min_frontier_distance}m. '
+                f'[STATE: DETECT_FRONTIERS] All {len(reachable)} frontiers < {self.min_frontier_distance}m. '
                 f'Using closest available frontier.'
             )
-            distant_frontiers = unexplored
+            distant_frontiers = reachable
 
         self.get_logger().info(
             f'[STATE: DETECT_FRONTIERS] {len(distant_frontiers)} frontiers meet distance requirement '
@@ -319,14 +314,6 @@ class SimpleNavigationNode(Node):
 
     def _handle_plan_path(self):
         """Plan path to current goal"""
-        # BUG FIX #15: Acquire lock when accessing path_planner
-        with self.map_lock:
-            path_planner = self.path_planner
-
-        if path_planner is None:
-            self.get_logger().error('[STATE: PLAN_PATH] Path planner not initialized!')
-            return
-
         if self.current_goal is None:
             self.get_logger().error('[STATE: PLAN_PATH] No current goal set!')
             self.state = State.DETECT_FRONTIERS
@@ -334,12 +321,30 @@ class SimpleNavigationNode(Node):
 
         self.get_logger().info(f'[STATE: PLAN_PATH] Planning from [{self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f}] to [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
 
+        # Get combined obstacle map (static map + recent LiDAR scan)
+        combined_obstacles = self._get_combined_obstacle_map()
+
+        # Update planner with fresh obstacles (includes recent LiDAR)
+        path_planner_with_fresh_obstacles = RRTStar(
+            combined_obstacles,
+            robot_radius=self.robot_radius,
+            step_size=0.4,
+            goal_bias=0.5
+        )
+
         # Plan with RRT*
-        path = path_planner.plan(self.robot_pos, self.current_goal)
+        path = path_planner_with_fresh_obstacles.plan(self.robot_pos, self.current_goal)
+
+        num_static = len(self.map_points) if self.map_points is not None else 0
+        num_scan = len(combined_obstacles) - num_static
+        self.get_logger().info(f'  RRT* using {len(combined_obstacles)} obstacles ({num_static} static + {num_scan} from scan)')
 
         if path is None:
-            self.get_logger().warn('[STATE: PLAN_PATH] Planning FAILED - marking as explored, trying next frontier')
-            self.explored_positions.append(self.current_goal.copy())
+            self.get_logger().warn('[STATE: PLAN_PATH] Planning FAILED - marking frontier as unreachable from current position')
+
+            # Mark as unreachable using helper method
+            self._mark_frontier_unreachable(self.current_goal, reason="path planning failed")
+
             self.current_goal = None
             self.state = State.DETECT_FRONTIERS
             return
@@ -377,6 +382,21 @@ class SimpleNavigationNode(Node):
         for i in range(len(path) - 1):
             total += np.linalg.norm(path[i+1] - path[i])
         return total
+
+    def _distance(self, pos1: np.ndarray, pos2: np.ndarray) -> float:
+        """
+        Calculate Euclidean distance between two 2D positions.
+
+        Helper method to improve code readability and reduce repetitive calculations.
+
+        Args:
+            pos1: First position [x, y]
+            pos2: Second position [x, y]
+
+        Returns:
+            Distance in meters
+        """
+        return np.linalg.norm(pos1 - pos2)
 
     def _find_nearest_waypoint_index(self, path: np.ndarray) -> int:
         """
@@ -419,9 +439,9 @@ class SimpleNavigationNode(Node):
             cmd = Twist()
             self.cmd_pub.publish(cmd)
 
-            # Mark current goal as explored (avoid re-selecting same unreachable goal)
+            # Mark current goal as unreachable from current position (avoid re-selecting same unreachable goal)
             if self.current_goal is not None:
-                self.explored_positions.append(self.current_goal.copy())
+                self._mark_frontier_unreachable(self.current_goal, reason="stuck")
 
             # Clear current path and goal
             self.current_path = None
@@ -459,8 +479,8 @@ class SimpleNavigationNode(Node):
         if self.current_waypoint_index >= len(self.current_path):
             self.get_logger().info(f'[STATE: EXECUTE_PATH] ✓ Path complete! Reached frontier at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
 
-            # Mark current goal as explored
-            self.explored_positions.append(self.current_goal.copy())
+            # Successfully reached frontier - no need to mark as unreachable
+            # Gap filtering will naturally prevent re-selecting explored areas
 
             # Stop the robot
             cmd = Twist()
@@ -478,13 +498,10 @@ class SimpleNavigationNode(Node):
 
         # RE-DETECT FRONTIERS: Update frontier list as map grows during execution
         # This ensures we're always navigating to the best available frontier
-        # BUG FIX #15: Acquire lock when reading map_points
-        with self.map_lock:
-            map_points_copy = self.map_points.copy() if self.map_points is not None else None
+        frontiers = self._get_frontiers()  # Use cached frontiers (0.5s cache)
+        self.all_frontiers = frontiers  # Update for visualization
 
-        if map_points_copy is not None:
-            frontiers = self.frontier_detector.detect(map_points_copy, self.robot_pos, self.robot_yaw)
-            self.all_frontiers = frontiers  # Update for visualization
+        if len(frontiers) > 0:
 
             # DYNAMIC REPLANNING: Check if we should switch to a better frontier
             should_replan, new_goal, reason = self._should_replan_to_new_frontier(frontiers, self.current_goal)
@@ -596,9 +613,133 @@ class SimpleNavigationNode(Node):
         self.cmd_pub.publish(cmd)
         self.get_logger().info('Exploration complete', once=True)
 
+    def _mark_frontier_unreachable(self, frontier_pos: np.ndarray, reason: str = ""):
+        """
+        Mark a frontier as unreachable from current robot position.
+
+        This helper consolidates duplicate code from path planning failures
+        and stuck detection.
+
+        Args:
+            frontier_pos: Position of unreachable frontier [x, y]
+            reason: Human-readable reason for marking unreachable
+        """
+        # Check if there are alternative frontiers within 2m of robot
+        current_frontiers = self._get_frontiers()  # Use cached frontiers
+
+        has_alternatives = False
+        if len(current_frontiers) > 0:
+            nearby_alternatives = [
+                f for f in current_frontiers
+                if np.linalg.norm(f.position - self.robot_pos) < 2.0
+                and np.linalg.norm(f.position - frontier_pos) > 0.5  # Not the failed goal itself
+            ]
+            has_alternatives = len(nearby_alternatives) > 0
+
+        # Add to unreachable frontiers with context
+        self.unreachable_frontiers.append({
+            'frontier_pos': frontier_pos.copy(),
+            'robot_pos': self.robot_pos.copy(),
+            'has_alternatives': has_alternatives
+        })
+
+        self.get_logger().info(
+            f'  Marked unreachable ({reason}): frontier=[{frontier_pos[0]:.2f}, {frontier_pos[1]:.2f}], '
+            f'robot_pos=[{self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f}], '
+            f'had_alternatives={has_alternatives}'
+        )
+
+    def _get_frontiers(self, force_refresh: bool = False) -> list:
+        """
+        Get frontiers with caching to avoid redundant expensive calls.
+
+        Args:
+            force_refresh: If True, bypass cache and detect fresh frontiers
+
+        Returns:
+            List of SimpleFrontier objects
+        """
+        current_time = self.get_clock().now()
+
+        # Check cache validity
+        if not force_refresh and self.frontier_cache_time is not None:
+            time_since_cache = (current_time - self.frontier_cache_time).nanoseconds / 1e9
+            if time_since_cache < self.frontier_cache_duration:
+                # Cache still valid
+                return self.cached_frontiers
+
+        # Cache expired or force refresh - detect new frontiers
+        with self.map_lock:
+            map_points_copy = self.map_points.copy() if self.map_points is not None else None
+
+        if map_points_copy is None:
+            return []
+
+        frontiers = self.frontier_detector.detect(map_points_copy, self.robot_pos, self.robot_yaw)
+
+        # Update cache
+        self.cached_frontiers = frontiers
+        self.frontier_cache_time = current_time
+
+        return frontiers
+
+    def _filter_unreachable_frontiers(self, frontiers: list, robot_pos: np.ndarray) -> list:
+        """
+        Filter out frontiers that were unreachable from similar robot positions.
+
+        This is a position-dependent filter that only removes frontiers if:
+        1. Frontier is near a previously unreachable one (within 0.5m)
+        2. Robot is near the position where it was unreachable (within 2m)
+        3. No alternatives existed at that position
+
+        This allows re-approaching frontiers from different angles/positions.
+
+        Args:
+            frontiers: List of SimpleFrontier objects to filter
+            robot_pos: Current robot position [x, y]
+
+        Returns:
+            List of frontiers that are potentially reachable from current position
+        """
+        valid_frontiers = []
+
+        for f in frontiers:
+            is_unreachable = False
+
+            for ur in self.unreachable_frontiers:
+                # Check if this frontier is near a previously unreachable one
+                frontier_match = np.linalg.norm(f.position - ur['frontier_pos']) < 0.5
+
+                # Check if robot is near the position where it was unreachable
+                position_match = np.linalg.norm(robot_pos - ur['robot_pos']) < 2.0
+
+                # Only filter if:
+                # 1. Same frontier location AND
+                # 2. Robot at similar position AND
+                # 3. No alternatives existed at that position
+                if frontier_match and position_match and not ur['has_alternatives']:
+                    is_unreachable = True
+                    self.get_logger().debug(
+                        f'  Filtered unreachable frontier [{f.position[0]:.2f}, {f.position[1]:.2f}] '
+                        f'(previously unreachable from [{ur["robot_pos"][0]:.2f}, {ur["robot_pos"][1]:.2f}])'
+                    )
+                    break
+
+            if not is_unreachable:
+                valid_frontiers.append(f)
+
+        return valid_frontiers
+
     def _should_replan_to_new_frontier(self, new_frontiers: list, current_goal: np.ndarray) -> tuple:
         """
         Check if robot should abandon current path for a better frontier.
+
+        IMPORTANT: This function should NOT filter current_goal by min_frontier_distance.
+        The robot has already committed to the current goal, and filtering it out would
+        cause premature replanning as the robot approaches (within 2m of) the goal.
+
+        Only NEW candidate frontiers are filtered by distance to prevent selecting
+        frontiers too close to the robot.
 
         Returns:
             (should_replan: bool, new_goal: np.ndarray or None, reason: str)
@@ -606,38 +747,59 @@ class SimpleNavigationNode(Node):
         if len(new_frontiers) == 0:
             return False, None, ""
 
-        # Filter out explored frontiers (same logic as _handle_detect_frontiers)
-        unexplored = []
-        for f in new_frontiers:
-            min_dist_to_explored = float('inf')
-            for exp_pos in self.explored_positions:
-                dist = np.linalg.norm(f.position - exp_pos)
-                min_dist_to_explored = min(min_dist_to_explored, dist)
+        # Filter out unreachable frontiers (same logic as _handle_detect_frontiers)
+        reachable = self._filter_unreachable_frontiers(new_frontiers, self.robot_pos)
 
-            if min_dist_to_explored > 3.0 or len(self.explored_positions) == 0:
-                unexplored.append(f)
-
-        if len(unexplored) == 0:
+        if len(reachable) == 0:
             return False, None, ""
 
-        # Best frontier from new detection
-        best_new_frontier = unexplored[0]
-        best_new_pos = best_new_frontier.position
-        best_new_score = best_new_frontier.score
-
-        # Find current goal in new frontier list
+        # Find current goal in new frontier list (BEFORE distance filtering!)
+        # This ensures we can detect if current goal is still valid, even if it's now < 2m away
         current_frontier = None
         current_score = 0.0
-        for f in unexplored:
+        for f in reachable:
             if np.linalg.norm(f.position - current_goal) < 0.5:  # Same frontier if within 0.5m
                 current_frontier = f
                 current_score = f.score
                 break
 
-        # REASON 1: Current goal has disappeared (blocked, explored, or no longer valid)
+        # REASON 1: Current goal has disappeared (blocked, unreachable, or no longer valid)
         if current_frontier is None:
+            # Current goal disappeared from frontier list (truly gone, not just filtered by distance)
+            # Find best alternative that meets distance requirement
+            distant_candidates = [f for f in reachable
+                                  if np.linalg.norm(f.position - self.robot_pos) >= self.min_frontier_distance]
+
+            if len(distant_candidates) == 0:
+                # No valid alternatives, keep current goal
+                return False, None, ""
+
+            best_new_frontier = distant_candidates[0]
             reason = f"Current goal disappeared from frontier list"
-            return True, best_new_pos, reason
+            return True, best_new_frontier.position, reason
+
+        # Current goal is still valid! Check if we should switch to a better one
+
+        # Filter NEW candidate frontiers by distance (exclude current goal and frontiers too close)
+        candidate_frontiers = []
+        for f in reachable:
+            # Skip current frontier (we're already going there!)
+            if np.linalg.norm(f.position - current_goal) < 0.5:
+                continue
+
+            # Only consider frontiers that meet distance requirement
+            dist_to_robot = np.linalg.norm(f.position - self.robot_pos)
+            if dist_to_robot >= self.min_frontier_distance:
+                candidate_frontiers.append(f)
+
+        if len(candidate_frontiers) == 0:
+            # No valid alternatives, keep current goal
+            return False, None, ""
+
+        # Best alternative frontier
+        best_new_frontier = candidate_frontiers[0]
+        best_new_pos = best_new_frontier.position
+        best_new_score = best_new_frontier.score
 
         # REASON 2: Score improvement (new frontier significantly better)
         score_improvement = best_new_score - current_score
@@ -654,7 +816,7 @@ class SimpleNavigationNode(Node):
             reason = f"Closer frontier found (dist: {dist_to_current:.2f}m → {dist_to_new:.2f}m, -{distance_improvement:.2f}m)"
             return True, best_new_pos, reason
 
-        # No replanning needed
+        # No replanning needed - current goal is still best
         return False, None, ""
 
     def _check_scan_for_obstacles(self) -> tuple:
@@ -915,6 +1077,105 @@ class SimpleNavigationNode(Node):
             path_msg.poses.append(pose)
 
         self.path_pub.publish(path_msg)
+
+    def _convert_scan_to_points(self, scan: LaserScan) -> np.ndarray:
+        """
+        Convert LaserScan to 2D points in robot frame.
+
+        Args:
+            scan: LaserScan message
+
+        Returns:
+            Nx2 array of [x, y] points in robot frame (relative to base_scan)
+        """
+        ranges = np.array(scan.ranges)
+        angle_min = scan.angle_min
+        angle_increment = scan.angle_increment
+
+        # Replace inf/nan with max range (these are not obstacles)
+        valid_mask = np.isfinite(ranges) & (ranges > scan.range_min) & (ranges < scan.range_max)
+
+        # Generate angles for each reading
+        num_readings = len(ranges)
+        angles = angle_min + np.arange(num_readings) * angle_increment
+
+        # Convert polar to Cartesian (robot frame)
+        x = ranges * np.cos(angles)
+        y = ranges * np.sin(angles)
+
+        # Filter to valid points only
+        points = np.column_stack([x[valid_mask], y[valid_mask]])
+
+        return points
+
+    def _transform_points_to_global(self, points: np.ndarray, robot_pos: np.ndarray, robot_yaw: float) -> np.ndarray:
+        """
+        Transform points from robot frame to global frame.
+
+        Args:
+            points: Nx2 array of [x, y] points in robot frame
+            robot_pos: [x, y] robot position in global frame
+            robot_yaw: Robot heading in radians
+
+        Returns:
+            Nx2 array of [x, y] points in global frame
+        """
+        if points is None or len(points) == 0:
+            return np.array([]).reshape(0, 2)
+
+        # Rotation matrix
+        cos_yaw = np.cos(robot_yaw)
+        sin_yaw = np.sin(robot_yaw)
+
+        # Apply rotation and translation
+        x_global = robot_pos[0] + points[:, 0] * cos_yaw - points[:, 1] * sin_yaw
+        y_global = robot_pos[1] + points[:, 0] * sin_yaw + points[:, 1] * cos_yaw
+
+        points_global = np.column_stack([x_global, y_global])
+
+        return points_global
+
+    def _get_combined_obstacle_map(self) -> np.ndarray:
+        """
+        Combine static map points with recent LiDAR scan points.
+
+        OPTIMIZATION: Converts scan lazily only when needed for planning.
+        This avoids wasting 90-99% of scan conversions that never get used.
+
+        Returns:
+            Nx2 array of [x, y] obstacle points (static map + recent scan)
+        """
+        combined = []
+
+        # Add static map points (from submaps)
+        if self.map_points is not None and len(self.map_points) > 0:
+            combined.append(self.map_points[:, :2])  # Take only x,y (drop z)
+
+        # Add recent scan points (convert lazily here)
+        with self.scan_lock:
+            scan = self.scan_data
+
+        if scan is not None and self.robot_pos is not None and self.robot_yaw is not None:
+            # Convert scan to 2D points on-demand
+            scan_points_robot_frame = self._convert_scan_to_points(scan)
+
+            # Transform to global frame
+            scan_points_global = self._transform_points_to_global(
+                scan_points_robot_frame,
+                self.robot_pos,
+                self.robot_yaw
+            )
+
+            if len(scan_points_global) > 0:
+                combined.append(scan_points_global)
+
+        # Combine all obstacle sources
+        if len(combined) == 0:
+            return np.array([]).reshape(0, 2)
+
+        obstacle_map = np.vstack(combined)
+
+        return obstacle_map
 
     def _parse_pointcloud2(self, msg: PointCloud2) -> np.ndarray:
         """Convert PointCloud2 to numpy array"""

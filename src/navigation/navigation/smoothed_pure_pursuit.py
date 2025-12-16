@@ -8,7 +8,7 @@ class SmoothedPurePursuit:
     
 
     def __init__(self,
-                 lookahead_distance: float = 0.6,
+                 lookahead_distance: float = 1.0,
                  max_linear_velocity: float = 0.2,
                  min_linear_velocity: float = 0.1,
                  max_angular_velocity: float = 0.8,
@@ -20,7 +20,7 @@ class SmoothedPurePursuit:
         if not (0.0 <= angular_smoothing_factor <= 1.0):
             raise ValueError(f"angular_smoothing_factor must be in [0, 1], got {angular_smoothing_factor}")
 
-        self.lookahead = lookahead_distance
+        self.lookahead = lookahead_distance  # Constant lookahead distance (not adaptive)
         self.v_max = max_linear_velocity  # Maximum linear velocity
         self.v_min = min_linear_velocity  # Minimum linear velocity
         self.max_w = max_angular_velocity

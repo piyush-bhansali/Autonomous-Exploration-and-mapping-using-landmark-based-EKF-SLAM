@@ -19,6 +19,19 @@ venv/
 *.swp
 .DS_Store
 Thumbs.db
+**/keybindings.json
+c:/
 
 # Misc
 *.log
+*.pdf
+*.sh
+*.aux
+*.toc
+*.out
+*.synctex.gz
+*.png
+*.gv
+
+# Map cache
+submaps/**/*.pcd
