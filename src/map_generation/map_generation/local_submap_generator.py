@@ -2,7 +2,6 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField, JointState, Imu
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
@@ -29,6 +28,7 @@ from map_generation.mapping_utils import (
     publish_global_map,
     quaternion_to_rotation_matrix
 )
+from multi_robot_mapping.qos_profiles import SCAN_QOS, ODOM_QOS, IMU_QOS
 
 
 class LocalSubmapGenerator(Node):
@@ -76,34 +76,26 @@ class LocalSubmapGenerator(Node):
             self.device = o3c.Device("CPU:0")
             self.get_logger().info("GPU not available, using CPU for ICP")
 
-     
-        scan_qos = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST
-        )
+        # Subscribers with centralized QoS profiles
         self.scan_sub = self.create_subscription(
             LaserScan,
             f'/{self.robot_name}/scan',
             self.scan_callback,
-            scan_qos
+            SCAN_QOS  # Using centralized QoS profile
         )
 
         self.imu_sub = self.create_subscription(
             Imu,
             f'/{self.robot_name}/imu',
             self.imu_callback,
-            qos_profile_sensor_data
+            IMU_QOS  # Using centralized QoS profile
         )
 
-        # Use RELIABLE QoS to match the bridge publisher
-        odom_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.odom_sub = self.create_subscription(
             Odometry,
             f'/{self.robot_name}/odom',
             self.odom_callback,
-            odom_qos
+            ODOM_QOS  # Using centralized QoS profile
         )
 
         # Subscribe to joint_states to monitor wheel velocities

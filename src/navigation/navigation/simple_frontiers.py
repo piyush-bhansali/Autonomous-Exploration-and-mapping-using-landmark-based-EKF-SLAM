@@ -16,51 +16,42 @@ class SimpleFrontier:
 
 
 class SimpleFrontierDetector:
-    """Detects frontiers at map boundary"""
-
+    
     def __init__(self, robot_radius: float = 0.22):
         self.robot_radius = robot_radius
 
     def detect(self,
               map_points: np.ndarray,  # Nx3 array of [x,y,z] points
               robot_pos: np.ndarray,  # [x, y]
-              robot_yaw: float) -> List[SimpleFrontier]:  # Robot heading in radians
+              robot_yaw: float) -> List[SimpleFrontier]: 
 
         if len(map_points) < 100:
-            return []  # Need minimum map size
+            return []
 
-        # Extract 2D points (x, y)
         points_2d = map_points[:, :2]
 
-        # Build KD-tree for fast queries
         kdtree = KDTree(points_2d)
 
-        # Find FREE SPACE boundary (points far from obstacles)
         free_space_points = self._extract_free_space_boundary(points_2d, kdtree)
 
         if len(free_space_points) < 10:
             # Fallback to full map bounds
             free_space_points = points_2d
 
-        # Get bounds of free space
         x_min, y_min = free_space_points.min(axis=0)
         x_max, y_max = free_space_points.max(axis=0)
 
-        # Sample frontiers 0.3m BEFORE map boundary (inside mapped area)
         candidates = self._sample_boundary(x_min, x_max, y_min, y_max)
 
-        # HYBRID APPROACH: Filter candidates with collision check + gap filtering
+       
         safe_candidates = []
         for candidate in candidates:
             # Check 1: Not too close to obstacles
             dist, _ = kdtree.query(candidate)
-            # Increased from 2.0× to 3.0× robot radius for safer frontier selection
-            # With robot_radius=0.22m, this requires 0.66m clearance (was 0.44m)
-            if dist < self.robot_radius * 3.0:  # 0.66m clearance
+            
+            if dist < self.robot_radius * 2.0:  # 0.44m clearance
                 continue  # Too close to wall
 
-            # Check 2: Has open direction (GAP FILTERING)
-            # Ensures frontier has unexplored space beyond it
             if not self._has_open_direction(candidate, kdtree, robot_pos):
                 continue  # No open directions, likely dead-end
 
@@ -83,26 +74,22 @@ class SimpleFrontierDetector:
                         x_min: float, x_max: float,
                         y_min: float, y_max: float) -> List[np.ndarray]:
 
-        offset = 0.5  # Increased from 0.2m: place frontiers 0.5m inside boundary (more conservative)
-        spacing = 0.5  # Increased from 0.4m: reduce frontier density  
+        offset = 0.5 
+        spacing = 0.5  
 
         candidates = []
 
-        # Top edge (y = y_max - offset, inside the boundary)
         x_samples = np.arange(x_min, x_max + spacing, spacing)
         for x in x_samples:
             candidates.append(np.array([x, y_max - offset]))
 
-        # Bottom edge (y = y_min + offset, inside the boundary)
         for x in x_samples:
             candidates.append(np.array([x, y_min + offset]))
 
-        # Right edge (x = x_max - offset, inside the boundary)
         y_samples = np.arange(y_min, y_max + spacing, spacing)
         for y in y_samples:
             candidates.append(np.array([x_max - offset, y]))
 
-        # Left edge (x = x_min + offset, inside the boundary)
         for y in y_samples:
             candidates.append(np.array([x_min + offset, y]))
 
@@ -112,9 +99,8 @@ class SimpleFrontierDetector:
                             point: np.ndarray,
                             kdtree: KDTree,
                             robot_pos: np.ndarray,
-                            check_distance: float = 2.0) -> bool:
-        
-        # Check 8 cardinal/diagonal directions
+                            check_distance: float = 1.5) -> bool:
+
         num_directions = 8
         open_count = 0
 
@@ -139,6 +125,7 @@ class SimpleFrontierDetector:
                 if dot > 0:  # Direction leads outward
                     open_count += 1
 
+        # Require 2 open directions to ensure frontier has substantial unexplored space
         return open_count >= 2
 
     def _is_direction_clear(self,
@@ -233,9 +220,7 @@ class SimpleFrontierDetector:
         # Convert to numpy array for DBSCAN
         points = np.array(candidates)
 
-        # DBSCAN clustering: eps=1.0m allows frontiers up to 1m apart to be grouped
-        # Increased from 0.4m to reduce oscillation between nearby frontiers
-        clustering = DBSCAN(eps=1.0, min_samples=2).fit(points)
+        clustering = DBSCAN(eps=1.0, min_samples=1).fit(points)
 
         labels = clustering.labels_
 
@@ -286,9 +271,9 @@ class SimpleFrontierDetector:
             size_score = min(cluster_size / 5.0, 1.0)
 
             score = (
-                0.70 * travel_score +    # Distance (primary - 70%, increased from 60% to prioritize distance)
-                0.15 * heading_score +   # Heading (reduced from 30% to 15% to prevent oscillation)
-                0.15 * size_score        # Size (increased from 10% to 15% to favor larger frontiers)
+                0.60 * travel_score +    # Distance (60% - balanced priority on proximity)
+                0.15 * heading_score +   # Heading (15% - prevent oscillation)
+                0.25 * size_score        # Size (25% - favor larger unexplored areas)
             )
 
             frontiers.append(SimpleFrontier(centroid, score, cluster_size))

@@ -241,13 +241,10 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'robot_name': robot_name,
-                'robot_radius': 0.22,
                 'enable_reactive_avoidance': True,
                 'scan_danger_distance': 1.0,
                 'scan_emergency_distance': 0.6,
                 'scan_angular_range': 60.0,
-                'enable_path_deviation_check': True,
-                'path_deviation_threshold': 1.5,
                 'path_deviation_check_interval': 4.0
             }],
             condition=launch.conditions.IfCondition(enable_navigation)

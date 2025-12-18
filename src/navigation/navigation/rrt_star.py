@@ -345,11 +345,11 @@ class RRTStar:
                     smoothed.append(path[i])
 
         # Densify path with intermediate waypoints for smoother curves
-        densified = self._densify_path(smoothed, spacing=0.3)
+        densified = self._densify_path(smoothed, spacing=0.2)
 
         return densified
 
-    def _densify_path(self, path: List[np.ndarray], spacing: float = 0.3) -> List[np.ndarray]:
+    def _densify_path(self, path: List[np.ndarray], spacing: float = 0.2) -> List[np.ndarray]:
         """
         Add intermediate waypoints along path segments for smoother curve following.
 
