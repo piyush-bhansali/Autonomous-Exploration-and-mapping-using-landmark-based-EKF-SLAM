@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Point
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2, LaserScan
@@ -11,7 +11,7 @@ import numpy as np
 from enum import Enum
 import threading
 
-from navigation.simple_frontiers import SimpleFrontierDetector
+from navigation.convex_frontier_detector import ConvexFrontierDetector
 from map_generation.utils import quaternion_to_yaw
 from navigation.rrt_star import RRTStar
 from navigation.smoothed_pure_pursuit import SmoothedPurePursuit
@@ -58,7 +58,8 @@ class SimpleNavigationNode(Node):
         self.current_waypoint_index = 0
 
         self.current_goal = None
-        self.all_frontiers = []  
+        self.all_frontiers = []
+        self.no_frontiers_count = 0  # Counter for consecutive "no frontiers" detections
 
         self.stuck_detection_enabled = True
         self.stuck_check_window = 5.0  
@@ -79,10 +80,13 @@ class SimpleNavigationNode(Node):
         self.replan_count = 0
 
         # Dynamic replanning thresholds
-        self.replan_score_threshold = 0.50  
-        self.replan_distance_threshold = 4.0  
-        self.min_frontier_distance = 2.0 
-        self.frontier_detector = SimpleFrontierDetector(self.robot_radius)
+        self.replan_score_threshold = 0.50
+        self.replan_distance_threshold = 4.0
+        self.min_frontier_distance = 2.0
+        self.frontier_detector = ConvexFrontierDetector(
+            robot_radius=self.robot_radius,
+            frontier_spacing=0.5
+        )
         self.controller = SmoothedPurePursuit(
             lookahead_distance=0.8,  # Reduced from 1.2m for tighter turns
             max_linear_velocity=0.18,
@@ -120,6 +124,7 @@ class SimpleNavigationNode(Node):
         self.cmd_pub = self.create_publisher(Twist, f'/{self.robot_name}/cmd_vel', 10)
         self.frontier_markers_pub = self.create_publisher(MarkerArray, f'/{self.robot_name}/frontier_markers', 10)
         self.path_pub = self.create_publisher(Path, f'/{self.robot_name}/planned_path', 10)
+        self.hull_markers_pub = self.create_publisher(MarkerArray, f'/{self.robot_name}/hull_boundary', 10)
 
         # Control timer (10 Hz)
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -142,6 +147,12 @@ class SimpleNavigationNode(Node):
                 self.robot_pos,
                 self.robot_yaw
             )
+
+            # Reset counter if frontiers are found, increment if none
+            if len(self.all_frontiers) > 0:
+                self.no_frontiers_count = 0
+            else:
+                self.no_frontiers_count += 1
 
         if self.state == State.WAIT_FOR_MAP:
             self.state = State.DETECT_FRONTIERS
@@ -199,9 +210,14 @@ class SimpleNavigationNode(Node):
         frontiers = self._get_frontiers()
 
         if len(frontiers) == 0:
-            self.get_logger().warn('[STATE: DETECT_FRONTIERS] No frontiers found - exploration complete')
-            self.state = State.DONE
-            return
+            # Require 3 consecutive map updates with no frontiers before declaring complete
+            if self.no_frontiers_count >= 3:
+                self.get_logger().warn(f'[STATE: DETECT_FRONTIERS] No frontiers found for {self.no_frontiers_count} consecutive map updates - exploration complete')
+                self.state = State.DONE
+                return
+            else:
+                self.get_logger().info(f'[STATE: DETECT_FRONTIERS] No frontiers found ({self.no_frontiers_count}/3) - waiting for next map update...')
+                return
 
         self.get_logger().info(f'[STATE: DETECT_FRONTIERS] Found {len(frontiers)} frontiers')
 
@@ -567,6 +583,9 @@ class SimpleNavigationNode(Node):
         # 2. Publish planned path
         self._publish_path()
 
+        # 3. Publish hull boundary
+        self._publish_hull_boundary()
+
     def _publish_frontier_markers(self):
         """Publish large sphere markers for all frontiers"""
         marker_array = MarkerArray()
@@ -664,6 +683,72 @@ class SimpleNavigationNode(Node):
             path_msg.poses.append(pose)
 
         self.path_pub.publish(path_msg)
+
+    def _publish_hull_boundary(self):
+        """Publish concave hull boundary visualization"""
+        hull_data = self.frontier_detector.get_hull_visualization_data()
+
+        if not hull_data['has_data']:
+            return
+
+        marker_array = MarkerArray()
+
+        # Clear old markers
+        clear_marker = Marker()
+        clear_marker.action = Marker.DELETEALL
+        marker_array.markers.append(clear_marker)
+
+        # Publish original hull boundary (green line)
+        if 'hull_boundary' in hull_data and len(hull_data['hull_boundary']) > 0:
+            hull_marker = Marker()
+            hull_marker.header.frame_id = f'{self.robot_name}/odom'
+            hull_marker.header.stamp = self.get_clock().now().to_msg()
+            hull_marker.ns = 'concave_hull'
+            hull_marker.id = 0
+            hull_marker.type = Marker.LINE_STRIP
+            hull_marker.action = Marker.ADD
+            hull_marker.scale.x = 0.05  # Line width
+            hull_marker.color.r = 0.0
+            hull_marker.color.g = 1.0
+            hull_marker.color.b = 0.0
+            hull_marker.color.a = 0.8
+            hull_marker.lifetime.sec = 0  # Persist
+
+            for point in hull_data['hull_boundary']:
+                p = Point()
+                p.x = float(point[0])
+                p.y = float(point[1])
+                p.z = 0.1
+                hull_marker.points.append(p)
+
+            marker_array.markers.append(hull_marker)
+
+        # Publish offset boundary (blue line)
+        if 'offset_boundary' in hull_data and len(hull_data['offset_boundary']) > 0:
+            offset_marker = Marker()
+            offset_marker.header.frame_id = f'{self.robot_name}/odom'
+            offset_marker.header.stamp = self.get_clock().now().to_msg()
+            offset_marker.ns = 'offset_hull'
+            offset_marker.id = 1
+            offset_marker.type = Marker.LINE_STRIP
+            offset_marker.action = Marker.ADD
+            offset_marker.scale.x = 0.07  # Slightly thicker
+            offset_marker.color.r = 0.0
+            offset_marker.color.g = 0.5
+            offset_marker.color.b = 1.0
+            offset_marker.color.a = 1.0
+            offset_marker.lifetime.sec = 0
+
+            for point in hull_data['offset_boundary']:
+                p = Point()
+                p.x = float(point[0])
+                p.y = float(point[1])
+                p.z = 0.15  # Slightly higher than hull
+                offset_marker.points.append(p)
+
+            marker_array.markers.append(offset_marker)
+
+        self.hull_markers_pub.publish(marker_array)
 
 
 def main(args=None):

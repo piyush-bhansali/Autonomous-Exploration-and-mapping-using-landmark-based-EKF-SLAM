@@ -151,11 +151,6 @@ class SubmapStitcher:
 
         global_transform = transformation_matrix
 
-        print(f"\nGlobal transform matrix (local → world):")
-        print(f"{global_transform}")
-        print(f"Translation: [{global_transform[0,3]:.3f}, {global_transform[1,3]:.3f}, {global_transform[2,3]:.3f}]")
-        print(f"Rotation (yaw): {np.arctan2(global_transform[1,0], global_transform[0,0]):.3f} rad")
-
         if submap_id == 0:
             
             transform_tensor = o3c.Tensor(global_transform, dtype=o3c.float32, device=self.device)

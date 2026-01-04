@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
 import numpy as np
+import open3d.core as o3c
 import open3d as o3d
 from typing import Dict, Tuple
 
-# Import shared mapping utilities
 from map_generation.mapping_utils import match_geometric_features
 
 
@@ -14,32 +14,22 @@ class FeatureExtractor:
 
         self.method = method
 
-        # Scan Context parameters
         self.sc_params = {
             'max_range': 10.0,      
             'num_rings': 20,        
             'num_sectors': 60,      
         }
 
-        # Geometric feature parameters
         self.geom_params = {
-            'min_neighbors': 5
+            'min_neighbors': 5,
+            'max_neighbor_radius': 1.0,  
+            'knn': 10  
         }
 
     def extract(self, point_cloud: o3d.t.geometry.PointCloud) -> Dict:
-        """
-        Extract features from Tensor PointCloud using GPU-accelerated operations.
-
-        Args:
-            point_cloud: Tensor PointCloud (GPU or CPU)
-
-        Returns:
-            Dictionary containing features and metadata
-        """
+        
         import time
         start_time = time.time()
-
-        # All operations now use Tensor API directly (no Legacy conversion!)
 
         if self.method == 'hybrid':
             sc_desc, sc_meta = self._extract_scan_context(point_cloud)
@@ -104,16 +94,7 @@ class FeatureExtractor:
             raise ValueError(f"Unknown feature method: {self.method}. Use 'hybrid', 'scan_context' or 'geometric'")
 
     def _extract_scan_context(self, pcd: o3d.t.geometry.PointCloud) -> Tuple[np.ndarray, Dict]:
-        """
-        Extract Scan Context descriptor from Tensor PointCloud.
-
-        Args:
-            pcd: Tensor PointCloud (GPU or CPU)
-
-        Returns:
-            (descriptor, metadata) tuple
-        """
-        # Convert to NumPy once (efficient single transfer)
+        
         points = pcd.point.positions.cpu().numpy()
         points_2d = points[:, :2]
         center = np.mean(points_2d, axis=0)
@@ -122,11 +103,7 @@ class FeatureExtractor:
         r = np.sqrt(points_centered[:, 0]**2 + points_centered[:, 1]**2)
         theta = np.arctan2(points_centered[:, 1], points_centered[:, 0])
 
-        # Compute actual extent for metadata (debugging/validation)
-        r_99th = np.percentile(r, 99) if len(r) > 0 else 1.0
-
         max_range = self.sc_params['max_range']
-
         num_rings = self.sc_params['num_rings']
         num_sectors = self.sc_params['num_sectors']
 
@@ -136,15 +113,12 @@ class FeatureExtractor:
             if r[i] > max_range:
                 continue
 
-            # Bin indices
             ring_idx = int(r[i] / max_range * num_rings)
             sector_idx = int((theta[i] + np.pi) / (2 * np.pi) * num_sectors)
 
-            # Clip to valid range
             ring_idx = min(ring_idx, num_rings - 1)
             sector_idx = min(sector_idx, num_sectors - 1)
 
-            # Occupancy (can also use max height for 3D)
             scan_context[ring_idx, sector_idx] = 1.0
 
         descriptor = scan_context.flatten()
@@ -161,16 +135,7 @@ class FeatureExtractor:
 
     def _extract_keypoints_uniform(self, pcd: o3d.t.geometry.PointCloud,
                                    ratio: float = 0.1) -> np.ndarray:
-        """
-        Extract keypoint indices using uniform sampling from Tensor PointCloud.
-
-        Args:
-            pcd: Tensor PointCloud
-            ratio: Ratio of points to sample as keypoints
-
-        Returns:
-            Array of keypoint indices
-        """
+        
         num_points = len(pcd.point.positions)
         num_keypoints = max(int(num_points * ratio), 50)
 
@@ -182,43 +147,34 @@ class FeatureExtractor:
 
     def _extract_geometric(self, pcd: o3d.t.geometry.PointCloud,
                           keypoint_indices: np.ndarray) -> Tuple[np.ndarray, Dict]:
-        """
-        Extract geometric features using GPU-accelerated Tensor NNS.
+        
 
-        Args:
-            pcd: Tensor PointCloud (GPU or CPU)
-            keypoint_indices: Indices of keypoints in the point cloud
-
-        Returns:
-            (descriptors, metadata) tuple
-        """
-        import open3d.core as o3c
-
-        # Build GPU-accelerated NNS index
         nns = o3d.core.nns.NearestNeighborSearch(pcd.point.positions)
         nns.knn_index()
 
-        # Transfer points to CPU once (more efficient than multiple transfers)
         points = pcd.point.positions.cpu().numpy()
 
         descriptors = []
 
         for idx in keypoint_indices:
-            # Query on GPU (or CPU if device is CPU)
+
             query_pt = pcd.point.positions[idx].reshape(1, 3)
-            indices, distances = nns.knn_search(query_pt, knn=30)
+            indices, distances = nns.knn_search(query_pt, knn=self.geom_params['knn'])
 
-            # Get neighbor indices
-            neighbor_idx = indices[0].cpu().numpy()
+            neighbor_idx_all = indices[0].cpu().numpy()
+            neighbor_dist = distances[0].cpu().numpy()
+
+            max_radius = self.geom_params['max_neighbor_radius']
+            valid_mask = neighbor_dist <= max_radius
+            neighbor_idx = neighbor_idx_all[valid_mask]
+
             k = len(neighbor_idx)
-
             if k < self.geom_params['min_neighbors']:
                 descriptors.append(np.zeros(4))
                 continue
 
             neighbor_points = points[neighbor_idx, :]
 
-            # Compute covariance and eigenvalues (CPU computation)
             cov = np.cov(neighbor_points.T)
             eigenvalues = np.linalg.eigvalsh(cov)
             eigenvalues = np.sort(eigenvalues)[::-1]
@@ -242,16 +198,3 @@ class FeatureExtractor:
         }
 
         return descriptors, metadata
-
-    def _empty_result(self) -> Dict:
-        """Return empty result when feature extraction fails"""
-        return {
-            'method': self.method,
-            'keypoint_indices': np.array([]),
-            'descriptors': np.array([]),
-            'metadata': {
-                'num_keypoints': 0,
-                'descriptor_dim': 0,
-                'computation_time': 0.0
-            }
-        }
