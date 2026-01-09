@@ -5,30 +5,20 @@ from typing import List, Tuple
 
 
 class SmoothedPurePursuit:
-    
 
     def __init__(self,
-                 lookahead_distance: float = 1.0,
                  max_linear_velocity: float = 0.2,
-                 min_linear_velocity: float = 0.1,
-                 max_angular_velocity: float = 0.8,
-                 angular_smoothing_factor: float = 0.3,
-                 goal_tolerance: float = 0.3,
-                 velocity_gain: float = 0.5):
+                 max_angular_velocity: float = 0.8):
 
-        # BUG FIX #7: Validate smoothing factor is in valid range [0, 1]
-        if not (0.0 <= angular_smoothing_factor <= 1.0):
-            raise ValueError(f"angular_smoothing_factor must be in [0, 1], got {angular_smoothing_factor}")
-
-        self.lookahead = lookahead_distance  # Constant lookahead distance (not adaptive)
         self.v_max = max_linear_velocity  # Maximum linear velocity
-        self.v_min = min_linear_velocity  # Minimum linear velocity
-        self.max_w = max_angular_velocity
-        self.alpha = angular_smoothing_factor
-        self.goal_tolerance = goal_tolerance
-        self.velocity_gain = velocity_gain  # How much to reduce velocity on turns
+        self.max_w = max_angular_velocity  # Maximum angular velocity
 
-        # State variables for smoothing
+        self.lookahead = 0.8  # Lookahead distance for path following
+        self.v_min = 0.08  # Minimum linear velocity
+        self.alpha = 0.4  # Angular velocity smoothing factor 
+        self.goal_tolerance = 0.3  # Distance to goal considered "reached"
+        self.velocity_gain = 0.5  # Velocity reduction factor on sharp turns
+
         self.omega_smooth = 0.0  # Smoothed angular velocity
         self.prev_time = None    # For tracking control frequency
 
@@ -48,7 +38,7 @@ class SmoothedPurePursuit:
         # Check if goal reached
         dist_to_goal = np.linalg.norm(path[-1] - robot_pos)
         if dist_to_goal < self.goal_tolerance:
-            self.omega_smooth = 0.0  # Reset for next path
+            self.omega_smooth = 0.0  
             return 0.0, 0.0
 
         # Find lookahead point on path
@@ -57,7 +47,6 @@ class SmoothedPurePursuit:
         )
 
         if lookahead_point is None:
-            # No valid lookahead - stop
             self.omega_smooth = 0.0
             return 0.0, 0.0
 

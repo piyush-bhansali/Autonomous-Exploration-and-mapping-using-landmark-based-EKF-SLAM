@@ -10,6 +10,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 import numpy as np
 from enum import Enum
 import threading
+from scipy.spatial import KDTree
 
 from navigation.convex_frontier_detector import ConvexFrontierDetector
 from map_generation.utils import quaternion_to_yaw
@@ -71,6 +72,10 @@ class SimpleNavigationNode(Node):
 
         self.map_lock = threading.Lock()
 
+        # Centralized KDTree management for sharing between frontier detector and RRT*
+        self._obstacle_kdtree = None
+        self._obstacle_kdtree_hash = None
+
         self.scan_data = None
         self.scan_lock = threading.Lock()
         self.last_obstacle_warning_time = None
@@ -84,17 +89,11 @@ class SimpleNavigationNode(Node):
         self.replan_distance_threshold = 4.0
         self.min_frontier_distance = 2.0
         self.frontier_detector = ConvexFrontierDetector(
-            robot_radius=self.robot_radius,
-            frontier_spacing=0.5
+            robot_radius=self.robot_radius
         )
         self.controller = SmoothedPurePursuit(
-            lookahead_distance=0.8,  # Reduced from 1.2m for tighter turns
             max_linear_velocity=0.18,
-            min_linear_velocity=0.08,
-            max_angular_velocity=0.8,  # Increased from 0.5 for sharper turns
-            angular_smoothing_factor=0.4,  # Reduced from 0.6 for more responsive turning
-            goal_tolerance=0.3,
-            velocity_gain=0.7
+            max_angular_velocity=0.8
         )
 
         # Subscribers
@@ -132,7 +131,7 @@ class SimpleNavigationNode(Node):
         self.get_logger().info(f'Simple Navigation started for {self.robot_name}')
 
     def map_callback(self, msg: PointCloud2):
-        
+
         points = nav_utils.parse_pointcloud2(msg)
 
         if len(points) < 100:
@@ -141,11 +140,19 @@ class SimpleNavigationNode(Node):
         with self.map_lock:
             self.map_points = points
 
+            # Build/cache KDTree for sharing between frontier detector and RRT*
+            map_hash = hash(self.map_points.tobytes())
+            if self._obstacle_kdtree_hash != map_hash:
+                points_2d = self.map_points[:, :2]
+                self._obstacle_kdtree = KDTree(points_2d)
+                self._obstacle_kdtree_hash = map_hash
+
         if self.robot_pos is not None and self.robot_yaw is not None:
             self.all_frontiers = self.frontier_detector.detect(
                 self.map_points,
                 self.robot_pos,
-                self.robot_yaw
+                self.robot_yaw,
+                obstacle_kdtree=self._obstacle_kdtree
             )
 
             # Reset counter if frontiers are found, increment if none
@@ -266,29 +273,18 @@ class SimpleNavigationNode(Node):
 
         self.get_logger().info(f'[STATE: PLAN_PATH] Planning from [{self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f}] to [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
 
-        with self.scan_lock:
-            scan = self.scan_data
-
-        combined_obstacles = nav_utils.get_combined_obstacle_map(
+        # Simplified: Use only global map for planning (no scan integration)
+        # Lidar is used only for emergency stop during execution
+        path_planner = RRTStar(
             self.map_points,
-            scan,
-            self.robot_pos,
-            self.robot_yaw
-        )
-
-        path_planner_with_fresh_obstacles = RRTStar(
-            combined_obstacles,
             robot_radius=self.robot_radius,
-            step_size=0.2,
-            goal_bias=0.5,
-            max_iterations=1500
+            obstacle_kdtree=self._obstacle_kdtree  # Reuse cached KDTree from map_callback
         )
 
-        path = path_planner_with_fresh_obstacles.plan(self.robot_pos, self.current_goal)
+        path = path_planner.plan(self.robot_pos, self.current_goal)
 
-        num_static = len(self.map_points) if self.map_points is not None else 0
-        num_scan = len(combined_obstacles) - num_static
-        self.get_logger().info(f'  RRT* using {len(combined_obstacles)} obstacles ({num_static} static + {num_scan} from scan)')
+        num_obstacles = len(self.map_points) if self.map_points is not None else 0
+        self.get_logger().info(f'  RRT* using {num_obstacles} obstacles from global map (0.5m safety margin)')
 
         if path is None:
             self.get_logger().warn('[STATE: PLAN_PATH] Planning FAILED - will re-detect frontiers')
@@ -458,58 +454,33 @@ class SimpleNavigationNode(Node):
         else:
             obstacle_detected, min_distance, avoidance_direction = False, float('inf'), 0.0
 
-        if obstacle_detected:
-            current_time = self.get_clock().now()
+        # Simplified: Only emergency stop if obstacle < threshold (no steering corrections)
+        if obstacle_detected and min_distance < self.scan_emergency_distance:
+            self.get_logger().error(
+                f'[EMERGENCY STOP] Obstacle at {min_distance:.2f}m < {self.scan_emergency_distance:.2f}m threshold!'
+            )
 
-            # Log warning (with cooldown to avoid spam)
-            should_warn = (self.last_obstacle_warning_time is None or
-                          (current_time - self.last_obstacle_warning_time).nanoseconds / 1e9 > self.obstacle_warning_cooldown)
+            # STOP immediately
+            cmd = Twist()
+            self.cmd_pub.publish(cmd)
 
-            if should_warn:
-                self.get_logger().warn(
-                    f'[REACTIVE AVOIDANCE] Obstacle detected at {min_distance:.2f}m! '
-                    f'Avoidance: {"LEFT" if avoidance_direction < 0 else "RIGHT" if avoidance_direction > 0 else "STOP"}'
-                )
-                self.last_obstacle_warning_time = current_time
+            # Force replanning by clearing current goal and path
+            self.current_path = None
+            self.current_goal = None
+            self.current_waypoint_index = 0
 
-            # Emergency stop if very close - force replanning
-            if min_distance < self.scan_emergency_distance:
-                self.get_logger().error(
-                    f'[EMERGENCY STOP] Obstacle at {min_distance:.2f}m < emergency threshold {self.scan_emergency_distance:.2f}m!'
-                )
-
-                # STOP immediately
-                cmd = Twist()
-                self.cmd_pub.publish(cmd)
-
-                # Force replanning by clearing current goal and path
-                self.current_path = None
-                self.current_goal = None
-                self.current_waypoint_index = 0
-
-                # Transition to detect new frontiers
-                self.state = State.DETECT_FRONTIERS
-                self.get_logger().warn('[EMERGENCY] Clearing blocked goal and searching for alternative frontiers!')
-                return
-            # Slow down and steer away if in danger zone
-            else:
-                # Reduce speed proportionally to distance
-                speed_factor = (min_distance - self.scan_emergency_distance) / (self.scan_danger_distance - self.scan_emergency_distance)
-                speed_factor = np.clip(speed_factor, 0.3, 1.0)  # At least 30% speed
-                v = v * speed_factor
-
-                # Add corrective steering (blend with planned steering)
-                correction_gain = 0.25  # How much to steer away (0-1), reduced from 0.4 for gentler avoidance
-                w = w + correction_gain * avoidance_direction * self.controller.max_w
+            # Transition to detect new frontiers (will replan with updated global map)
+            self.state = State.DETECT_FRONTIERS
+            self.get_logger().warn('[EMERGENCY] Waiting for updated global map to replan around obstacle')
+            return
 
         # Log progress periodically
         if self.current_waypoint_index % 10 == 0:
             progress = (self.current_waypoint_index / len(self.current_path)) * 100
             dist_to_goal = np.linalg.norm(self.robot_pos - self.current_path[-1])
-            obstacle_status = f'AVOIDING (d={min_distance:.2f}m)' if obstacle_detected else 'CLEAR'
             self.get_logger().info(
                 f'[STATE: EXECUTE_PATH] Waypoint {self.current_waypoint_index}/{len(self.current_path)} '
-                f'({progress:.1f}%), dist to goal: {dist_to_goal:.2f}m, v={v:.2f}, w={w:.2f}, scan={obstacle_status}'
+                f'({progress:.1f}%), dist to goal: {dist_to_goal:.2f}m, v={v:.2f}, w={w:.2f}'
             )
 
         # Publish velocity
@@ -697,31 +668,6 @@ class SimpleNavigationNode(Node):
         clear_marker = Marker()
         clear_marker.action = Marker.DELETEALL
         marker_array.markers.append(clear_marker)
-
-        # Publish original hull boundary (green line)
-        if 'hull_boundary' in hull_data and len(hull_data['hull_boundary']) > 0:
-            hull_marker = Marker()
-            hull_marker.header.frame_id = f'{self.robot_name}/odom'
-            hull_marker.header.stamp = self.get_clock().now().to_msg()
-            hull_marker.ns = 'concave_hull'
-            hull_marker.id = 0
-            hull_marker.type = Marker.LINE_STRIP
-            hull_marker.action = Marker.ADD
-            hull_marker.scale.x = 0.05  # Line width
-            hull_marker.color.r = 0.0
-            hull_marker.color.g = 1.0
-            hull_marker.color.b = 0.0
-            hull_marker.color.a = 0.8
-            hull_marker.lifetime.sec = 0  # Persist
-
-            for point in hull_data['hull_boundary']:
-                p = Point()
-                p.x = float(point[0])
-                p.y = float(point[1])
-                p.z = 0.1
-                hull_marker.points.append(p)
-
-            marker_array.markers.append(hull_marker)
 
         # Publish offset boundary (blue line)
         if 'offset_boundary' in hull_data and len(hull_data['offset_boundary']) > 0:
