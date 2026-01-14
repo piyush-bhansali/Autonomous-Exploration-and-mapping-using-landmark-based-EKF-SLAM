@@ -1,0 +1,21 @@
+# Service for requesting inter-robot alignment
+
+# Request
+string requesting_robot_id         # ID of robot requesting alignment
+float64[] current_scan_ranges      # LiDAR ranges
+float64 scan_angle_min             # Scan angle min (rad)
+float64 scan_angle_max             # Scan angle max (rad)
+float64 scan_angle_increment       # Angular resolution (rad)
+float64 range_min                  # Min valid range
+float64 range_max                  # Max valid range
+float64[3] position                # Robot position [x, y, theta]
+
+---
+
+# Response
+bool success                       # Alignment succeeded
+float64[16] transform_matrix       # Flattened 4x4 T_requesting_to_target
+float64 fitness                    # ICP fitness score
+float64 inlier_ratio               # RANSAC inlier ratio
+float64 overlap                    # Scan overlap percentage
+string failure_reason              # Reason if failed
