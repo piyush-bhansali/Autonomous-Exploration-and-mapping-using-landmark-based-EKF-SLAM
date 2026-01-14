@@ -36,19 +36,15 @@ class SimpleNavigationNode(Node):
 
         self.declare_parameter('robot_name', 'tb3_1')
         self.declare_parameter('enable_reactive_avoidance', True)
-        self.declare_parameter('scan_danger_distance', 0.5)
-        self.declare_parameter('scan_emergency_distance', 0.3)
+        self.declare_parameter('scan_emergency_distance', 0.4)
         self.declare_parameter('scan_angular_range', 60.0)
-        self.declare_parameter('path_deviation_check_interval', 4.0)
 
         self.robot_name = self.get_parameter('robot_name').value
-        self.robot_radius = 0.22  
+        self.robot_radius = 0.22
         self.enable_reactive_avoidance = self.get_parameter('enable_reactive_avoidance').value
-        self.scan_danger_distance = self.get_parameter('scan_danger_distance').value
         self.scan_emergency_distance = self.get_parameter('scan_emergency_distance').value
         self.scan_angular_range = np.radians(self.get_parameter('scan_angular_range').value)
-        self.path_deviation_threshold = 0.5  
-        self.path_deviation_check_interval = self.get_parameter('path_deviation_check_interval').value
+        self.path_deviation_threshold = 0.5
 
         self.state = State.WAIT_FOR_MAP
         self.previous_state = None 
@@ -60,7 +56,7 @@ class SimpleNavigationNode(Node):
 
         self.current_goal = None
         self.all_frontiers = []
-        self.no_frontiers_count = 0  # Counter for consecutive "no frontiers" detections
+        self.no_frontiers_count = 0  
 
         self.stuck_detection_enabled = True
         self.stuck_check_window = 5.0  
@@ -72,28 +68,23 @@ class SimpleNavigationNode(Node):
 
         self.map_lock = threading.Lock()
 
-        # Centralized KDTree management for sharing between frontier detector and RRT*
         self._obstacle_kdtree = None
         self._obstacle_kdtree_hash = None
 
         self.scan_data = None
         self.scan_lock = threading.Lock()
-        self.last_obstacle_warning_time = None
-        self.obstacle_warning_cooldown = 2.0
 
-        self.last_deviation_check_time = None
         self.replan_count = 0
 
-        # Dynamic replanning thresholds
         self.replan_score_threshold = 0.50
         self.replan_distance_threshold = 4.0
-        self.min_frontier_distance = 2.0
+        self.min_frontier_distance = 1.0
         self.frontier_detector = ConvexFrontierDetector(
             robot_radius=self.robot_radius
         )
         self.controller = SmoothedPurePursuit(
-            max_linear_velocity=0.18,
-            max_angular_velocity=0.8
+            max_linear_velocity=0.20,
+            max_angular_velocity=1.0
         )
 
         # Subscribers
@@ -111,7 +102,6 @@ class SimpleNavigationNode(Node):
             10
         )
 
-        # Scan subscriber for reactive obstacle avoidance
         self.scan_sub = self.create_subscription(
             LaserScan,
             f'/{self.robot_name}/scan',
@@ -281,7 +271,7 @@ class SimpleNavigationNode(Node):
             obstacle_kdtree=self._obstacle_kdtree  # Reuse cached KDTree from map_callback
         )
 
-        path = path_planner.plan(self.robot_pos, self.current_goal)
+        path = path_planner.plan(self.robot_pos, self.current_goal, logger=self.get_logger())
 
         num_obstacles = len(self.map_points) if self.map_points is not None else 0
         self.get_logger().info(f'  RRT* using {num_obstacles} obstacles from global map (0.5m safety margin)')
@@ -447,31 +437,37 @@ class SimpleNavigationNode(Node):
         if self.enable_reactive_avoidance:
             obstacle_detected, min_distance, avoidance_direction = nav_utils.check_scan_for_obstacles(
                 scan,
-                self.scan_danger_distance,
                 self.scan_emergency_distance,
                 self.scan_angular_range
             )
         else:
             obstacle_detected, min_distance, avoidance_direction = False, float('inf'), 0.0
 
-        # Simplified: Only emergency stop if obstacle < threshold (no steering corrections)
+        # Simplified: Slow down and replan if obstacle < threshold (no full stop)
         if obstacle_detected and min_distance < self.scan_emergency_distance:
-            self.get_logger().error(
-                f'[EMERGENCY STOP] Obstacle at {min_distance:.2f}m < {self.scan_emergency_distance:.2f}m threshold!'
+            self.get_logger().warn(
+                f'[OBSTACLE DETECTED] Obstacle at {min_distance:.2f}m < {self.scan_emergency_distance:.2f}m threshold! '
+                f'Slowing to 20% speed and replanning...'
             )
 
-            # STOP immediately
-            cmd = Twist()
-            self.cmd_pub.publish(cmd)
+            # Slow down drastically (20% of normal speed)
+            v *= 0.2
+            w *= 0.2
 
-            # Force replanning by clearing current goal and path
+            # Force replanning by clearing current path (keep goal)
             self.current_path = None
-            self.current_goal = None
             self.current_waypoint_index = 0
 
-            # Transition to detect new frontiers (will replan with updated global map)
-            self.state = State.DETECT_FRONTIERS
-            self.get_logger().warn('[EMERGENCY] Waiting for updated global map to replan around obstacle')
+            # Transition to PLAN_PATH to replan route
+            self.previous_state = self.state
+            self.state = State.PLAN_PATH
+            self.get_logger().info('[OBSTACLE] Replanning new route while moving slowly')
+
+            # Continue moving at slow speed while replanning
+            cmd = Twist()
+            cmd.linear.x = v
+            cmd.angular.z = w
+            self.cmd_pub.publish(cmd)
             return
 
         # Log progress periodically

@@ -85,11 +85,17 @@ def parse_pointcloud2(msg: PointCloud2) -> np.ndarray:
 
 def check_scan_for_obstacles(
     scan: LaserScan,
-    danger_distance: float,
     emergency_distance: float,
     angular_range: float
 ) -> tuple:
-    
+    """Check for obstacles in front of robot within specified angular range.
+
+    Returns:
+        (obstacle_detected, min_distance, avoidance_direction)
+        - obstacle_detected: True if obstacle < emergency_distance
+        - min_distance: Closest obstacle distance in front cone
+        - avoidance_direction: -1.0 (left), 1.0 (right), or 0.0 (unused)
+    """
     if scan is None:
         return False, float('inf'), 0.0
 
@@ -118,14 +124,14 @@ def check_scan_for_obstacles(
     min_left = np.min(left_ranges) if len(left_ranges) > 0 else max_range
     min_right = np.min(right_ranges) if len(right_ranges) > 0 else max_range
 
-    obstacle_detected = min_front < danger_distance
+    obstacle_detected = min_front < emergency_distance
 
     avoidance_direction = 0.0
     if obstacle_detected:
         if min_left > min_right:
-            avoidance_direction = -1.0  
+            avoidance_direction = -1.0
         else:
-            avoidance_direction = 1.0   
+            avoidance_direction = 1.0
 
     return obstacle_detected, min_front, avoidance_direction
 

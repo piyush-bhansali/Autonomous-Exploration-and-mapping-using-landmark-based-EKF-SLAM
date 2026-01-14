@@ -43,16 +43,25 @@ class RRTStar:
             self.x_min, self.y_min = self.obstacles_2d.min(axis=0)
             self.x_max, self.y_max = self.obstacles_2d.max(axis=0)
 
-        self.x_min -= 0.5
-        self.x_max += 0.5
-        self.y_min -= 0.5
-        self.y_max += 0.5
+        self.x_min -= 1
+        self.x_max += 1
+        self.y_min -= 1
+        self.y_max += 1
 
     def plan(self,
-            start: np.ndarray,  
-            goal: np.ndarray) -> Optional[List[np.ndarray]]:
-        
-        if self._is_collision(start) or self._is_collision(goal):
+            start: np.ndarray,
+            goal: np.ndarray,
+            logger=None) -> Optional[List[np.ndarray]]:
+
+        start_collision = self._is_collision(start)
+        goal_collision = self._is_collision(goal)
+
+        if start_collision or goal_collision:
+            if logger:
+                if start_collision:
+                    logger.error(f'  RRT* FAILURE: START position [{start[0]:.2f}, {start[1]:.2f}] is in COLLISION (obstacle within {self.safety_margin}m)')
+                if goal_collision:
+                    logger.error(f'  RRT* FAILURE: GOAL position [{goal[0]:.2f}, {goal[1]:.2f}] is in COLLISION (obstacle within {self.safety_margin}m)')
             return None
 
         start_node = RRTNode(start)
@@ -152,7 +161,11 @@ class RRTStar:
                     path = self._smooth_path(path)
                     return path
 
-        # No path found
+        # No path found after max iterations
+        if logger:
+            logger.error(f'  RRT* FAILURE: Max iterations ({self.max_iterations}) reached without finding path')
+            logger.error(f'    Nodes explored: {len(nodes)}')
+            logger.error(f'    Closest node to goal: {np.linalg.norm(nodes[-1].position - goal):.2f}m')
         return None
 
     def _propagate_cost_to_descendants(self, node: RRTNode, new_cost: float):

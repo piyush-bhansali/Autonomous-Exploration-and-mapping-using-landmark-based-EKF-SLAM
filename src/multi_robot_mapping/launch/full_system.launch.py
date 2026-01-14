@@ -221,10 +221,7 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'robot_name': robot_name,
-                'scans_per_submap': 50,
                 'save_directory': './submaps',
-                'voxel_size': 0.05,
-                'feature_method': 'hybrid',
                 'enable_loop_closure': True,
                 'enable_scan_to_map_icp': True
             }]
@@ -242,10 +239,8 @@ def generate_launch_description():
                 'use_sim_time': True,
                 'robot_name': robot_name,
                 'enable_reactive_avoidance': True,
-                'scan_danger_distance': 0.5,
-                'scan_emergency_distance': 0.3,
-                'scan_angular_range': 60.0,
-                'path_deviation_check_interval': 4.0
+                'scan_emergency_distance': 0.5,
+                'scan_angular_range': 60.0
             }],
             condition=launch.conditions.IfCondition(enable_navigation)
         )

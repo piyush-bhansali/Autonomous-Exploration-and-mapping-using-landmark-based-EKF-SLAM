@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-
 import numpy as np
 from typing import Tuple, Optional, Dict
 from scipy.spatial import KDTree
+from scipy.spatial.transform import Rotation
 import open3d as o3d
 import open3d.core as o3c
 
-from map_generation.utils import quaternion_to_rotation_matrix, quaternion_to_yaw, numpy_to_pointcloud2
+from map_generation.utils import quaternion_to_rotation_matrix, numpy_to_pointcloud2
 
 
 def scan_to_map_icp(
@@ -89,7 +89,6 @@ def match_scan_context_cosine(
     num_sectors: int = 60
 ) -> Tuple[float, int]:
     
-    # Reshape to 2D grids
     if sc1.ndim == 1:
         grid1 = sc1.reshape(num_rings, num_sectors)
     elif sc1.shape[0] == 1:
@@ -107,11 +106,9 @@ def match_scan_context_cosine(
     best_sim = -1
     best_shift = 0
 
-    # Try all circular shifts (rotation-invariant)
     for shift in range(num_sectors):
         grid2_shifted = np.roll(grid2, shift, axis=1)
 
-        # Cosine similarity
         flat1 = grid1.flatten()
         flat2 = grid2_shifted.flatten()
 
@@ -136,7 +133,6 @@ def match_scan_context_with_voting(
     threshold: float = 0.5
 ) -> Tuple[float, int, Optional[np.ndarray]]:
     
-    # Reshape to 2D grids
     if sc1.ndim == 1:
         grid1 = sc1.reshape(num_rings, num_sectors)
     elif sc1.shape[0] == 1:
@@ -158,12 +154,10 @@ def match_scan_context_with_voting(
     for shift in range(num_sectors):
         grid2_shifted = np.roll(grid2, shift, axis=1)
 
-        # Bin-wise agreement (1 if both occupied or both empty)
         both_occupied = (grid1 > 0.5) & (grid2_shifted > 0.5)
         both_empty = (grid1 <= 0.5) & (grid2_shifted <= 0.5)
         agreement_mask = both_occupied | both_empty
 
-        # Count agreement percentage
         agreement_ratio = np.sum(agreement_mask) / agreement_mask.size
 
         if agreement_ratio > best_agreement:
@@ -171,7 +165,6 @@ def match_scan_context_with_voting(
             best_shift = shift
             best_mask = agreement_mask
 
-    # Return 0 if below threshold (reject match)
     if best_agreement < threshold:
         return 0.0, 0, None
 
@@ -187,21 +180,18 @@ def is_distinctive_submap(
     if len(geometric_descriptors) < min_keypoints:
         return False, {'reason': 'too_few_keypoints', 'num_keypoints': len(geometric_descriptors)}
 
-    # Extract feature statistics
     linearity = geometric_descriptors[:, 0]
     planarity = geometric_descriptors[:, 1]
     scattering = geometric_descriptors[:, 2]
     avg_dist = geometric_descriptors[:, 3]
 
-    # Metric 1: High linearity = corridor (walls parallel to viewing direction)
     mean_linearity = np.mean(linearity)
-    if mean_linearity > 0.7:  # 70% linear = corridor walls
+    if mean_linearity > 0.7: 
         return False, {
             'reason': 'corridor_detected',
             'mean_linearity': float(mean_linearity)
         }
 
-    # Metric 2: Low scattering variance = uniform structure (no distinctive features)
     scattering_variance = np.var(scattering)
     if scattering_variance < 0.01:  # Very uniform
         return False, {
@@ -209,7 +199,6 @@ def is_distinctive_submap(
             'scattering_var': float(scattering_variance)
         }
 
-    # Metric 3: Feature diversity (variance across all dimensions)
     feature_variance = np.mean([
         np.var(linearity),
         np.var(planarity),
@@ -223,18 +212,15 @@ def is_distinctive_submap(
             'feature_var': float(feature_variance)
         }
 
-    # Metric 4: Check for distinctive corners/intersections
-    # Corners have: low linearity, high scattering
     corner_points = (linearity < 0.3) & (scattering > 0.4)
     corner_ratio = np.sum(corner_points) / len(linearity)
 
-    if corner_ratio < 0.1:  # Less than 10% corners
+    if corner_ratio < 0.1:  
         return False, {
             'reason': 'no_distinctive_features',
             'corner_ratio': float(corner_ratio)
         }
 
-    # Passed all checks - this is a distinctive submap!
     return True, {
         'mean_linearity': float(mean_linearity),
         'scattering_var': float(scattering_variance),
@@ -253,13 +239,10 @@ def match_geometric_features(
     if len(descriptors1) == 0 or len(descriptors2) == 0:
         return np.array([])
 
-    # Build KD-tree for descriptor2
     tree = KDTree(descriptors2)
 
-    # For each descriptor in set1, find nearest in set2
     distances, indices = tree.query(descriptors1)
 
-    # Filter by distance threshold
     valid = distances < max_distance
 
     matches = np.column_stack([
@@ -290,9 +273,7 @@ def publish_global_map(
 
 
 def compute_relative_pose(current_pose: dict, reference_pose: dict) -> dict:
-    
-    from scipy.spatial.transform import Rotation
-
+    """Compute relative pose transformation between two poses."""
     R_current = quaternion_to_rotation_matrix(
         current_pose['qx'], current_pose['qy'],
         current_pose['qz'], current_pose['qw']

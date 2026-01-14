@@ -5,8 +5,6 @@ import open3d.core as o3c
 import open3d as o3d
 from typing import Dict, Tuple
 
-from map_generation.mapping_utils import match_geometric_features
-
 
 class FeatureExtractor:
     
@@ -122,9 +120,6 @@ class FeatureExtractor:
             scan_context[ring_idx, sector_idx] = 1.0
 
         descriptor = scan_context.flatten()
-
-        if r_99th < 1.0:
-            pass
 
         metadata = {
             'num_rings': num_rings,

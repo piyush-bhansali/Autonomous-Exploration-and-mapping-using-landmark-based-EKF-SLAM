@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan, PointCloud2, PointField, JointState, Imu
+from sensor_msgs.msg import LaserScan, PointCloud2, PointField, Imu
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from std_msgs.msg import Header
@@ -12,7 +12,6 @@ import os
 from threading import Lock
 import open3d as o3d
 import open3d.core as o3c
-from scipy.spatial.transform import Rotation
 
 from map_generation.submap_stitcher import SubmapStitcher
 from map_generation.ekf_lib import EKF
@@ -37,31 +36,25 @@ class LocalSubmapGenerator(Node):
         super().__init__('local_submap_generator')
 
         self.declare_parameter('robot_name', 'tb3_1')
-        self.declare_parameter('scans_per_submap', 50)
         self.declare_parameter('save_directory', './submaps')
-        self.declare_parameter('voxel_size', 0.05)
-        self.declare_parameter('feature_method', 'hybrid')
         self.declare_parameter('enable_loop_closure', True)
         self.declare_parameter('enable_scan_to_map_icp', True)
 
-        # Get parameters
         self.robot_name = self.get_parameter('robot_name').value
-        self.scans_per_submap = self.get_parameter('scans_per_submap').value
         self.save_dir = self.get_parameter('save_directory').value
-        self.voxel_size = self.get_parameter('voxel_size').value
-        self.feature_method = self.get_parameter('feature_method').value
         self.enable_loop_closure = self.get_parameter('enable_loop_closure').value
         self.enable_scan_to_map_icp = self.get_parameter('enable_scan_to_map_icp').value
 
-        # Create save directory
+        self.scans_per_submap = 50      
+        self.voxel_size = 0.05         
+        self.feature_method = 'hybrid'  
+        
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
 
-        # Initialize EKF 
+        # Initialize EKF
         self.ekf = EKF()
         self.ekf_initialized = False
-
-        self.latest_odom_pose = None  
 
         self.stitcher = SubmapStitcher(
             voxel_size=self.voxel_size,
@@ -76,37 +69,27 @@ class LocalSubmapGenerator(Node):
             self.device = o3c.Device("CPU:0")
             self.get_logger().info("GPU not available, using CPU for ICP")
 
-        # Subscribers with centralized QoS profiles
         self.scan_sub = self.create_subscription(
             LaserScan,
             f'/{self.robot_name}/scan',
             self.scan_callback,
-            SCAN_QOS  # Using centralized QoS profile
+            SCAN_QOS  
         )
 
         self.imu_sub = self.create_subscription(
             Imu,
             f'/{self.robot_name}/imu',
             self.imu_callback,
-            IMU_QOS  # Using centralized QoS profile
+            IMU_QOS  
         )
 
         self.odom_sub = self.create_subscription(
             Odometry,
             f'/{self.robot_name}/odom',
             self.odom_callback,
-            ODOM_QOS  # Using centralized QoS profile
+            ODOM_QOS
         )
 
-        # Subscribe to joint_states to monitor wheel velocities
-        self.joint_states_sub = self.create_subscription(
-            JointState,
-            f'/{self.robot_name}/joint_states',
-            self.joint_states_callback,
-            10
-        )
-
-        # Subscribe to cmd_vel for velocity commands (used for EKF predictions)
         self.cmd_vel_sub = self.create_subscription(
             Twist,
             f'/{self.robot_name}/cmd_vel',
@@ -135,11 +118,10 @@ class LocalSubmapGenerator(Node):
             10
         )
 
-        # TF broadcaster for publishing odom -> base_footprint transform
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # State variables
-        self.ekf_path = Path()  # Store EKF trajectory
+        self.ekf_path = Path()  
         self.ekf_path.header.frame_id = f'{self.robot_name}/odom'
         self.current_pose = None
         self.submap_start_pose = None
@@ -147,15 +129,12 @@ class LocalSubmapGenerator(Node):
         self.submap_id = 0
         self.data_lock = Lock()
 
-        # Scan counting for submap creation
         self.scans_in_current_submap = 0
         self.total_scans_processed = 0
 
-        # Timer to publish global map at 1 Hz for visualization
         self.create_timer(1.0, self._publish_global_map_callback)
 
-        # Store last odometry for comparison
-        self.last_odom_pose = None
+        self.latest_odom_pose = None
 
     def _publish_global_map_callback(self):
 
@@ -174,7 +153,6 @@ class LocalSubmapGenerator(Node):
 
         current_time = self.get_clock().now().to_msg()
 
-        # Publish TF transform: {robot_name}/odom -> {robot_name}/base_footprint
         t = TransformStamped()
         t.header.stamp = current_time
         t.header.frame_id = f'{self.robot_name}/odom'
@@ -188,7 +166,6 @@ class LocalSubmapGenerator(Node):
         t.transform.rotation.w = self.current_pose['qw']
         self.tf_broadcaster.sendTransform(t)
 
-        # Publish current EKF pose
         pose_msg = PoseStamped()
         pose_msg.header.stamp = current_time
         pose_msg.header.frame_id = f'{self.robot_name}/odom'
@@ -201,9 +178,7 @@ class LocalSubmapGenerator(Node):
         pose_msg.pose.orientation.w = self.current_pose['qw']
         self.ekf_pose_pub.publish(pose_msg)
 
-        # Add to trajectory path (sample every 10cm to avoid too many points)
         if len(self.ekf_path.poses) == 0:
-            # First pose
             self.ekf_path.poses.append(pose_msg)
         else:
             last_pose = self.ekf_path.poses[-1]
@@ -211,10 +186,9 @@ class LocalSubmapGenerator(Node):
             dy = self.current_pose['y'] - last_pose.pose.position.y
             dist = np.sqrt(dx**2 + dy**2)
 
-            if dist > 0.1:  # Only add if moved >10cm
+            if dist > 0.1:  
                 self.ekf_path.poses.append(pose_msg)
 
-        # Publish trajectory path
         self.ekf_path.header.stamp = current_time
         self.ekf_path_pub.publish(self.ekf_path)
 
@@ -225,13 +199,7 @@ class LocalSubmapGenerator(Node):
 
         omega = msg.angular_velocity.z
 
-        # EKF PREDICTION STEP: Propagate state using IMU
         self.ekf.predict_imu(omega)
-
-    def joint_states_callback(self, msg):
-        """Monitor wheel joint velocities (disabled - no longer needed)"""
-        # Removed verbose wheel velocity logging - odometry data is sufficient
-        pass
 
     def cmd_vel_callback(self, msg):
        
@@ -249,14 +217,13 @@ class LocalSubmapGenerator(Node):
         qw = msg.pose.pose.orientation.w
         theta_odom = quaternion_to_yaw(qx, qy, qz, qw)
 
-        # Update EKF with odometry
         vx = msg.twist.twist.linear.x
         
 
         self.latest_odom_pose = {
             'x': x_odom,
             'y': y_odom,
-            'z': 0.0,  # 2D robot, always at ground level
+            'z': 0.0,  
             'theta': theta_odom,
             'vx': vx,
             'qx': qx,
@@ -274,14 +241,12 @@ class LocalSubmapGenerator(Node):
         else:
             self.ekf.update(x_odom, y_odom, theta_odom, vx_odom=None)
 
-        # Get state from EKF
         state = self.ekf.get_state()
         x = state['x']
         y = state['y']
         theta = state['theta']
         qx, qy, qz, qw = yaw_to_quaternion(theta)
 
-        # Update current pose
         with self.data_lock:
             self.current_pose = {
                 'x': x,
@@ -295,11 +260,9 @@ class LocalSubmapGenerator(Node):
                 'timestamp': self.get_clock().now().nanoseconds
             }
 
-            # Initialize submap start pose
             if self.submap_start_pose is None:
                 self.submap_start_pose = self.current_pose.copy()
 
-        # Publish EKF pose and TF transform after every odometry update
         self._publish_ekf_pose()
 
     def scan_callback(self, msg):
@@ -324,8 +287,8 @@ class LocalSubmapGenerator(Node):
                 accumulated_local = np.vstack(self.current_submap_points)
 
                 points_local_corrected, pose_correction = scan_to_map_icp(
-                    points_local,           # Source: new scan (local frame)
-                    accumulated_local,      # Target: accumulated (local frame)
+                    points_local,           
+                    accumulated_local,      
                     self.device,
                     self.voxel_size,
                     self.get_logger()
@@ -401,21 +364,19 @@ class LocalSubmapGenerator(Node):
             return
 
         with self.data_lock:
-            # Filter out empty arrays before stacking
+           
             valid_points = [p for p in self.current_submap_points if len(p) > 0]
 
             if len(valid_points) == 0:
                 self.get_logger().warn('Cannot create submap: all point arrays are empty')
                 return
 
-            # Stack with error handling
             try:
                 points = np.vstack(valid_points)
             except ValueError as e:
                 self.get_logger().error(f'Failed to stack submap points: {e}')
                 return
 
-            # Validate minimum point count
             if len(points) < 50:
                 self.get_logger().warn(f'Submap has too few points ({len(points)}), skipping')
                 return
@@ -486,7 +447,7 @@ class LocalSubmapGenerator(Node):
                     self.current_pose['qw'] = qw
 
                     self.get_logger().warn(
-                        f'✓✓✓ LOOP CLOSURE POSE CORRECTION APPLIED ✓✓✓\n'
+                        f' LOOP CLOSURE POSE CORRECTION APPLIED ✓✓✓\n'
                         f'    Submap {lc_correction["submap_id"]} matched with submap {lc_correction["loop_match_id"]}\n'
                         f'    Position correction: dx={lc_correction["dx"]:.3f}m, dy={lc_correction["dy"]:.3f}m\n'
                         f'    Orientation correction: dθ={np.degrees(lc_correction["dtheta"]):.2f}°\n'

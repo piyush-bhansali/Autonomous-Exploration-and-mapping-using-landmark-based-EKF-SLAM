@@ -21,7 +21,7 @@ class ConvexFrontierDetector:
         self.robot_radius = robot_radius
 
         self.frontier_spacing = 0.5  
-        self.boundary_offset = 0.10  
+        self.boundary_offset = 0.5  
 
         self._kdtree_cache = None
         self._cached_map_hash = None
@@ -92,7 +92,7 @@ class ConvexFrontierDetector:
             offset_poly = polygon.buffer(-offset)
 
             if isinstance(offset_poly, MultiPolygon):
-                # Take largest polygon
+
                 largest = max(offset_poly.geoms, key=lambda p: p.area)
                 return largest
 
@@ -200,7 +200,7 @@ class ConvexFrontierDetector:
         shapely_point = ShapelyPoint(point.tolist())
         distance_along = boundary.project(shapely_point)
 
-        epsilon = 0.15  # 15cm offset
+        epsilon = 0.15 
         dist_before = max(0, distance_along - epsilon)
         dist_after = min(boundary.length, distance_along + epsilon)
 

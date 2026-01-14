@@ -46,7 +46,6 @@ class SubmapStitcher:
         )
 
         # Loop closure
-        self.enable_loop_closure = enable_loop_closure
         if enable_loop_closure:
             self.loop_closure_detector = LoopClosureDetector()
             self.gtsam_optimizer = GTSAMOptimizer(
