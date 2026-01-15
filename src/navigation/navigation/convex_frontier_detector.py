@@ -2,26 +2,25 @@
 
 import numpy as np
 from scipy.spatial import ConvexHull, KDTree
-from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry import Polygon, MultiPolygon, Point as ShapelyPoint
 from sklearn.cluster import DBSCAN
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
 class SimpleFrontier:
     
     def __init__(self, position: np.ndarray, score: float, size: int = 1):
-        self.position = position  
+        self.position = position
         self.score = score
-        self.size = size 
+        self.size = size
+
 
 class ConvexFrontierDetector:
 
     def __init__(self, robot_radius: float = 0.22):
-
         self.robot_radius = robot_radius
-
-        self.frontier_spacing = 0.5  
-        self.boundary_offset = 0.5  
+        self.frontier_spacing = 0.5
+        self.boundary_offset = 0.5
 
         self._kdtree_cache = None
         self._cached_map_hash = None
@@ -30,11 +29,11 @@ class ConvexFrontierDetector:
         self.last_offset_polygon = None
 
     def detect(self,
-              map_points: np.ndarray,  # Nx3 array of [x,y,z] points
-              robot_pos: np.ndarray,   # [x, y]
+              map_points: np.ndarray,
+              robot_pos: np.ndarray,
               robot_yaw: float,
               obstacle_kdtree: Optional[KDTree] = None) -> List[SimpleFrontier]:
-        
+
         if len(map_points) < 100:
             return []
 
@@ -49,10 +48,10 @@ class ConvexFrontierDetector:
                 self._cached_map_hash = map_hash
             kdtree = self._kdtree_cache
 
+
         try:
             hull = ConvexHull(points_2d)
-            hull_coords = points_2d[hull.vertices]
-            hull_polygon = Polygon(hull_coords)
+            hull_polygon = Polygon(points_2d[hull.vertices])
         except Exception as e:
             print(f"[HULL] Failed to compute convex hull: {e}")
             return []
@@ -66,61 +65,50 @@ class ConvexFrontierDetector:
             return []
 
         candidates = self._sample_boundary_points(offset_polygon, self.frontier_spacing)
-
         if len(candidates) == 0:
             return []
 
-        safe_candidates = []
-        for candidate in candidates:
-            if self._validate_frontier_candidate(candidate, kdtree, offset_polygon):
-                safe_candidates.append(candidate)
+        safe_candidates = [
+            candidate for candidate in candidates
+            if self._validate_frontier_candidate(candidate, kdtree, offset_polygon)
+        ]
 
         if len(safe_candidates) == 0:
             return []
 
         clusters = self._cluster_frontiers(safe_candidates)
 
-        frontiers = self._score_frontier_clusters(
-            clusters, robot_pos, robot_yaw
-        )
-
-        return frontiers
+        return self._score_frontier_clusters(clusters, robot_pos, robot_yaw)
 
     def _offset_polygon_inward(self, polygon: Polygon, offset: float) -> Optional[Polygon]:
-       
+        """Offset polygon inward by given distance, handling MultiPolygon results.
+
+        Note: buffer(-offset) reverses polygon orientation from CCW to CW.
+        The input hull polygon from ConvexHull is CCW, but the returned
+        offset polygon will be CW oriented.
+        """
         try:
             offset_poly = polygon.buffer(-offset)
 
             if isinstance(offset_poly, MultiPolygon):
+                # Return largest component if split into multiple polygons
+                return max(offset_poly.geoms, key=lambda p: p.area)
 
-                largest = max(offset_poly.geoms, key=lambda p: p.area)
-                return largest
-
-            if offset_poly.is_empty:
-                return None
-
-            return offset_poly
+            return offset_poly if not offset_poly.is_empty else None
 
         except Exception:
             return None
 
     def _sample_boundary_points(self, polygon: Polygon, spacing: float) -> List[np.ndarray]:
-       
-        candidates = []
-
+        
         try:
             boundary = polygon.exterior
+            num_samples = max(3, int(boundary.length / spacing))
 
-            length = boundary.length
-
-            num_samples = max(3, int(length / spacing))
-
+            candidates = []
             for i in range(num_samples):
-                
-                distance = (i / num_samples) * length
-
+                distance = (i / num_samples) * boundary.length
                 point = boundary.interpolate(distance)
-
                 candidates.append(np.array([point.x, point.y]))
 
             return candidates
@@ -132,16 +120,13 @@ class ConvexFrontierDetector:
                                      candidate: np.ndarray,
                                      kdtree: KDTree,
                                      hull_polygon: Polygon) -> bool:
-       
+        
         dist, _ = kdtree.query(candidate)
 
-        if dist < self.robot_radius * 2.0:  
+        if dist < self.robot_radius * 2.0:
             return False
 
-        if not self._has_open_direction(candidate, kdtree, hull_polygon):
-            return False
-
-        return True
+        return self._has_open_direction(candidate, kdtree, hull_polygon)
 
     def _has_open_direction(self,
                            point: np.ndarray,
@@ -149,27 +134,50 @@ class ConvexFrontierDetector:
                            hull_polygon: Polygon,
                            check_distance: float = 1.5) -> bool:
         
-        outward_normal = self._compute_boundary_normal(point, hull_polygon)
+        boundary = hull_polygon.exterior
+        shapely_point = ShapelyPoint(point.tolist())
+        distance_along = boundary.project(shapely_point)
 
-        num_directions = 8
+        epsilon = 0.1  
+        dist_before = max(0, distance_along - epsilon)
+        dist_after = min(boundary.length, distance_along + epsilon)
+
+        point_before = boundary.interpolate(dist_before)
+        point_after = boundary.interpolate(dist_after)
+
+        tangent = np.array([point_after.x - point_before.x,
+                           point_after.y - point_before.y])
+        tangent_norm = np.linalg.norm(tangent)
+
+        if tangent_norm < 1e-6:
+            centroid = np.array([hull_polygon.centroid.x, hull_polygon.centroid.y])
+            radial_direction = point - centroid
+            radial_norm = np.linalg.norm(radial_direction)
+            if radial_norm < 1e-10:
+                return False  
+
+            normal = radial_direction / radial_norm
+        else:
+            # Normalize tangent and compute outward normal
+            tangent = tangent / tangent_norm
+
+            # The offset polygon has CW orientation (reversed by buffer(-offset))
+            # For CW polygon: interior on right, exterior on left as you traverse
+            # Outward normal = 90° CCW rotation from tangent = (-t_y, t_x)
+            normal = np.array([-tangent[1], tangent[0]])
+
+        normal_angle = np.arctan2(normal[1], normal[0])
+
+        relative_angles = [-60, -30, 0, 30, 60]
         open_count = 0
 
-        cos_threshold = 0.0
-
-        for i in range(num_directions):
-            angle = i * (2 * np.pi / num_directions)
-            direction = np.array([np.cos(angle), np.sin(angle)])
+        for rel_angle_deg in relative_angles:
+            global_angle = normal_angle + np.radians(rel_angle_deg)
+            direction = np.array([np.cos(global_angle), np.sin(global_angle)])
             check_point = point + check_distance * direction
 
-            # Check if path is clear
-            path_clear = self._is_direction_clear(point, check_point, kdtree)
-
-            if path_clear:
-                
-                dot = np.dot(direction, outward_normal)
-
-                if dot > cos_threshold:  
-                    open_count += 1
+            if self._is_direction_clear(point, check_point, kdtree):
+                open_count += 1
 
         return open_count >= 2
 
@@ -177,83 +185,37 @@ class ConvexFrontierDetector:
                            start: np.ndarray,
                            end: np.ndarray,
                            kdtree: KDTree) -> bool:
-        
+        """Check if path from start to end is clear of obstacles."""
         distance = np.linalg.norm(end - start)
         num_checks = max(3, int(distance / 0.3))
 
         for i in range(num_checks + 1):
-            alpha = i / num_checks if num_checks > 0 else 0
+            alpha = i / num_checks
             check_point = start + alpha * (end - start)
 
             dist, _ = kdtree.query(check_point)
-
             if dist < self.robot_radius:
                 return False
 
         return True
 
-    def _compute_boundary_normal(self, point: np.ndarray, polygon: Polygon) -> np.ndarray:
-        
-        from shapely.geometry import Point as ShapelyPoint
-
-        boundary = polygon.exterior
-        shapely_point = ShapelyPoint(point.tolist())
-        distance_along = boundary.project(shapely_point)
-
-        epsilon = 0.15 
-        dist_before = max(0, distance_along - epsilon)
-        dist_after = min(boundary.length, distance_along + epsilon)
-
-        point_before = boundary.interpolate(dist_before)
-        point_after = boundary.interpolate(dist_after)
-
-        tangent = np.array([
-            point_after.x - point_before.x,
-            point_after.y - point_before.y
-        ])
-        tangent_norm = np.linalg.norm(tangent)
-
-        if tangent_norm < 1e-6:
-            
-            centroid = np.array([polygon.centroid.x, polygon.centroid.y])
-            outward = point - centroid
-            return outward / (np.linalg.norm(outward) + 1e-10)
-
-        tangent = tangent / tangent_norm
-
-        normal_1 = np.array([-tangent[1], tangent[0]])
-        normal_2 = np.array([tangent[1], -tangent[0]])
-
-        centroid = np.array([polygon.centroid.x, polygon.centroid.y])
-        to_centroid = centroid - point
-
-        if np.dot(normal_1, to_centroid) < 0:
-            return normal_1
-        else:
-            return normal_2
-
     def _cluster_frontiers(self, candidates: List[np.ndarray]) -> List[List[np.ndarray]]:
-        
+        """Cluster nearby frontier candidates using DBSCAN."""
         if len(candidates) < 2:
             return [[c] for c in candidates]
 
         points = np.array(candidates)
-
         clustering = DBSCAN(eps=1.0, min_samples=1).fit(points)
         labels = clustering.labels_
 
         clusters = []
-        unique_labels = set(labels)
-
-        for label in unique_labels:
+        for label in set(labels):
+            cluster_points = points[labels == label].tolist()
             if label == -1:
-                # Noise points - treat individually
-                noise_points = points[labels == -1]
-                for point in noise_points:
-                    clusters.append([point])
+                
+                clusters.extend([[point] for point in cluster_points])
             else:
-                # Cluster points
-                cluster_points = points[labels == label].tolist()
+                
                 clusters.append(cluster_points)
 
         return clusters
@@ -273,31 +235,24 @@ class ConvexFrontierDetector:
             distance = np.linalg.norm(centroid - robot_pos)
             travel_score = 1.0 / (1.0 + distance)
 
-            dx = centroid[0] - robot_pos[0]
-            dy = centroid[1] - robot_pos[1]
-            angle_to_frontier = np.arctan2(dy, dx)
-
-            angular_diff = np.arctan2(
-                np.sin(angle_to_frontier - robot_yaw),
-                np.cos(angle_to_frontier - robot_yaw)
-            )
-
+            angle_to_frontier = np.arctan2(centroid[1] - robot_pos[1],
+                                          centroid[0] - robot_pos[0])
+            angular_diff = np.arctan2(np.sin(angle_to_frontier - robot_yaw),
+                                     np.cos(angle_to_frontier - robot_yaw))
             heading_score = 1.0 - (abs(angular_diff) / np.pi)
 
             size_score = min(cluster_size / 5.0, 1.0)
 
-            score = (
-                0.60 * travel_score +    # Distance (60%)
-                0.15 * heading_score +   # Heading (15%)
-                0.25 * size_score        # Size (25%)
-            )
+            score = (0.60 * travel_score +
+                    0.15 * heading_score +
+                    0.25 * size_score)
 
             frontiers.append(SimpleFrontier(centroid, score, cluster_size))
 
         frontiers.sort(key=lambda f: f.score, reverse=True)
         return frontiers
 
-    def get_hull_visualization_data(self):
+    def get_hull_visualization_data(self) -> Dict:
         
         if self.last_hull_polygon is None:
             return {'has_data': False}
