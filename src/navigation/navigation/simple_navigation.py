@@ -15,7 +15,7 @@ from scipy.spatial import KDTree
 from navigation.convex_frontier_detector import ConvexFrontierDetector
 from map_generation.utils import quaternion_to_yaw
 from navigation.rrt_star import RRTStar
-from navigation.smoothed_pure_pursuit import SmoothedPurePursuit
+from navigation.pure_pursuit_controller import PurePursuit
 from multi_robot_mapping.qos_profiles import MAP_QOS, SCAN_QOS
 from navigation import navigation_utils as nav_utils
 
@@ -82,7 +82,7 @@ class SimpleNavigationNode(Node):
         self.frontier_detector = ConvexFrontierDetector(
             robot_radius=self.robot_radius
         )
-        self.controller = SmoothedPurePursuit(
+        self.controller = PurePursuit(
             max_linear_velocity=0.20,
             max_angular_velocity=1.0
         )
@@ -443,34 +443,29 @@ class SimpleNavigationNode(Node):
         else:
             obstacle_detected, min_distance, avoidance_direction = False, float('inf'), 0.0
 
-        # Simplified: Slow down and replan if obstacle < threshold (no full stop)
+   
         if obstacle_detected and min_distance < self.scan_emergency_distance:
             self.get_logger().warn(
                 f'[OBSTACLE DETECTED] Obstacle at {min_distance:.2f}m < {self.scan_emergency_distance:.2f}m threshold! '
                 f'Slowing to 20% speed and replanning...'
             )
 
-            # Slow down drastically (20% of normal speed)
             v *= 0.2
             w *= 0.2
 
-            # Force replanning by clearing current path (keep goal)
             self.current_path = None
             self.current_waypoint_index = 0
 
-            # Transition to PLAN_PATH to replan route
             self.previous_state = self.state
             self.state = State.PLAN_PATH
             self.get_logger().info('[OBSTACLE] Replanning new route while moving slowly')
 
-            # Continue moving at slow speed while replanning
             cmd = Twist()
             cmd.linear.x = v
             cmd.angular.z = w
             self.cmd_pub.publish(cmd)
             return
 
-        # Log progress periodically
         if self.current_waypoint_index % 10 == 0:
             progress = (self.current_waypoint_index / len(self.current_path)) * 100
             dist_to_goal = np.linalg.norm(self.robot_pos - self.current_path[-1])
@@ -492,10 +487,7 @@ class SimpleNavigationNode(Node):
         self.get_logger().info('Exploration complete', once=True)
 
     def _get_frontiers(self) -> list:
-        """
-        Get current frontiers (event-driven approach).
-        Frontiers are detected in map_callback when map updates, so just return stored value.
-        """
+        
         return self.all_frontiers
 
     def _is_stuck(self) -> bool:
@@ -632,7 +624,7 @@ class SimpleNavigationNode(Node):
         self.frontier_markers_pub.publish(marker_array)
 
     def _publish_path(self):
-        """Publish planned path as line strip"""
+        
         if self.current_path is None or len(self.current_path) == 0:
             return
 
@@ -660,12 +652,10 @@ class SimpleNavigationNode(Node):
 
         marker_array = MarkerArray()
 
-        # Clear old markers
         clear_marker = Marker()
         clear_marker.action = Marker.DELETEALL
         marker_array.markers.append(clear_marker)
 
-        # Publish offset boundary (blue line)
         if 'offset_boundary' in hull_data and len(hull_data['offset_boundary']) > 0:
             offset_marker = Marker()
             offset_marker.header.frame_id = f'{self.robot_name}/odom'

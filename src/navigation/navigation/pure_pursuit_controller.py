@@ -4,7 +4,7 @@ import numpy as np
 from typing import List, Tuple
 
 
-class SmoothedPurePursuit:
+class PurePursuit:
 
     def __init__(self,
                  max_linear_velocity: float = 0.2,
@@ -15,31 +15,24 @@ class SmoothedPurePursuit:
 
         self.lookahead = 0.8  # Lookahead distance for path following
         self.v_min = 0.08  # Minimum linear velocity
-        self.alpha = 0.4  # Angular velocity smoothing factor 
+        self.alpha = 0.4  # Angular velocity smoothing factor
         self.goal_tolerance = 0.3  # Distance to goal considered "reached"
         self.velocity_gain = 0.5  # Velocity reduction factor on sharp turns
 
         self.omega_smooth = 0.0  # Smoothed angular velocity
         self.prev_time = None    # For tracking control frequency
 
-        self.stats = {
-            'max_omega_change': 0.0,
-            'avg_omega_change': 0.0,
-            'control_count': 0
-        }
-
     def compute_control(self,
                        robot_pos: np.ndarray,  # [x, y]
                        robot_yaw: float,        # radians
                        path: List[np.ndarray],  # List of [x, y] waypoints
                        current_waypoint_index: int) -> Tuple[float, float]:
-        
+
         dist_to_goal = np.linalg.norm(path[-1] - robot_pos)
         if dist_to_goal < self.goal_tolerance:
-            self.omega_smooth = 0.0  
+            self.omega_smooth = 0.0
             return 0.0, 0.0
 
-        # Find lookahead point on path
         lookahead_point = self._find_lookahead_point(
             robot_pos, path, current_waypoint_index
         )
@@ -50,7 +43,7 @@ class SmoothedPurePursuit:
 
         omega_magnitude = abs(self.omega_smooth)
         velocity_scale = 1.0 - self.velocity_gain * (omega_magnitude / self.max_w)
-        velocity_scale = np.clip(velocity_scale, 0.3, 1.0)  
+        velocity_scale = np.clip(velocity_scale, 0.3, 1.0)
         v_adaptive = self.v_max * velocity_scale
         v_adaptive = np.clip(v_adaptive, self.v_min, self.v_max)
 
@@ -58,11 +51,8 @@ class SmoothedPurePursuit:
 
         omega_desired = np.clip(omega_desired, -self.max_w, self.max_w)
 
-        omega_change = abs(omega_desired - self.omega_smooth)
         self.omega_smooth = (self.alpha * omega_desired +
                             (1 - self.alpha) * self.omega_smooth)
-
-        self._update_stats(omega_change)
 
         return v_adaptive, self.omega_smooth
 
@@ -70,7 +60,7 @@ class SmoothedPurePursuit:
                              robot_pos: np.ndarray,
                              path: List[np.ndarray],
                              start_index: int) -> np.ndarray:
-        
+
         for i in range(start_index, len(path)):
             waypoint = path[i]
             distance = np.linalg.norm(waypoint - robot_pos)
@@ -100,7 +90,7 @@ class SmoothedPurePursuit:
 
         distance = np.sqrt(dx**2 + dy**2)
 
-        if distance < 0.05:  
+        if distance < 0.05:
             return 0.0
 
         curvature = (2.0 * np.sin(alpha)) / distance
@@ -110,30 +100,7 @@ class SmoothedPurePursuit:
 
         return angular_velocity
 
-    def _update_stats(self, omega_change: float):
-        
-        self.stats['control_count'] += 1
-        self.stats['max_omega_change'] = max(self.stats['max_omega_change'], omega_change)
-
-        n = self.stats['control_count']
-        prev_avg = self.stats['avg_omega_change']
-        self.stats['avg_omega_change'] = (prev_avg * (n-1) + omega_change) / n
-
     def reset(self):
-        
+
         self.omega_smooth = 0.0
         self.prev_time = None
-        self.stats = {
-            'max_omega_change': 0.0,
-            'avg_omega_change': 0.0,
-            'control_count': 0
-        }
-
-    def get_statistics(self) -> dict:
-        
-        return {
-            **self.stats,
-            'smoothing_factor': self.alpha,
-            'max_velocity': self.v_max,
-            'current_omega_smooth': self.omega_smooth
-        }

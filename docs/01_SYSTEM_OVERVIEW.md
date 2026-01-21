@@ -103,7 +103,7 @@ thesis_ws/
 │   │   ├── simple_navigation.py       (Main navigation FSM)
 │   │   ├── simple_frontiers.py        (Frontier detection)
 │   │   ├── rrt_star.py                (Path planning)
-│   │   └── smoothed_pure_pursuit.py   (Path tracking)
+│   │   └── pure_pursuit_controller.py (Path tracking)
 │   │
 │   └── multi_robot_mapping/       # Launch & Simulation
 │       ├── launch/

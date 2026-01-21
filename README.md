@@ -133,7 +133,7 @@ Sensor Data (LiDAR 10Hz, IMU 200Hz, Odom 10Hz)
 - `simple_navigation.py` - Main navigation FSM
 - `simple_frontiers.py` - Frontier detection
 - `rrt_star.py` - Path planning
-- `smoothed_pure_pursuit.py` - Path tracking controller
+- `pure_pursuit_controller.py` - Path tracking controller
 
 ### 3. `multi_robot_mapping` - System Integration
 

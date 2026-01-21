@@ -27,27 +27,22 @@ class GTSAMOptimizer:
                            loop_closure: Dict) -> Optional[List[np.ndarray]]:
        
         try:
-            # Create factor graph and initial estimates
+            
             graph = gtsam.NonlinearFactorGraph()
             initial_estimate = gtsam.Values()
 
-            # Noise models
-            # Loop closure constraint noise (based on ICP accuracy)
             loop_noise = gtsam.noiseModel.Diagonal.Sigmas(
                 np.array([self.translation_sigma, self.translation_sigma, self.rotation_sigma])
             )
 
-            # Prior noise for first pose (anchor the graph)
             prior_noise = gtsam.noiseModel.Diagonal.Sigmas(
-                np.array([0.001, 0.001, 0.001])  # Very tight prior on first pose
+                np.array([0.001, 0.001, 0.001])  
             )
 
-            # Add all submap poses to initial estimate
             for submap in submaps:
                 submap_id = submap['id']
                 transform = submap['global_transform']
 
-                # Extract 2D pose from 4x4 transform
                 x = transform[0, 3]
                 y = transform[1, 3]
                 theta = np.arctan2(transform[1, 0], transform[0, 0])
@@ -55,7 +50,6 @@ class GTSAMOptimizer:
                 pose2 = gtsam.Pose2(x, y, theta)
                 initial_estimate.insert(submap_id, pose2)
 
-            # Add prior on first pose (anchor the graph)
             first_submap = submaps[0]
             first_transform = first_submap['global_transform']
             first_pose = gtsam.Pose2(
@@ -73,35 +67,28 @@ class GTSAMOptimizer:
                 current_submap = submaps[i]
                 next_submap = submaps[i + 1]
 
-                # Compute relative transformation from current to next
                 T_current = current_submap['global_transform']
                 T_next = next_submap['global_transform']
                 T_relative = np.linalg.inv(T_current) @ T_next
 
-                # Extract 2D relative pose
                 dx = T_relative[0, 3]
                 dy = T_relative[1, 3]
                 dtheta = np.arctan2(T_relative[1, 0], T_relative[0, 0])
 
                 relative_pose = gtsam.Pose2(dx, dy, dtheta)
 
-                # Add odometry constraint between consecutive submaps
                 graph.add(gtsam.BetweenFactorPose2(
                     current_submap['id'], next_submap['id'], relative_pose, odometry_noise
                 ))
 
-            # Add loop closure constraint
             current_id = loop_closure['current_id']
             match_id = loop_closure['match_id']
             loop_transform = loop_closure['transform']
 
-            # Extract relative pose from loop closure transform
-            # This is the measured transformation from match_id to current_id
             dx = loop_transform[0, 3]
             dy = loop_transform[1, 3]
             dtheta = np.arctan2(loop_transform[1, 0], loop_transform[0, 0])
 
-            # Validate transform before adding to graph
             translation_magnitude = np.sqrt(dx**2 + dy**2)
             rotation_magnitude = np.abs(dtheta)
 
@@ -113,9 +100,8 @@ class GTSAMOptimizer:
                 print(f"GTSAM: Loop closure rotation too large ({np.degrees(rotation_magnitude):.1f}° > {np.degrees(self.max_rotation):.1f}°), rejecting")
                 return None
 
-            # Check for degenerate transform (near-zero determinant)
             det = loop_transform[0, 0] * loop_transform[1, 1] - loop_transform[0, 1] * loop_transform[1, 0]
-            if abs(det) < 0.1:  # Determinant should be ~1 for valid rotation
+            if abs(det) < 0.1:  
                 print(f"GTSAM: Degenerate loop closure transform (det={det:.3f}), rejecting")
                 return None
 
@@ -125,16 +111,14 @@ class GTSAMOptimizer:
                 match_id, current_id, relative_pose, loop_noise
             ))
 
-            # Optimize using Levenberg-Marquardt
             params = gtsam.LevenbergMarquardtParams()
-            params.setVerbosity("ERROR")  # Suppress optimization output
+            params.setVerbosity("ERROR")  
             params.setMaxIterations(100)
             params.setRelativeErrorTol(1e-5)
 
             optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial_estimate, params)
             result = optimizer.optimize()
 
-            # Calculate optimization error
             initial_error = graph.error(initial_estimate)
             final_error = graph.error(result)
             self.last_optimization_error = {
@@ -143,13 +127,11 @@ class GTSAMOptimizer:
                 'improvement': initial_error - final_error
             }
 
-            # Extract optimized poses and convert back to 4x4 transforms
             optimized_transforms = []
             for submap in submaps:
                 submap_id = submap['id']
                 optimized_pose = result.atPose2(submap_id)
 
-                # Convert Pose2 back to 4x4 transform
                 x = optimized_pose.x()
                 y = optimized_pose.y()
                 theta = optimized_pose.theta()
@@ -180,7 +162,6 @@ class GTSAMOptimizer:
             graph = gtsam.NonlinearFactorGraph()
             initial_estimate = gtsam.Values()
 
-            # Noise models
             loop_noise = gtsam.noiseModel.Diagonal.Sigmas(
                 np.array([self.translation_sigma, self.translation_sigma, self.rotation_sigma])
             )
@@ -188,7 +169,6 @@ class GTSAMOptimizer:
                 np.array([0.001, 0.001, 0.001])
             )
 
-            # Add all poses
             for submap in submaps:
                 submap_id = submap['id']
                 transform = submap['global_transform']
@@ -200,7 +180,6 @@ class GTSAMOptimizer:
                 pose2 = gtsam.Pose2(x, y, theta)
                 initial_estimate.insert(submap_id, pose2)
 
-            # Add prior on first pose
             first_submap = submaps[0]
             first_transform = first_submap['global_transform']
             first_pose = gtsam.Pose2(
@@ -210,7 +189,6 @@ class GTSAMOptimizer:
             )
             graph.add(gtsam.PriorFactorPose2(0, first_pose, prior_noise))
 
-            # Add odometry constraints between consecutive submaps
             odometry_noise = gtsam.noiseModel.Diagonal.Sigmas(
                 np.array([self.translation_sigma, self.translation_sigma, self.rotation_sigma])
             )
@@ -233,7 +211,6 @@ class GTSAMOptimizer:
                     current_submap['id'], next_submap['id'], relative_pose, odometry_noise
                 ))
 
-            # Add all loop closure constraints
             for loop_closure in loop_closures:
                 current_id = loop_closure['current_id']
                 match_id = loop_closure['match_id']
@@ -249,7 +226,6 @@ class GTSAMOptimizer:
                     match_id, current_id, relative_pose, loop_noise
                 ))
 
-            # Optimize
             params = gtsam.LevenbergMarquardtParams()
             params.setVerbosity("ERROR")
             params.setMaxIterations(100)
@@ -258,7 +234,6 @@ class GTSAMOptimizer:
             optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial_estimate, params)
             result = optimizer.optimize()
 
-            # Extract optimized transforms
             optimized_transforms = []
             for submap in submaps:
                 submap_id = submap['id']
