@@ -195,7 +195,6 @@ thesis_ws/
 - `scans_per_submap: 80` - Number of scans before creating new submap
 - `voxel_size: 0.05` - Downsampling resolution (5cm)
 - `enable_loop_closure: true` - Enable GTSAM optimization
-- `enable_scan_to_map_icp: true` - Enable real-time drift correction
 
 ### 2. Navigation Module (`navigation`)
 

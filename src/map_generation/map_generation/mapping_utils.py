@@ -273,7 +273,7 @@ def publish_global_map(
 
 
 def compute_relative_pose(current_pose: dict, reference_pose: dict) -> dict:
-    """Compute relative pose transformation between two poses."""
+    
     R_current = quaternion_to_rotation_matrix(
         current_pose['qx'], current_pose['qy'],
         current_pose['qz'], current_pose['qw']

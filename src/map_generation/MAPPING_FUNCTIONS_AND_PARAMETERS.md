@@ -144,7 +144,6 @@ def __init__(self):
     self.declare_parameter('voxel_size', 0.05)                     # float
     self.declare_parameter('feature_method', 'hybrid')             # str
     self.declare_parameter('enable_loop_closure', True)            # bool
-    self.declare_parameter('enable_scan_to_map_icp', True)         # bool
 ```
 
 #### Key Methods with Data Types
@@ -736,7 +735,6 @@ def quaternion_to_rotation_matrix(
 | **R_odom** | EKF | [0.005, 0.005, 0.02] | np.ndarray (3,) | Odometry trust | 0.001-0.01 |
 | **R_icp** | EKF | [0.0001, 0.0001, 0.0001] | np.ndarray (3,) | ICP trust | 0.00005-0.0005 |
 | **Q_imu** | EKF | [0.0001, 0.0001, 0.0001] | np.ndarray (3,) | Process noise | 0.00005-0.0005 |
-| **enable_scan_to_map_icp** | LocalSubmapGenerator | True | bool | Short-term drift correction | True/False |
 
 ---
 
@@ -815,8 +813,7 @@ feature_method = 'hybrid'      # Use all features
 
 **Solution**:
 ```python
-enable_scan_to_map_icp = True     # Ensure enabled
-icp_fitness_threshold = 0.35      # Lower threshold (accept more)
+icp_fitness_threshold = 0.35      # Lower threshold (accept more ICP corrections)
 R_odom = [0.008, 0.008, 0.03]     # Increase odometry noise (trust less)
 R_icp = [0.00008, 0.00008, 0.00008]  # Decrease ICP noise (trust more)
 Q_imu = [0.00012, 0.00012, 0.00012]  # Increase process noise
@@ -865,7 +862,7 @@ scans_per_submap = 100             # Less frequent submaps
 ```python
 Q_imu = [0.00008, 0.00008, 0.00008]  # Decrease process noise
 R_odom = [0.003, 0.003, 0.015]       # Trust odometry more
-enable_scan_to_map_icp = True        # Enable ICP corrections
+R_icp = [0.00008, 0.00008, 0.00008]  # Trust ICP corrections more
 ```
 
 ---

@@ -222,8 +222,7 @@ def generate_launch_description():
                 'use_sim_time': True,
                 'robot_name': robot_name,
                 'save_directory': './submaps',
-                'enable_loop_closure': True,
-                'enable_scan_to_map_icp': True
+                'enable_loop_closure': True
             }]
         )
 

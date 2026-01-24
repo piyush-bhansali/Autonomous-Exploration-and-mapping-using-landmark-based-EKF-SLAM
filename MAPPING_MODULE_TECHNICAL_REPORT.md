@@ -1231,7 +1231,6 @@ scans_per_submap: 50
 voxel_size: 0.08
 feature_method: 'hybrid'
 enable_loop_closure: true
-enable_scan_to_map_icp: true
 
 # EKF Parameters
 Q_imu: [0.0001, 0.0001, 0.0001]  # Process noise

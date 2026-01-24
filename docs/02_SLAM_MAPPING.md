@@ -421,8 +421,8 @@ def _process_scan():
     scan_points_world = scan_to_cartesian(latest_scan)
     transform_to_world(scan_points_world, ekf_state)
 
-    # 3. Scan-to-map ICP (if enabled and submap has points)
-    if enable_scan_to_map_icp and len(accumulated_points) > 100:
+    # 3. Scan-to-map ICP (always runs when submap has sufficient points)
+    if len(accumulated_points) > 100:
         corrected_pose = scan_to_map_icp(
             scan_points_world,
             accumulated_points,
@@ -468,7 +468,6 @@ self.declare_parameter('save_directory', './submaps')
 self.declare_parameter('voxel_size', 0.05)
 self.declare_parameter('feature_method', 'hybrid')
 self.declare_parameter('enable_loop_closure', True)
-self.declare_parameter('enable_scan_to_map_icp', True)
 ```
 
 ### Tuning Guide
@@ -477,7 +476,6 @@ self.declare_parameter('enable_scan_to_map_icp', True)
 |-----------|---------|--------|--------|
 | `scans_per_submap` | 80 | Submap size | ↑ = larger submaps, less overhead<br>↓ = smaller submaps, more features |
 | `voxel_size` | 0.05 | Downsampling | ↑ = faster, less detail<br>↓ = slower, more detail |
-| `enable_scan_to_map_icp` | true | Drift correction | true = accurate, slower<br>false = fast, drifts |
 | `enable_loop_closure` | true | Global optimization | true = consistent, slower<br>false = fast, drifts over time |
 
 ### ICP Tuning
@@ -570,11 +568,11 @@ Solution:
 **Issue 3: Map Drift**
 ```
 Symptom: Map distorts over time
-Cause: ICP disabled or EKF tuning issues
+Cause: EKF tuning issues or loop closure disabled
 Solution:
-- Enable: enable_scan_to_map_icp = true
 - Reduce: Q (process noise) in EKF
-- Enable: loop closure detection
+- Enable: loop closure detection (enable_loop_closure = true)
+- Tune: R_icp (ICP measurement noise) for better scan-to-map corrections
 ```
 
 ### Performance Monitoring

@@ -157,7 +157,6 @@ Sensor Data (LiDAR 10Hz, IMU 200Hz, Odom 10Hz)
 | `scans_per_submap` | 80 | Scans before creating new submap (~8s) |
 | `voxel_size` | 0.05 | Downsampling resolution (5cm) |
 | `enable_loop_closure` | true | Enable GTSAM optimization |
-| `enable_scan_to_map_icp` | true | Real-time drift correction |
 
 ### Navigation Parameters
 
@@ -310,9 +309,8 @@ pip3 install --upgrade open3d
 ### Map Drift
 
 ```bash
-# Enable ICP and loop closure
+# Enable loop closure for long-term consistency
 # In full_system.launch.py, set:
-enable_scan_to_map_icp: true
 enable_loop_closure: true
 ```
 

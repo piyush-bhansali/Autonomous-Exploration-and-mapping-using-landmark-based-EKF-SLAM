@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField, Imu
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from std_msgs.msg import Header
 from tf2_ros import TransformBroadcaster
 import numpy as np
@@ -38,12 +38,10 @@ class LocalSubmapGenerator(Node):
         self.declare_parameter('robot_name', 'tb3_1')
         self.declare_parameter('save_directory', './submaps')
         self.declare_parameter('enable_loop_closure', True)
-        self.declare_parameter('enable_scan_to_map_icp', True)
 
         self.robot_name = self.get_parameter('robot_name').value
         self.save_dir = self.get_parameter('save_directory').value
         self.enable_loop_closure = self.get_parameter('enable_loop_closure').value
-        self.enable_scan_to_map_icp = self.get_parameter('enable_scan_to_map_icp').value
 
         self.scans_per_submap = 50      
         self.voxel_size = 0.05         
@@ -88,13 +86,6 @@ class LocalSubmapGenerator(Node):
             f'/{self.robot_name}/odom',
             self.odom_callback,
             ODOM_QOS
-        )
-
-        self.cmd_vel_sub = self.create_subscription(
-            Twist,
-            f'/{self.robot_name}/cmd_vel',
-            self.cmd_vel_callback,
-            10
         )
 
         self.current_submap_pub = self.create_publisher(
@@ -193,7 +184,7 @@ class LocalSubmapGenerator(Node):
         self.ekf_path_pub.publish(self.ekf_path)
 
     def imu_callback(self, msg):
-        """IMU callback for EKF prediction"""
+        
         if not self.ekf_initialized:
             return
 
@@ -201,13 +192,8 @@ class LocalSubmapGenerator(Node):
 
         self.ekf.predict_imu(omega)
 
-    def cmd_vel_callback(self, msg):
-       
-        self.ekf.vx = msg.linear.x
-        self.ekf.vy = msg.linear.y
-
     def odom_callback(self, msg):
-        """Odometry callback"""
+        
         x_odom = msg.pose.pose.position.x
         y_odom = msg.pose.pose.position.y
 
@@ -239,7 +225,7 @@ class LocalSubmapGenerator(Node):
                 f'EKF initialized at odom pose: ({x_odom:.3f}, {y_odom:.3f}, {np.degrees(theta_odom):.2f}°)'
             )
         else:
-            self.ekf.update(x_odom, y_odom, theta_odom, vx_odom=None)
+            self.ekf.update(x_odom, y_odom, theta_odom, vx_odom=vx)
 
         state = self.ekf.get_state()
         x = state['x']
@@ -281,7 +267,7 @@ class LocalSubmapGenerator(Node):
         if len(points_local) == 0:
             return
 
-        if self.enable_scan_to_map_icp and len(self.current_submap_points) >= 5:
+        if len(self.current_submap_points) >= 5:
             with self.data_lock:
                 
                 accumulated_local = np.vstack(self.current_submap_points)
@@ -419,7 +405,7 @@ class LocalSubmapGenerator(Node):
                 start_pose=self.submap_start_pose,
                 end_pose=end_pose,
                 scan_count=scan_count,
-                transformation_matrix=T_local_to_world  # NEW parameter
+                transformation_matrix=T_local_to_world 
             )
 
             if success:

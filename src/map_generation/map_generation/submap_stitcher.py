@@ -15,7 +15,7 @@ class SubmapStitcher:
     
     def __init__(self,
                  voxel_size: float = 0.05,
-                 icp_max_correspondence_dist: float = 0.1,
+                 icp_max_correspondence_dist: float = 0.05,
                  icp_fitness_threshold: float = 0.45,
                  feature_extraction_method: str = 'hybrid',
                  enable_loop_closure: bool = True):
@@ -34,7 +34,6 @@ class SubmapStitcher:
         # Submap storage (for loop closure)
         self.submaps = []
         self.global_map_tensor = o3d.t.geometry.PointCloud(self.device)
-        self.transforms = []
 
         # Cache for numpy conversion (optimization)
         self._cached_numpy_map = None
@@ -145,7 +144,7 @@ class SubmapStitcher:
 
         features = None
         if self.enable_loop_closure:
-            # Pass Tensor PointCloud directly (GPU-accelerated feature extraction)
+            
             features = self.extract_features(pcd_tensor, submap_id)
 
         global_transform = transformation_matrix
@@ -169,7 +168,6 @@ class SubmapStitcher:
             }
 
             self.submaps.append(submap_data)
-            self.transforms.append(global_transform)
 
             if self.loop_closure_detector is not None:
                 self.loop_closure_detector.add_submap_to_index(
@@ -220,7 +218,6 @@ class SubmapStitcher:
         }
 
         self.submaps.append(submap_data)
-        self.transforms.append(global_transform_refined)
 
         if self.loop_closure_detector is not None:
             self.loop_closure_detector.add_submap_to_index(
@@ -265,7 +262,7 @@ class SubmapStitcher:
                     if optimized_transforms is not None:
                         # Calculate pose correction for current robot position
                         current_submap_id = len(self.submaps) - 1  # Most recent submap
-                        old_transform = self.transforms[current_submap_id]  # Before optimization
+                        old_transform = self.submaps[current_submap_id]['global_transform']  # Before optimization
                         new_transform = optimized_transforms[current_submap_id]  # After optimization
 
                         pose_correction_matrix = np.linalg.inv(old_transform) @ new_transform
@@ -295,7 +292,6 @@ class SubmapStitcher:
                         # Apply optimized transforms to submaps
                         for i, optimized_transform in enumerate(optimized_transforms):
                             self.submaps[i]['global_transform'] = optimized_transform
-                            self.transforms[i] = optimized_transform
 
                         # Rebuild global map with optimized poses
                         self._rebuild_global_map()
