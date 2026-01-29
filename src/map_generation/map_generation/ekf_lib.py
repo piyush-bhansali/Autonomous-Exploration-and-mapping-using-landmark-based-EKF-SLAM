@@ -33,9 +33,9 @@ class EKF:
         ])
 
         self.Q_imu = np.diag([
-            0.0001,   # x position process variance: 0.0001 m² per update (σ = 0.01m per 5ms)
-            0.0001,   # y position process variance: 0.0001 m² (σ = 0.01m per 5ms)
-            0.0001    # theta process variance: 0.0001 rad² per update (σ = 0.01 rad ≈ 0.57° per 5ms)
+            0.0001,   
+            0.0001,   
+            0.001     
         ])
 
         self.dt = 0.005  # 200 Hz
@@ -46,7 +46,12 @@ class EKF:
         # Statistics
         self.imu_prediction_count = 0
         self.update_count = 0
-        self.consecutive_predictions_without_update = 0  # Drift watchdog 
+        self.consecutive_predictions_without_update = 0  # Drift watchdog
+
+        # Ground truth tracking
+        self.ground_truth = None
+        self.error_history = []  # List of {'timestamp': t, 'pos_error': e_pos, 'orient_error': e_theta, 'ekf_state': [x,y,theta], 'gt_state': [x,y,theta]}
+        self.current_errors = {'position_error': 0.0, 'orientation_error': 0.0} 
 
     def initialize(self, x, y, theta, vx, vy):
 

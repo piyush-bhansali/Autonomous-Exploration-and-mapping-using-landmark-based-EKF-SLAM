@@ -41,7 +41,9 @@ class LoopClosureDetector:
             'num_checks': 0,
             'num_candidates': 0,
             'num_verified': 0,
-            'num_accepted': 0
+            'num_accepted': 0,
+            'num_spatial_candidates': 0,
+            'num_scan_context_candidates': 0
         }
 
     def add_submap_to_index(self, submap_id: int, position: np.ndarray):
@@ -124,12 +126,18 @@ class LoopClosureDetector:
 
         # Spatial filtering first
         if self.spatial_index is not None and len(self.submap_positions) > 0:
-            # Find submaps within radius
-            positions = np.array([s['position'] for s in self.submap_positions])
-            distances = np.linalg.norm(positions - current_pos, axis=1)
-            spatial_candidates = np.where(distances < self.spatial_search_radius)[0]
+            # Find submaps within radius using KDTree query
+            spatial_candidates = self.spatial_index.query_ball_point(
+                current_pos,
+                self.spatial_search_radius
+            )
         else:
             spatial_candidates = range(len(submap_database))
+
+        num_spatial_candidates = len(spatial_candidates)
+        self.stats['num_spatial_candidates'] += num_spatial_candidates
+
+        print(f"  [Stage 1 Filtering] Spatial candidates: {num_spatial_candidates}")
 
         # Scan Context matching on spatially filtered candidates
         for idx in spatial_candidates:
@@ -178,6 +186,18 @@ class LoopClosureDetector:
 
         # Sort by combined score (similarity + agreement)
         candidates.sort(key=lambda x: 0.6 * x['similarity'] + 0.4 * x['agreement_ratio'], reverse=True)
+
+        num_scan_context_candidates = len(candidates)
+        self.stats['num_scan_context_candidates'] += num_scan_context_candidates
+
+        # Calculate filtering effectiveness
+        if num_spatial_candidates > 0:
+            reduction_ratio = num_spatial_candidates / max(1, num_scan_context_candidates)
+            reduction_pct = (1 - num_scan_context_candidates / num_spatial_candidates) * 100
+            print(f"  [Stage 1 Filtering] After Scan Context: {num_scan_context_candidates} candidates")
+            print(f"  [Stage 1 Filtering] Reduction: {reduction_ratio:.1f}x ({reduction_pct:.1f}% filtered out)")
+        else:
+            print(f"  [Stage 1 Filtering] After Scan Context: {num_scan_context_candidates} candidates")
 
         return candidates[:5]  # Return top 5 candidates
 
@@ -277,12 +297,7 @@ class LoopClosureDetector:
 
     def _ransac_2d(self, source_pts: np.ndarray, target_pts: np.ndarray,
                    max_iterations: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        RANSAC for 2D rigid transformation estimation
-
-        Returns:
-            (best_transform, inlier_mask)
-        """
+        
         n_points = len(source_pts)
         best_transform = np.eye(4)
         best_inliers = np.zeros(n_points, dtype=bool)
@@ -328,11 +343,7 @@ class LoopClosureDetector:
         return best_transform, best_inliers
 
     def _estimate_2d_transform(self, source: np.ndarray, target: np.ndarray) -> np.ndarray:
-        """
-        Estimate 2D rigid transformation from point correspondences
-
-        Uses SVD to find optimal rotation and translation
-        """
+        
         # Center the points
         source_center = np.mean(source[:, :2], axis=0)
         target_center = np.mean(target[:, :2], axis=0)
@@ -365,17 +376,11 @@ class LoopClosureDetector:
     def _refine_with_icp(self, source_pcd: o3d.t.geometry.PointCloud,
                         target_pcd: o3d.t.geometry.PointCloud,
                         initial_transform: np.ndarray) -> Tuple[np.ndarray, float]:
-        """
-        Refine transformation using GPU-accelerated Tensor ICP
-
-        Returns:
-            (refined_transform, fitness)
-        """
-        # Convert initial transform to Tensor (use device from source point cloud)
+        
+        
         device = source_pcd.device
         init_transform_tensor = o3c.Tensor(initial_transform, dtype=o3c.float32, device=device)
 
-        # Use Tensor ICP (GPU-accelerated)
         reg_result = o3d.t.pipelines.registration.icp(
             source=source_pcd,
             target=target_pcd,
@@ -385,7 +390,6 @@ class LoopClosureDetector:
             criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(max_iteration=100)
         )
 
-        # Convert result back to NumPy
         transform = reg_result.transformation.cpu().numpy()
         fitness = float(reg_result.fitness)
 
@@ -398,5 +402,15 @@ class LoopClosureDetector:
         if stats['num_checks'] > 0:
             stats['avg_candidates_per_check'] = stats['num_candidates'] / stats['num_checks']
             stats['acceptance_rate'] = stats['num_accepted'] / stats['num_checks']
+            stats['avg_spatial_candidates_per_check'] = stats['num_spatial_candidates'] / stats['num_checks']
+            stats['avg_scan_context_candidates_per_check'] = stats['num_scan_context_candidates'] / stats['num_checks']
+
+            # Calculate overall scan context filtering effectiveness
+            if stats['num_spatial_candidates'] > 0:
+                stats['scan_context_reduction_ratio'] = stats['num_spatial_candidates'] / max(1, stats['num_scan_context_candidates'])
+                stats['scan_context_filter_percentage'] = (1 - stats['num_scan_context_candidates'] / stats['num_spatial_candidates']) * 100
+            else:
+                stats['scan_context_reduction_ratio'] = 0
+                stats['scan_context_filter_percentage'] = 0
 
         return stats

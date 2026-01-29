@@ -31,6 +31,7 @@ class RRTStar:
 
         self.robot_radius = robot_radius
         self.safety_margin = 0.5
+        self.relaxed_safety_margin = 0.25  
         self.step_size = 0.2
         self.goal_bias = 0.5
         self.max_iterations = 1500
@@ -43,45 +44,58 @@ class RRTStar:
             self.x_min, self.y_min = self.obstacles_2d.min(axis=0)
             self.x_max, self.y_max = self.obstacles_2d.max(axis=0)
 
-        self.x_min -= 1
-        self.x_max += 1
-        self.y_min -= 1
-        self.y_max += 1
+        self.x_min -= 2
+        self.x_max += 2
+        self.y_min -= 2
+        self.y_max += 2
 
     def plan(self,
             start: np.ndarray,
             goal: np.ndarray,
             logger=None) -> Optional[List[np.ndarray]]:
 
+        # Two-tier collision checking for start position
         start_collision = self._is_collision(start)
+        start_collision_relaxed = self._is_collision_relaxed(start)
         goal_collision = self._is_collision(goal)
 
-        if start_collision or goal_collision:
+        # Recovery mode: If start fails strict check but passes relaxed check
+        recovery_mode = start_collision and not start_collision_relaxed
+
+        if recovery_mode:
             if logger:
-                if start_collision:
-                    logger.error(f'  RRT* FAILURE: START position [{start[0]:.2f}, {start[1]:.2f}] is in COLLISION (obstacle within {self.safety_margin}m)')
+                logger.warn(f'  RRT* RECOVERY MODE: Start position [{start[0]:.2f}, {start[1]:.2f}] is close to obstacles')
+                logger.warn(f'    Using relaxed safety margin ({self.relaxed_safety_margin}m) for start position')
+
+        # Reject planning if:
+        # 1. Start fails even relaxed check (truly in collision)
+        # 2. Goal fails strict check (always strict for goals)
+        if start_collision_relaxed or goal_collision:
+            if logger:
+                if start_collision_relaxed:
+                    logger.error(f'  RRT* FAILURE: START position [{start[0]:.2f}, {start[1]:.2f}] is in COLLISION (obstacle within {self.relaxed_safety_margin}m)')
                 if goal_collision:
                     logger.error(f'  RRT* FAILURE: GOAL position [{goal[0]:.2f}, {goal[1]:.2f}] is in COLLISION (obstacle within {self.safety_margin}m)')
             return None
 
         start_node = RRTNode(start)
         nodes = [start_node]
-        node_kdtree = None 
-        kdtree_built_at = 0 
+        node_kdtree = None
+        kdtree_built_at = 0
 
         # RRT* main loop
         for _ in range(self.max_iterations):
-            
+
             if np.random.random() < self.goal_bias:
                 sample = goal
             else:
-                sample = self._sample_random_point()
+                sample = self._sample_random_point(use_relaxed=recovery_mode)
 
             nearest_node = self._find_nearest_node(nodes, sample, node_kdtree, kdtree_built_at)
 
             new_pos = self._steer(nearest_node.position, sample)
 
-            if self._is_path_collision_free(nearest_node.position, new_pos):
+            if self._is_path_collision_free(nearest_node.position, new_pos, use_relaxed=recovery_mode):
 
                 n = len(nodes) + 1  
                 if n > 1:
@@ -104,7 +118,7 @@ class RRTStar:
                     potential_cost = near_node.cost + edge_dist
 
                     if potential_cost < best_cost:
-                        if self._is_path_collision_free(near_node.position, new_pos):
+                        if self._is_path_collision_free(near_node.position, new_pos, use_relaxed=recovery_mode):
                             best_parent = near_node
                             best_cost = potential_cost
 
@@ -127,8 +141,8 @@ class RRTStar:
                     potential_cost = new_node.cost + edge_dist
 
                     if potential_cost < near_node.cost:
-                        if self._is_path_collision_free(new_pos, near_node.position):
-                            
+                        if self._is_path_collision_free(new_pos, near_node.position, use_relaxed=recovery_mode):
+
                             old_parent = near_node.parent
                             if old_parent is not None:
                                 old_parent.children.remove(near_node)  
@@ -144,8 +158,8 @@ class RRTStar:
                     kdtree_built_at = len(nodes)  
                 dist_to_goal = np.linalg.norm(new_pos - goal)
                 if dist_to_goal < 0.5:
-                    
-                    if self._is_path_collision_free(new_pos, goal):
+
+                    if self._is_path_collision_free(new_pos, goal, use_relaxed=recovery_mode):
                         # Create final goal node
                         goal_node = RRTNode(goal)
                         goal_node.parent = new_node
@@ -182,16 +196,18 @@ class RRTStar:
 
             queue.extend(child.children)
 
-    def _sample_random_point(self) -> np.ndarray:
-        
-        max_attempts = 50 
+    def _sample_random_point(self, use_relaxed: bool = False) -> np.ndarray:
+
+        max_attempts = 50
 
         for _ in range(max_attempts):
             x = np.random.uniform(self.x_min, self.x_max)
             y = np.random.uniform(self.y_min, self.y_max)
             point = np.array([x, y])
 
-            if not self._is_collision(point):
+            # Use relaxed collision check in recovery mode
+            collision_check = self._is_collision_relaxed if use_relaxed else self._is_collision
+            if not collision_check(point):
                 return point
 
         return point
@@ -246,16 +262,23 @@ class RRTStar:
             return from_pos + (direction / distance) * self.step_size
 
     def _is_collision(self, point: np.ndarray) -> bool:
-        
+
         dist, _ = self.kdtree.query(point)
         return dist < self.safety_margin
 
-    def _is_path_collision_free(self, start: np.ndarray, end: np.ndarray) -> bool:
-       
+    def _is_collision_relaxed(self, point: np.ndarray) -> bool:
+        
+        dist, _ = self.kdtree.query(point)
+        return dist < self.relaxed_safety_margin
+
+    def _is_path_collision_free(self, start: np.ndarray, end: np.ndarray, use_relaxed: bool = False) -> bool:
+
         distance = np.linalg.norm(end - start)
 
+        collision_check = self._is_collision_relaxed if use_relaxed else self._is_collision
+
         if distance < 1e-6:
-            return not self._is_collision(start)
+            return not collision_check(start)
 
         check_interval = self.robot_radius / 2.0
         num_checks = max(1, int(np.ceil(distance / check_interval)))
@@ -264,7 +287,7 @@ class RRTStar:
             alpha = i / num_checks if num_checks > 0 else 0.0
             point = start + alpha * (end - start)
 
-            if self._is_collision(point):
+            if collision_check(point):
                 return False
 
         return True

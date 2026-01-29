@@ -40,7 +40,7 @@ def scan_to_map_icp(
         reg_result = o3d.t.pipelines.registration.icp(
             source=source_pcd,
             target=target_pcd,
-            max_correspondence_distance=0.1,  
+            max_correspondence_distance=0.1,
             init_source_to_target=init_transform,
             estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
             criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(

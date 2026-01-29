@@ -195,11 +195,12 @@ class SubmapStitcher:
             global_transform_refined = global_transform
 
         pose_correction = None
-        if success and correction_translation > 0.01:  
+        if success and correction_translation > 0.01:
             pose_correction = {
                 'dx': icp_correction[0, 3],
                 'dy': icp_correction[1, 3],
-                'dtheta': np.arctan2(icp_correction[1, 0], icp_correction[0, 0])
+                'dtheta': np.arctan2(icp_correction[1, 0], icp_correction[0, 0]),
+                'type': 'submap_icp'
             }
         transform_refined_tensor = o3c.Tensor(global_transform_refined, dtype=o3c.float32, device=self.device)
         pcd_aligned_tensor = pcd_tensor.transform(transform_refined_tensor)
@@ -289,14 +290,11 @@ class SubmapStitcher:
                         print(f"    Rotation Correction:    {np.degrees(dtheta_lc):.2f}°")
                         print(f"    Applied to Submap:      {current_submap_id}")
 
-                        # Apply optimized transforms to submaps
                         for i, optimized_transform in enumerate(optimized_transforms):
                             self.submaps[i]['global_transform'] = optimized_transform
 
-                        # Rebuild global map with optimized poses
                         self._rebuild_global_map()
 
-                        # Print optimization statistics
                         stats = self.gtsam_optimizer.get_statistics()
                         if stats['last_error'] is not None:
                             initial_error = stats['last_error']['initial']

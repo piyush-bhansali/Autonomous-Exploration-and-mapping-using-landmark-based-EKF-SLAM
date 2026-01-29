@@ -146,7 +146,7 @@
     <!-- Horizontal walls (scaled 60% from 50x50) -->
     <model name="wall_h1">
       <static>true</static>
-      <pose>-7.5 7.5 0.5 0 0 0</pose>
+      <pose>-7.75 7.5 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision"><geometry><box><size>12.0 0.5 1.0</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>12.0 0.5 1.0</size></box></geometry><material><diffuse>0.6 0.4 0.2 1</diffuse></material></visual>
@@ -155,7 +155,7 @@
 
     <model name="wall_h2">
       <static>true</static>
-      <pose>4.5 7.5 0.5 0 0 0</pose>
+      <pose>4.75 7.5 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision"><geometry><box><size>9.0 0.5 1.0</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>9.0 0.5 1.0</size></box></geometry><material><diffuse>0.6 0.4 0.2 1</diffuse></material></visual>
@@ -182,7 +182,7 @@
 
     <model name="wall_h5">
       <static>true</static>
-      <pose>-7.5 -7.5 0.5 0 0 0</pose>
+      <pose>-7.75 -7.5 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision"><geometry><box><size>12.0 0.5 1.0</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>12.0 0.5 1.0</size></box></geometry><material><diffuse>0.6 0.4 0.2 1</diffuse></material></visual>
@@ -191,7 +191,7 @@
 
     <model name="wall_h6">
       <static>true</static>
-      <pose>4.5 -7.5 0.5 0 0 0</pose>
+      <pose>4.75 -7.5 0.5 0 0 0</pose>
       <link name="link">
         <collision name="collision"><geometry><box><size>9.0 0.5 1.0</size></box></geometry></collision>
         <visual name="visual"><geometry><box><size>9.0 0.5 1.0</size></box></geometry><material><diffuse>0.6 0.4 0.2 1</diffuse></material></visual>

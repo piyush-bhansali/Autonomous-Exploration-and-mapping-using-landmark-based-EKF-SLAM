@@ -213,21 +213,13 @@ class SimpleNavigationNode(Node):
                 self.state = State.DONE
                 return
             else:
-                self.get_logger().info(f'[STATE: DETECT_FRONTIERS] No frontiers found ({self.no_frontiers_count}/3) - waiting for next map update...')
                 return
-
-        self.get_logger().info(f'[STATE: DETECT_FRONTIERS] Found {len(frontiers)} frontiers')
 
         distant_frontiers = []
         for f in frontiers:
             dist = np.linalg.norm(f.position - self.robot_pos)
             if dist >= self.min_frontier_distance:
                 distant_frontiers.append(f)
-            else:
-                self.get_logger().debug(
-                    f'  Frontier at [{f.position[0]:.2f}, {f.position[1]:.2f}] too close '
-                    f'(dist={dist:.2f}m < min={self.min_frontier_distance}m)'
-                )
 
         if len(distant_frontiers) == 0:
             self.get_logger().warn(
@@ -236,23 +228,17 @@ class SimpleNavigationNode(Node):
             )
             distant_frontiers = frontiers
 
-        self.get_logger().info(
-            f'[STATE: DETECT_FRONTIERS] {len(distant_frontiers)} frontiers meet distance requirement '
-            f'(≥{self.min_frontier_distance}m)'
-        )
-
         best_frontier = distant_frontiers[0]
         self.current_goal = best_frontier.position
         dist_to_selected = np.linalg.norm(self.current_goal - self.robot_pos)
 
         self.get_logger().info(
-            f'[STATE: DETECT_FRONTIERS] Selected frontier at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}] '
-            f'(dist={dist_to_selected:.2f}m, score={best_frontier.score:.3f})'
+            f'[STATE: DETECT_FRONTIERS] Selected frontier [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}] '
+            f'({len(distant_frontiers)}/{len(frontiers)} valid, dist={dist_to_selected:.2f}m, score={best_frontier.score:.3f})'
         )
 
         self.previous_state = self.state
         self.state = State.PLAN_PATH
-        self.get_logger().info('[STATE: DETECT_FRONTIERS → PLAN_PATH]')
 
     def _handle_plan_path(self):
         """Plan path to current goal"""
@@ -260,8 +246,6 @@ class SimpleNavigationNode(Node):
             self.get_logger().error('[STATE: PLAN_PATH] No current goal set!')
             self.state = State.DETECT_FRONTIERS
             return
-
-        self.get_logger().info(f'[STATE: PLAN_PATH] Planning from [{self.robot_pos[0]:.2f}, {self.robot_pos[1]:.2f}] to [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
 
         # Simplified: Use only global map for planning (no scan integration)
         # Lidar is used only for emergency stop during execution
@@ -272,9 +256,6 @@ class SimpleNavigationNode(Node):
         )
 
         path = path_planner.plan(self.robot_pos, self.current_goal, logger=self.get_logger())
-
-        num_obstacles = len(self.map_points) if self.map_points is not None else 0
-        self.get_logger().info(f'  RRT* using {num_obstacles} obstacles from global map (0.5m safety margin)')
 
         if path is None:
             self.get_logger().warn('[STATE: PLAN_PATH] Planning FAILED - will re-detect frontiers')
@@ -290,26 +271,10 @@ class SimpleNavigationNode(Node):
 
         self.current_waypoint_index = nav_utils.find_nearest_waypoint_index(path, self.robot_pos)
 
-        if self.previous_state == State.EXECUTE_PATH:
-            # Replanning during execution
-            self.get_logger().info(
-                f'[STATE: PLAN_PATH] Replanning: Starting from waypoint {self.current_waypoint_index}/{len(path)} '
-                f'(nearest to current robot position)'
-            )
-        else:
-            # New path (but robot may have moved during planning)
-            self.get_logger().info(
-                f'[STATE: PLAN_PATH] New path: Starting from waypoint {self.current_waypoint_index}/{len(path)} '
-                f'(nearest to current robot position, compensates for planning latency)'
-            )
-
         self.state = State.EXECUTE_PATH
-
         self.execute_path_start_time = self.get_clock().now()
         self.last_stuck_check_time = self.get_clock().now()
         self.last_stuck_check_position = self.robot_pos.copy()
-
-        self.get_logger().info('[STATE: PLAN_PATH → EXECUTE_PATH] Starting path execution')
 
     def _handle_execute_path(self):
         
@@ -326,7 +291,6 @@ class SimpleNavigationNode(Node):
 
             # Transition back to frontier detection
             self.state = State.DETECT_FRONTIERS
-            self.get_logger().info('[STATE: EXECUTE_PATH → DETECT_FRONTIERS] Recovering from stuck condition...')
             return
 
         # PATH DEVIATION CHECK: Replan if robot deviated too far from path
@@ -354,7 +318,6 @@ class SimpleNavigationNode(Node):
             # Transition to PLAN_PATH to create new path to same goal
             self.previous_state = self.state
             self.state = State.PLAN_PATH
-            self.get_logger().info('[STATE: EXECUTE_PATH → PLAN_PATH] Replanning due to path deviation')
             return
 
         # Check if path complete
@@ -371,7 +334,6 @@ class SimpleNavigationNode(Node):
             # Transition to detect new frontiers
             self.previous_state = self.state
             self.state = State.DETECT_FRONTIERS
-            self.get_logger().info('[STATE: EXECUTE_PATH → DETECT_FRONTIERS] Searching for next frontier...')
             return
 
         frontiers = self._get_frontiers()  # Get event-driven frontiers (updated in map_callback)
@@ -407,7 +369,6 @@ class SimpleNavigationNode(Node):
                 # Transition to PLAN_PATH
                 self.previous_state = self.state
                 self.state = State.PLAN_PATH
-                self.get_logger().info('[STATE: EXECUTE_PATH → PLAN_PATH] Replanning to new frontier')
                 return
 
         waypoint = self.current_path[self.current_waypoint_index]
@@ -458,7 +419,6 @@ class SimpleNavigationNode(Node):
 
             self.previous_state = self.state
             self.state = State.PLAN_PATH
-            self.get_logger().info('[OBSTACLE] Replanning new route while moving slowly')
 
             cmd = Twist()
             cmd.linear.x = v
@@ -466,12 +426,12 @@ class SimpleNavigationNode(Node):
             self.cmd_pub.publish(cmd)
             return
 
-        if self.current_waypoint_index % 10 == 0:
+        if len(self.current_path) > 30 and self.current_waypoint_index % 20 == 0:
             progress = (self.current_waypoint_index / len(self.current_path)) * 100
             dist_to_goal = np.linalg.norm(self.robot_pos - self.current_path[-1])
             self.get_logger().info(
                 f'[STATE: EXECUTE_PATH] Waypoint {self.current_waypoint_index}/{len(self.current_path)} '
-                f'({progress:.1f}%), dist to goal: {dist_to_goal:.2f}m, v={v:.2f}, w={w:.2f}'
+                f'({progress:.1f}%), dist to goal: {dist_to_goal:.2f}m'
             )
 
         # Publish velocity

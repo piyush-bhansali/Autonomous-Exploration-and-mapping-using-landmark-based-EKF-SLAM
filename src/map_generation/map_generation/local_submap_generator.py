@@ -28,6 +28,8 @@ from map_generation.mapping_utils import (
     quaternion_to_rotation_matrix
 )
 from multi_robot_mapping.qos_profiles import SCAN_QOS, ODOM_QOS, IMU_QOS
+import csv
+import time
 
 
 class LocalSubmapGenerator(Node):
@@ -88,6 +90,13 @@ class LocalSubmapGenerator(Node):
             ODOM_QOS
         )
 
+        self.ground_truth_sub = self.create_subscription(
+            PoseStamped,
+            f'/{self.robot_name}/ground_truth_pose',
+            self.ground_truth_callback,
+            10
+        )
+
         self.current_submap_pub = self.create_publisher(
             PointCloud2,
             f'/{self.robot_name}/current_submap',
@@ -126,6 +135,14 @@ class LocalSubmapGenerator(Node):
         self.create_timer(1.0, self._publish_global_map_callback)
 
         self.latest_odom_pose = None
+
+        # Ground truth tracking and CSV logging
+        self.ground_truth_pose = None
+        self.csv_file_path = os.path.join(self.save_dir, 'ekf_vs_groundtruth.csv')
+        self.csv_file = open(self.csv_file_path, 'w', newline='')
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow(['timestamp', 'ekf_x', 'ekf_y', 'ekf_theta', 'gt_x', 'gt_y', 'gt_theta', 'pos_error', 'orient_error'])
+        self.get_logger().info(f'EKF vs Ground Truth data will be saved to: {self.csv_file_path}')
 
     def _publish_global_map_callback(self):
 
@@ -251,6 +268,92 @@ class LocalSubmapGenerator(Node):
 
         self._publish_ekf_pose()
 
+    def ground_truth_callback(self, msg):
+        """Store ground truth pose for comparison with EKF"""
+        x_gt = msg.pose.position.x
+        y_gt = msg.pose.position.y
+
+        qx = msg.pose.orientation.x
+        qy = msg.pose.orientation.y
+        qz = msg.pose.orientation.z
+        qw = msg.pose.orientation.w
+        theta_gt = quaternion_to_yaw(qx, qy, qz, qw)
+
+        self.ground_truth_pose = {
+            'x': x_gt,
+            'y': y_gt,
+            'theta': theta_gt,
+            'timestamp': self.get_clock().now().nanoseconds
+        }
+
+        # Log to CSV if EKF is initialized
+        self._log_ekf_vs_groundtruth()
+
+    def _log_ekf_vs_groundtruth(self):
+        """Log EKF and ground truth data to CSV file"""
+        if not self.ekf_initialized or self.ground_truth_pose is None or self.current_pose is None:
+            return
+
+        # Calculate errors
+        pos_error = np.sqrt(
+            (self.current_pose['x'] - self.ground_truth_pose['x'])**2 +
+            (self.current_pose['y'] - self.ground_truth_pose['y'])**2
+        )
+
+        angle_diff = self.current_pose['theta'] - self.ground_truth_pose['theta']
+        orient_error = abs(np.arctan2(np.sin(angle_diff), np.cos(angle_diff)))
+
+        # Write to CSV
+        timestamp_sec = self.get_clock().now().nanoseconds / 1e9
+        self.csv_writer.writerow([
+            timestamp_sec,
+            self.current_pose['x'],
+            self.current_pose['y'],
+            self.current_pose['theta'],
+            self.ground_truth_pose['x'],
+            self.ground_truth_pose['y'],
+            self.ground_truth_pose['theta'],
+            pos_error,
+            orient_error
+        ])
+        self.csv_file.flush()  # Ensure data is written immediately
+
+    def _apply_pose_correction(self, dx: float, dy: float, dtheta: float,
+                               measurement_type: str, vx_odom=None, base_pose=None):
+        """Apply pose correction to EKF and update current pose.
+
+        Args:
+            dx: X correction in meters
+            dy: Y correction in meters
+            dtheta: Theta correction in radians
+            measurement_type: Type of measurement ('icp', 'loop_closure', 'odom')
+            vx_odom: Optional odometry linear velocity
+            base_pose: Base pose dict to apply correction to (defaults to self.current_pose)
+        """
+        if base_pose is None:
+            base_pose = self.current_pose
+
+        corrected_x = base_pose['x'] + dx
+        corrected_y = base_pose['y'] + dy
+        corrected_theta = base_pose['theta'] + dtheta
+        corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
+
+        self.ekf.update(corrected_x, corrected_y, corrected_theta,
+                       vx_odom=vx_odom, measurement_type=measurement_type)
+
+        state = self.ekf.get_state()
+        qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
+
+        self.current_pose['x'] = state['x']
+        self.current_pose['y'] = state['y']
+        self.current_pose['theta'] = state['theta']
+        self.current_pose['qx'] = qx
+        self.current_pose['qy'] = qy
+        self.current_pose['qz'] = qz
+        self.current_pose['qw'] = qw
+
+        return state
+
     def scan_callback(self, msg):
 
         if self.latest_odom_pose is None:
@@ -293,27 +396,16 @@ class LocalSubmapGenerator(Node):
                     correction_distance = np.linalg.norm(correction_world[:2])
                     correction_angle = np.abs(pose_correction['dtheta'])
 
-                    if correction_distance < 0.5 and correction_angle < np.radians(25):
-                       
-                        corrected_x = self.latest_odom_pose['x'] + correction_world[0]
-                        corrected_y = self.latest_odom_pose['y'] + correction_world[1]
-                        corrected_theta = self.latest_odom_pose['theta'] + pose_correction['dtheta']
-                        corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
+                    if correction_distance < 0.5 and correction_angle < np.radians(45):
 
-                        self.ekf.update(corrected_x, corrected_y, corrected_theta,
-                                      vx_odom=self.latest_odom_pose['vx'],
-                                      measurement_type='icp')
-
-                        state = self.ekf.get_state()
-                        qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
-
-                        self.current_pose['x'] = state['x']
-                        self.current_pose['y'] = state['y']
-                        self.current_pose['theta'] = state['theta']
-                        self.current_pose['qx'] = qx
-                        self.current_pose['qy'] = qy
-                        self.current_pose['qz'] = qz
-                        self.current_pose['qw'] = qw
+                        self._apply_pose_correction(
+                            dx=correction_world[0],
+                            dy=correction_world[1],
+                            dtheta=pose_correction['dtheta'],
+                            measurement_type='icp',
+                            vx_odom=self.latest_odom_pose['vx'],
+                            base_pose=self.latest_odom_pose
+                        )
 
                         self._publish_ekf_pose()
 
@@ -370,11 +462,7 @@ class LocalSubmapGenerator(Node):
             scan_count = self.scans_in_current_submap
             end_pose = self.current_pose.copy()
 
-            self.get_logger().info(
-                f'Creating submap {self.submap_id}: {scan_count} scans, {len(points)} points (local frame)'
-            )
 
-            
             R = quaternion_to_rotation_matrix(
                 self.submap_start_pose['qx'], self.submap_start_pose['qy'],
                 self.submap_start_pose['qz'], self.submap_start_pose['qw']
@@ -409,80 +497,42 @@ class LocalSubmapGenerator(Node):
             )
 
             if success:
-              
-                if pose_correction is not None and 'loop_closure' in pose_correction:
-                    lc_correction = pose_correction['loop_closure']
 
-                    corrected_x = self.current_pose['x'] + lc_correction['dx']
-                    corrected_y = self.current_pose['y'] + lc_correction['dy']
-                    corrected_theta = self.current_pose['theta'] + lc_correction['dtheta']
-                    corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
+                if pose_correction is not None:
+                    if 'loop_closure' in pose_correction:
+                        lc_correction = pose_correction['loop_closure']
 
-                    self.ekf.update(corrected_x, corrected_y, corrected_theta,
-                                  vx_odom=None, measurement_type='loop_closure')
+                        state = self._apply_pose_correction(
+                            dx=lc_correction['dx'],
+                            dy=lc_correction['dy'],
+                            dtheta=lc_correction['dtheta'],
+                            measurement_type='loop_closure',
+                            vx_odom=None
+                        )
 
-                    state = self.ekf.get_state()
-                    qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
+                        self.get_logger().warn(
+                            f' LOOP CLOSURE POSE CORRECTION APPLIED ✓✓✓\n'
+                            f'    Submap {lc_correction["submap_id"]} matched with submap {lc_correction["loop_match_id"]}\n'
+                            f'    Position correction: dx={lc_correction["dx"]:.3f}m, dy={lc_correction["dy"]:.3f}m\n'
+                            f'    Orientation correction: dθ={np.degrees(lc_correction["dtheta"]):.2f}°\n'
+                            f'    New robot pose: ({state["x"]:.3f}, {state["y"]:.3f}, {np.degrees(state["theta"]):.2f}°)'
+                        )
 
-                    self.current_pose['x'] = state['x']
-                    self.current_pose['y'] = state['y']
-                    self.current_pose['theta'] = state['theta']
-                    self.current_pose['qx'] = qx
-                    self.current_pose['qy'] = qy
-                    self.current_pose['qz'] = qz
-                    self.current_pose['qw'] = qw
-
-                    self.get_logger().warn(
-                        f' LOOP CLOSURE POSE CORRECTION APPLIED ✓✓✓\n'
-                        f'    Submap {lc_correction["submap_id"]} matched with submap {lc_correction["loop_match_id"]}\n'
-                        f'    Position correction: dx={lc_correction["dx"]:.3f}m, dy={lc_correction["dy"]:.3f}m\n'
-                        f'    Orientation correction: dθ={np.degrees(lc_correction["dtheta"]):.2f}°\n'
-                        f'    New robot pose: ({state["x"]:.3f}, {state["y"]:.3f}, {np.degrees(state["theta"]):.2f}°)'
-                    )
+                    elif pose_correction.get('type') == 'submap_icp':
+                        self._apply_pose_correction(
+                            dx=pose_correction['dx'],
+                            dy=pose_correction['dy'],
+                            dtheta=pose_correction['dtheta'],
+                            measurement_type='icp',
+                            vx_odom=None
+                        )
 
                     self._publish_ekf_pose()
-
-                elif pose_correction is not None:
-                   
-                    correction_distance = np.sqrt(pose_correction['dx']**2 + pose_correction['dy']**2)
-                    correction_angle = np.abs(pose_correction['dtheta'])
-
-                    if correction_distance < 1.0 and correction_angle < np.radians(30):
-                        
-                        corrected_x = self.current_pose['x'] + pose_correction['dx']
-                        corrected_y = self.current_pose['y'] + pose_correction['dy']
-                        corrected_theta = self.current_pose['theta'] + pose_correction['dtheta']
-                        corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
-
-                        self.ekf.update(corrected_x, corrected_y, corrected_theta, vx_odom=None, measurement_type='icp')
-
-                        state = self.ekf.get_state()
-                        qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
-
-                        self.current_pose['x'] = state['x']
-                        self.current_pose['y'] = state['y']
-                        self.current_pose['theta'] = state['theta']
-                        self.current_pose['qx'] = qx
-                        self.current_pose['qy'] = qy
-                        self.current_pose['qz'] = qz
-                        self.current_pose['qw'] = qw
-
-                        self.get_logger().info(
-                            f'Applied submap ICP correction: dx={pose_correction["dx"]:.3f}m, '
-                            f'dy={pose_correction["dy"]:.3f}m, dθ={np.degrees(pose_correction["dtheta"]):.2f}°'
-                        )
-
-                        self._publish_ekf_pose()
-                    else:
-                        self.get_logger().warn(
-                            f'Submap ICP correction REJECTED (too large): '
-                            f'dist={correction_distance:.3f}m, angle={np.degrees(correction_angle):.2f}°'
-                        )
 
                 global_points = self.stitcher.get_global_map_points()
                 global_size = len(global_points) if global_points is not None else 0
 
-                self.get_logger().info(f'✓ Submap {self.submap_id} stitched! Global map now has {global_size} points')
+                self.get_logger().info(f'Submap {self.submap_id} → Global map: {global_size} points')
 
                 self.submap_id += 1
 
@@ -507,6 +557,11 @@ class LocalSubmapGenerator(Node):
             map_file = os.path.join(self.save_dir, 'global_map.pcd')
             self.stitcher.save_global_map(map_file)
             self.get_logger().info(f'Final map saved: {map_file}')
+
+        # Close CSV file
+        if hasattr(self, 'csv_file') and self.csv_file:
+            self.csv_file.close()
+            self.get_logger().info(f'EKF vs Ground Truth data saved to: {self.csv_file_path}')
 
 
 def main(args=None):
