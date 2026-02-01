@@ -28,12 +28,19 @@ class EKF:
             0.0001    # theta: 0.0001 rad² (σ = 0.01 rad ≈ 0.57°)
         ])
 
+        self.R_features = np.diag([
+            0.0025,   # x: 0.0025 m² (σ = 0.05m = 5cm, feature-based matching)
+            0.0025,   # y: 0.0025 m² (σ = 0.05m = 5cm)
+            0.0004    # theta: 0.0004 rad² (σ = 0.02 rad ≈ 1.1°)
+        ])
+
         # Initialization flag
         self.initialized = False
 
         # Statistics
         self.prediction_count = 0
         self.update_count = 0
+        self.feature_update_count = 0
 
     def initialize(self, x, y, theta):
         
@@ -138,6 +145,82 @@ class EKF:
 
         self.update_count += 1
 
+    def update_with_features(self,
+                            dx_meas: float,
+                            dy_meas: float,
+                            dtheta_meas: float,
+                            num_matches: int,
+                            measurement_cov: np.ndarray = None):
+        """
+        EKF update using feature-based motion measurement.
+
+        This method performs an EKF update using relative motion measurements
+        derived from matched geometric features (corners, lines) between
+        consecutive lidar scans.
+
+        Args:
+            dx_meas: Measured x displacement (meters)
+            dy_meas: Measured y displacement (meters)
+            dtheta_meas: Measured rotation (radians)
+            num_matches: Number of matched features (affects confidence)
+            measurement_cov: Optional 3x3 measurement covariance matrix
+        """
+        if not self.initialized:
+            raise RuntimeError("EKF not initialized")
+
+        # Determine measurement noise
+        if measurement_cov is not None:
+            R = measurement_cov
+        else:
+            # Scale base noise by number of matches
+            # More matches = more confident measurement
+            R = self.R_features.copy()
+            if num_matches < 5:
+                # Fewer matches → less confident → higher noise
+                scale_factor = 5.0 / num_matches
+                R *= scale_factor
+
+        # Observation matrix (direct observation of pose)
+        H = np.eye(3)
+
+        # Measurement vector
+        z = np.array([dx_meas, dy_meas, dtheta_meas])
+
+        # Predicted measurement (current state estimate)
+        z_pred = H @ self.state
+
+        # Innovation (measurement residual)
+        innovation = z - z_pred
+
+        # Normalize angle difference to [-π, π]
+        innovation[2] = np.arctan2(np.sin(innovation[2]), np.cos(innovation[2]))
+
+        # Innovation covariance
+        S = H @ self.P @ H.T + R
+
+        # Kalman gain
+        try:
+            K = self.P @ H.T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            # Singular covariance - skip update
+            return
+
+        # State update
+        self.state = self.state + K @ innovation
+
+        # Normalize orientation to [-π, π]
+        self.state[2] = np.arctan2(np.sin(self.state[2]), np.cos(self.state[2]))
+
+        # Covariance update (Joseph form for numerical stability)
+        I = np.eye(3)
+        I_KH = I - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+
+        # Ensure symmetry
+        self.P = (self.P + self.P.T) / 2.0
+
+        self.feature_update_count += 1
+
     def get_state(self):
         
         return {
@@ -147,11 +230,12 @@ class EKF:
         }
 
     def get_statistics(self):
-        
+
         return {
             'initialized': self.initialized,
             'prediction_count': self.prediction_count,
             'update_count': self.update_count,
+            'feature_update_count': self.feature_update_count,
             'position_uncertainty': np.sqrt(self.P[0, 0]**2 + self.P[1, 1]**2),
             'orientation_uncertainty': np.sqrt(self.P[2, 2])
         }

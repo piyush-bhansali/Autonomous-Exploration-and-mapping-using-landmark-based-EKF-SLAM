@@ -4,7 +4,9 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, PointCloud2
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped, Point
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import ColorRGBA
 from tf2_ros import TransformBroadcaster
 import numpy as np
 import os
@@ -14,6 +16,7 @@ import open3d.core as o3c
 
 from map_generation.submap_stitcher import SubmapStitcher
 from map_generation.ekf_lib import EKF
+from map_generation.lidar_line_corner_features import LidarLineCornerExtractor, FeatureMatcher
 from map_generation.utils import (
     quaternion_to_yaw,
     yaw_to_quaternion,
@@ -59,6 +62,23 @@ class LocalSubmapGenerator(Node):
         # Initialize EKF
         self.ekf = EKF()
         self.ekf_initialized = False
+
+        # Initialize line-based feature extraction for lidar scans
+        self.feature_extractor = LidarLineCornerExtractor(
+            min_points_per_line=8,           # Min points to form a valid line
+            line_fit_threshold=0.03,         # 3cm max deviation from line
+            min_line_length=0.3,             # Min 30cm line length
+            corner_angle_threshold=25.0      # Min 25° angle change for corners
+        )
+
+        self.feature_matcher = FeatureMatcher(
+            chi2_gate_threshold=5.99,  # 95% confidence
+            feature_measurement_noise=0.05  # 5cm
+        )
+
+        # Feature tracking state
+        self.previous_features = None
+        self.previous_scan_time = None
 
         self.stitcher = SubmapStitcher(
             voxel_size=self.voxel_size,
@@ -112,6 +132,12 @@ class LocalSubmapGenerator(Node):
         self.ekf_path_pub = self.create_publisher(
             Path,
             f'/{self.robot_name}/ekf_path',
+            10
+        )
+
+        self.feature_markers_pub = self.create_publisher(
+            MarkerArray,
+            f'/{self.robot_name}/scan_features',
             10
         )
 
@@ -481,11 +507,189 @@ class LocalSubmapGenerator(Node):
 
         return state
 
+    def _process_scan_features(self, scan_msg):
+        """
+        Extract features from laser scan and visualize them.
+
+        FOR NOW: Just extraction and visualization (no EKF updates).
+        This allows you to see what features are being detected.
+        """
+        # Extract PCA features from current scan
+        current_features = self.feature_extractor.extract_features(scan_msg)
+
+        # Log feature statistics
+        if len(current_features) > 0:
+            num_corners = sum(1 for f in current_features if f['type'] == 'corner')
+            num_lines = sum(1 for f in current_features if f['type'] == 'line')
+
+            # Show details for debugging (first 5 features)
+            if len(current_features) <= 5:
+                for f in current_features:
+                    if f['type'] == 'line':
+                        self.get_logger().info(
+                            f"LINE: length={f['strength']:.2f}m, "
+                            f"pos=[{f['position'][0]:.2f}, {f['position'][1]:.2f}]"
+                        )
+                    else:  # corner
+                        self.get_logger().info(
+                            f"CORNER: angle={f['strength']:.1f}°, "
+                            f"pos=[{f['position'][0]:.2f}, {f['position'][1]:.2f}]"
+                        )
+
+            self.get_logger().info(
+                f"Extracted {len(current_features)} features: "
+                f"{num_corners} corners, {num_lines} lines",
+                throttle_duration_sec=1.0
+            )
+
+        # Visualize features in RViz (use scan timestamp for TF sync)
+        self._publish_feature_markers(current_features, scan_msg.header.stamp)
+
+        # TODO: Uncomment below for feature matching and EKF updates later
+        # ================================================================
+        # current_time = self.get_clock().now().nanoseconds / 1e9
+        #
+        # if self.previous_features is not None and len(current_features) >= 3:
+        #     dt = current_time - self.previous_scan_time if self.previous_scan_time else 0.1
+        #     odom_delta = self._estimate_odometry_delta(dt)
+        #
+        #     matches = self.feature_matcher.match_features(
+        #         current_features,
+        #         self.previous_features,
+        #         self.ekf.state,
+        #         self.ekf.P,
+        #         odom_delta
+        #     )
+        #
+        #     if len(matches) >= 3:
+        #         result = self.feature_matcher.compute_transform_from_matches(
+        #             current_features,
+        #             self.previous_features,
+        #             matches
+        #         )
+        #
+        #         if result is not None and result['residual_error'] < 0.15:
+        #             dx, dy, dtheta = result['transform']
+        #
+        #             self.ekf.update_with_features(
+        #                 dx, dy, dtheta,
+        #                 result['num_matches'],
+        #                 result['covariance']
+        #             )
+        #
+        #             self.get_logger().info(
+        #                 f"Feature update: {result['num_matches']} matches, "
+        #                 f"error={result['residual_error']:.3f}m",
+        #                 throttle_duration_sec=2.0
+        #             )
+        #
+        #             self._sync_pose_from_ekf()
+        #
+        # self.previous_features = current_features
+        # self.previous_scan_time = current_time
+        # ================================================================
+
+    def _publish_feature_markers(self, features, scan_timestamp):
+        """
+        Publish visualization markers for extracted features.
+
+        Corners: Red spheres
+        Lines: Blue cylinders oriented along principal direction
+
+        Args:
+            features: List of extracted features
+            scan_timestamp: Timestamp from scan message for TF sync
+        """
+        marker_array = MarkerArray()
+
+        for i, feature in enumerate(features):
+            marker = Marker()
+            marker.header.frame_id = f'{self.robot_name}/base_scan'  # Features in robot frame
+            marker.header.stamp = scan_timestamp  # Use scan timestamp for TF sync
+            marker.ns = 'scan_features'
+            marker.id = i
+            marker.action = Marker.ADD
+            marker.lifetime.sec = 0
+            marker.lifetime.nanosec = 200000000  # 0.2 seconds
+
+            # Position
+            marker.pose.position.x = float(feature['position'][0])
+            marker.pose.position.y = float(feature['position'][1])
+            marker.pose.position.z = 0.0
+
+            if feature['type'] == 'corner':
+                # Corners: Red spheres
+                marker.type = Marker.SPHERE
+                marker.scale.x = 0.15
+                marker.scale.y = 0.15
+                marker.scale.z = 0.15
+                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Red
+
+            elif feature['type'] == 'line':
+                # Lines: Blue cylinders
+                marker.type = Marker.CYLINDER
+                marker.scale.x = 0.08  # Diameter
+                marker.scale.y = 0.08
+                marker.scale.z = 0.2   # Height
+                marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.6)  # Blue
+
+                # Orient cylinder along principal direction
+                orientation = feature['orientation']
+                marker.pose.orientation.z = np.sin(orientation / 2.0)
+                marker.pose.orientation.w = np.cos(orientation / 2.0)
+
+            marker_array.markers.append(marker)
+
+            # Add text label showing feature info
+            text_marker = Marker()
+            text_marker.header = marker.header
+            text_marker.ns = 'feature_labels'
+            text_marker.id = i + 1000  # Offset to avoid ID collision
+            text_marker.type = Marker.TEXT_VIEW_FACING
+            text_marker.action = Marker.ADD
+            text_marker.pose.position.x = marker.pose.position.x
+            text_marker.pose.position.y = marker.pose.position.y
+            text_marker.pose.position.z = 0.3  # Above the feature
+            text_marker.scale.z = 0.1  # Text size
+            text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)  # White
+
+            # Different labels for lines vs corners
+            if feature['type'] == 'line':
+                text_marker.text = f"LINE\n{feature['strength']:.2f}m"
+            else:
+                text_marker.text = f"CORNER\n{feature['strength']:.0f}°"
+
+            text_marker.lifetime = marker.lifetime
+
+            marker_array.markers.append(text_marker)
+
+        self.feature_markers_pub.publish(marker_array)
+
+    def _estimate_odometry_delta(self, dt):
+        """
+        Estimate motion since last scan using odometry.
+
+        Returns:
+            np.array([Δx, Δy, Δθ]) in robot frame
+        """
+        if self.last_odom_pose is None or self.latest_odom_pose is None:
+            return np.array([0.0, 0.0, 0.0])
+
+        # Compute relative motion from odometry
+        dx = self.latest_odom_pose[0] - self.last_odom_pose[0]
+        dy = self.latest_odom_pose[1] - self.last_odom_pose[1]
+        dtheta = normalize_angle(self.latest_odom_pose[2] - self.last_odom_pose[2])
+
+        return np.array([dx, dy, dtheta])
+
     def scan_callback(self, msg):
 
         if self.latest_odom_pose is None:
             self.get_logger().warn('Waiting for odometry before processing scans...', throttle_duration_sec=5.0)
             return
+
+        # Feature-based EKF update (runs every scan for high-frequency updates)
+        self._process_scan_features(msg)
 
         if self.submap_start_pose is None:
             self.submap_start_pose = self.current_pose.copy()

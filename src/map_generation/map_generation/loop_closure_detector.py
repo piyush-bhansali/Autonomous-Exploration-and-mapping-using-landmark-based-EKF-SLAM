@@ -14,6 +14,7 @@ from map_generation.mapping_utils import (
     match_geometric_features,
     is_distinctive_submap
 )
+from map_generation.transform_utils import estimate_rigid_transform_2d
 
 
 class LoopClosureDetector: 
@@ -341,35 +342,19 @@ class LoopClosureDetector:
         return best_transform, best_inliers
 
     def _estimate_2d_transform(self, source: np.ndarray, target: np.ndarray) -> np.ndarray:
-        
-        # Center the points
-        source_center = np.mean(source[:, :2], axis=0)
-        target_center = np.mean(target[:, :2], axis=0)
+        """
+        Estimate 2D rigid transformation from source to target points.
 
-        source_centered = source[:, :2] - source_center
-        target_centered = target[:, :2] - target_center
+        This is now a thin wrapper around the shared transform_utils function.
 
-        # Compute cross-covariance matrix
-        H = source_centered.T @ target_centered
+        Args:
+            source: Nx3 numpy array of source points
+            target: Nx3 numpy array of target points
 
-        # SVD
-        U, _, Vt = np.linalg.svd(H)
-        R_2d = Vt.T @ U.T
-
-        # Ensure proper rotation (det = 1)
-        if np.linalg.det(R_2d) < 0:
-            Vt[-1, :] *= -1
-            R_2d = Vt.T @ U.T
-
-        # Compute translation
-        t_2d = target_center - R_2d @ source_center
-
-        # Build 4×4 homogeneous transform
-        T = np.eye(4)
-        T[0:2, 0:2] = R_2d
-        T[0:2, 3] = t_2d
-
-        return T
+        Returns:
+            4x4 homogeneous transformation matrix
+        """
+        return estimate_rigid_transform_2d(source, target, return_format='4x4')
 
     def _refine_with_icp(self, source_pcd: o3d.t.geometry.PointCloud,
                         target_pcd: o3d.t.geometry.PointCloud,

@@ -140,3 +140,97 @@ def compute_relative_motion_2d(pose_current, pose_previous):
         delta_d = -delta_d
 
     return (delta_d, delta_theta)
+
+
+def estimate_rigid_transform_2d(source_points, target_points, return_format='4x4'):
+    """
+    Estimate 2D rigid transformation (rotation + translation) using SVD.
+
+    Uses least-squares fitting to find the optimal rigid transformation
+    that aligns source points to target points.
+
+    Algorithm:
+        1. Center both point clouds (subtract centroids)
+        2. Compute cross-covariance matrix H = source_centered^T @ target_centered
+        3. Use SVD to extract optimal rotation: R = V @ U^T
+        4. Ensure proper rotation (det(R) = 1, not reflection)
+        5. Compute translation: t = target_centroid - R @ source_centroid
+
+    Args:
+        source_points: Nx2 or Nx3 numpy array (only first 2 columns used)
+        target_points: Nx2 or Nx3 numpy array (only first 2 columns used)
+        return_format: Output format
+            - '4x4': Return 4x4 homogeneous transformation matrix
+            - '2d': Return (R_2x2, t_2x1, dx, dy, dtheta)
+            - 'pose': Return (dx, dy, dtheta)
+
+    Returns:
+        Depends on return_format:
+            - '4x4': 4x4 numpy array with [R t; 0 1] structure
+            - '2d': Tuple (R, t, dx, dy, dtheta) where R is 2x2, t is 2x1
+            - 'pose': Tuple (dx, dy, dtheta)
+
+    Raises:
+        ValueError: If points arrays have incompatible shapes or < 2 points
+    """
+    # Validate inputs
+    if len(source_points) < 2 or len(target_points) < 2:
+        raise ValueError("Need at least 2 point correspondences")
+
+    if len(source_points) != len(target_points):
+        raise ValueError("Source and target must have same number of points")
+
+    # Extract 2D coordinates (first 2 columns)
+    source_2d = source_points[:, :2] if source_points.shape[1] >= 2 else source_points
+    target_2d = target_points[:, :2] if target_points.shape[1] >= 2 else target_points
+
+    # Compute centroids
+    source_center = np.mean(source_2d, axis=0)
+    target_center = np.mean(target_2d, axis=0)
+
+    # Center the points
+    source_centered = source_2d - source_center
+    target_centered = target_2d - target_center
+
+    # Compute cross-covariance matrix
+    H = source_centered.T @ target_centered
+
+    # SVD decomposition
+    U, _, Vt = np.linalg.svd(H)
+
+    # Compute rotation matrix
+    R_2d = Vt.T @ U.T
+
+    # Ensure proper rotation (det(R) = 1, not reflection det(R) = -1)
+    if np.linalg.det(R_2d) < 0:
+        Vt[-1, :] *= -1
+        R_2d = Vt.T @ U.T
+
+    # Compute translation
+    t_2d = target_center - R_2d @ source_center
+
+    # Extract translation components
+    dx = t_2d[0]
+    dy = t_2d[1]
+
+    # Extract rotation angle
+    dtheta = np.arctan2(R_2d[1, 0], R_2d[0, 0])
+
+    # Return in requested format
+    if return_format == '4x4':
+        # Build 4x4 homogeneous transformation matrix
+        T = np.eye(4)
+        T[0:2, 0:2] = R_2d
+        T[0:2, 3] = t_2d
+        return T
+
+    elif return_format == '2d':
+        # Return 2D rotation matrix, translation vector, and pose
+        return R_2d, t_2d, dx, dy, dtheta
+
+    elif return_format == 'pose':
+        # Return just the pose (dx, dy, dtheta)
+        return dx, dy, dtheta
+
+    else:
+        raise ValueError(f"Unknown return_format: {return_format}. Use '4x4', '2d', or 'pose'")
