@@ -3,8 +3,8 @@
 Launch RViz for a specific robot
 
 Usage:
-    ros2 launch multi_robot_mapping visualize_robot.launch.py robot_name:=tb3_1
-    ros2 launch multi_robot_mapping visualize_robot.launch.py robot_name:=tb3_2
+    ros2 launch autonomous_exploration visualize_robot.launch.py robot_name:=tb3_1
+    ros2 launch autonomous_exploration visualize_robot.launch.py robot_name:=tb3_2
 """
 
 from launch import LaunchDescription
@@ -18,7 +18,7 @@ import os
 def generate_launch_description():
     """Generate launch description for per-robot RViz visualization"""
 
-    pkg_multi_robot = get_package_share_directory('multi_robot_mapping')
+    pkg_multi_robot = get_package_share_directory('autonomous_exploration')
 
     # Launch arguments
     robot_name_arg = DeclareLaunchArgument(

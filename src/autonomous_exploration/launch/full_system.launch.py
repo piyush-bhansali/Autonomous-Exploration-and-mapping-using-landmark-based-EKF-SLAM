@@ -35,7 +35,7 @@ def generate_launch_description():
     ROBOT_DELAY_OFFSET = 1.0      # Each additional robot adds 1s to all timers
 
     # Package directories
-    pkg_multi_robot = get_package_share_directory('multi_robot_mapping')
+    pkg_multi_robot = get_package_share_directory('autonomous_exploration')
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
 
     # Launch arguments
@@ -132,7 +132,7 @@ def generate_launch_description():
             robot_sdf_content = f.read()
 
         # Substitute mesh paths and robot name
-        robot_sdf_content = robot_sdf_content.replace('package://multi_robot_mapping/meshes', f'file://{mesh_path}')
+        robot_sdf_content = robot_sdf_content.replace('package://autonomous_exploration/meshes', f'file://{mesh_path}')
         robot_sdf_content = robot_sdf_content.replace('{robot_name}', robot_name)
 
         # Replace gz_frame_id for sensors to add namespace (for proper TF tree)

@@ -21,13 +21,11 @@ class LoopClosureDetector:
 
     def __init__(self,
                  spatial_search_radius: float = 5.0,
-                 scan_context_threshold: float = 0.7,
                  min_feature_matches: int = 15,
                  ransac_threshold: float = 0.1,
                  icp_fitness_threshold: float = 0.3):
-        
+
         self.spatial_search_radius = spatial_search_radius
-        self.scan_context_threshold = scan_context_threshold
         self.min_feature_matches = min_feature_matches
         self.ransac_threshold = ransac_threshold
         self.icp_fitness_threshold = icp_fitness_threshold

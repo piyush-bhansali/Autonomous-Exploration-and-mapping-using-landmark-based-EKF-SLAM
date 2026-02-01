@@ -6,7 +6,7 @@ This system compares the EKF localization estimates with Gazebo ground truth to 
 
 The following components have been added:
 
-### 1. **Bridge Configuration** (`src/multi_robot_mapping/config/tb3_bridge.yaml:50-54`)
+### 1. **Bridge Configuration** (`src/autonomous_exploration/config/tb3_bridge.yaml:50-54`)
 - Added ground truth pose topic bridge from Gazebo to ROS2
 - Topic: `/{robot_name}/ground_truth_pose`
 
@@ -26,13 +26,13 @@ The following components have been added:
 ### Step 1: Rebuild the Package
 ```bash
 cd ~/thesis_ws
-colcon build --packages-select multi_robot_mapping map_generation
+colcon build --packages-select autonomous_exploration map_generation
 source install/setup.bash
 ```
 
 ### Step 2: Run the Simulation
 ```bash
-ros2 launch multi_robot_mapping full_system.launch.py
+ros2 launch autonomous_exploration full_system.launch.py
 ```
 
 The system will automatically:
@@ -89,7 +89,7 @@ The script prints:
 
 - CSV data: `./submaps/tb3_1/ekf_vs_groundtruth.csv`
 - MATLAB script: `./plot_ekf_vs_groundtruth.m`
-- Bridge config: `./src/multi_robot_mapping/config/tb3_bridge.yaml`
+- Bridge config: `./src/autonomous_exploration/config/tb3_bridge.yaml`
 - Data logger: `./src/map_generation/map_generation/local_submap_generator.py`
 
 ## Notes

@@ -2,11 +2,13 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
 from geometry_msgs.msg import Twist, Point
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2, LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
+from tf2_ros import Buffer, TransformListener, LookupException, ExtrapolationException, ConnectivityException
 import numpy as np
 from enum import Enum
 import threading
@@ -16,7 +18,7 @@ from navigation.convex_frontier_detector import ConvexFrontierDetector
 from map_generation.utils import quaternion_to_yaw
 from navigation.rrt_star import RRTStar
 from navigation.pure_pursuit_controller import PurePursuit
-from multi_robot_mapping.qos_profiles import MAP_QOS, SCAN_QOS
+from autonomous_exploration.qos_profiles import MAP_QOS, SCAN_QOS
 from navigation import navigation_utils as nav_utils
 
 
@@ -41,29 +43,29 @@ class SimpleNavigationNode(Node):
 
         self.robot_name = self.get_parameter('robot_name').value
         self.robot_radius = 0.22
-        self.enable_reactive_avoidance = self.get_parameter('enable_reactive_avoidance').value
+        self.enable_reactive_avoidance =                self.get_parameter('enable_reactive_avoidance').value
         self.scan_emergency_distance = self.get_parameter('scan_emergency_distance').value
         self.scan_angular_range = np.radians(self.get_parameter('scan_angular_range').value)
         self.path_deviation_threshold = 0.5
 
         self.state = State.WAIT_FOR_MAP
-        self.previous_state = None 
         self.robot_pos = None
         self.robot_yaw = None
         self.map_points = None
+        self.map_header = None  # Store map header for frontier marker timestamps
         self.current_path = None
         self.current_waypoint_index = 0
 
         self.current_goal = None
         self.all_frontiers = []
-        self.no_frontiers_count = 0  
+        self.no_frontiers_count = 0
 
         self.stuck_detection_enabled = True
-        self.stuck_check_window = 5.0  
-        self.stuck_distance_threshold = 0.1  
+        self.stuck_check_window = 5.0
+        self.stuck_distance_threshold = 0.1
         self.last_stuck_check_time = None
         self.last_stuck_check_position = None
-        self.stuck_timeout = 30.0  
+        self.stuck_timeout = 30.0
         self.execute_path_start_time = None
 
         self.map_lock = threading.Lock()
@@ -74,10 +76,6 @@ class SimpleNavigationNode(Node):
         self.scan_data = None
         self.scan_lock = threading.Lock()
 
-        self.replan_count = 0
-
-        self.replan_score_threshold = 0.50
-        self.replan_distance_threshold = 4.0
         self.min_frontier_distance = 1.0
         self.frontier_detector = ConvexFrontierDetector(
             robot_radius=self.robot_radius
@@ -87,19 +85,16 @@ class SimpleNavigationNode(Node):
             max_angular_velocity=1.0
         )
 
+        # TF2 for localization in map frame
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         # Subscribers
         self.map_sub = self.create_subscription(
             PointCloud2,
             f'/{self.robot_name}/global_map',
             self.map_callback,
             MAP_QOS  # Using centralized QoS profile
-        )
-
-        self.odom_sub = self.create_subscription(
-            Odometry,
-            f'/{self.robot_name}/odom',
-            self.odom_callback,
-            10
         )
 
         self.scan_sub = self.create_subscription(
@@ -129,6 +124,7 @@ class SimpleNavigationNode(Node):
 
         with self.map_lock:
             self.map_points = points
+            self.map_header = msg.header  # Store header for timestamp/frame sync
 
             # Build/cache KDTree for sharing between frontier detector and RRT*
             map_hash = hash(self.map_points.tobytes())
@@ -155,18 +151,47 @@ class SimpleNavigationNode(Node):
             self.state = State.DETECT_FRONTIERS
             self.get_logger().info(f'Map received ({len(points)} points) - starting exploration')
 
-    def odom_callback(self, msg: Odometry):
-        """Update robot pose"""
-        self.robot_pos = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y
-        ])
+    def _update_robot_pose_from_tf(self):
+        """
+        Update robot position and orientation from TF tree.
 
-        qx = msg.pose.pose.orientation.x
-        qy = msg.pose.pose.orientation.y
-        qz = msg.pose.pose.orientation.z
-        qw = msg.pose.pose.orientation.w
-        self.robot_yaw = quaternion_to_yaw(qx, qy, qz, qw)
+        Looks up the transform from map to base_footprint to get the
+        EKF-corrected robot position in the map frame.
+
+        Returns:
+            bool: True if TF lookup successful, False otherwise
+        """
+        try:
+            # Lookup latest transform from map to base_footprint
+            now = rclpy.time.Time()
+            transform = self.tf_buffer.lookup_transform(
+                'map',                              # Target frame (global)
+                f'{self.robot_name}/base_footprint', # Source frame (robot)
+                now,                                 # Get latest
+                timeout=Duration(seconds=0.1)        # Wait up to 100ms
+            )
+
+            # Extract position (x, y) in map frame
+            self.robot_pos = np.array([
+                transform.transform.translation.x,
+                transform.transform.translation.y
+            ])
+
+            # Extract orientation (yaw) in map frame
+            quat = transform.transform.rotation
+            self.robot_yaw = quaternion_to_yaw(
+                quat.x, quat.y, quat.z, quat.w
+            )
+
+            return True
+
+        except (LookupException, ExtrapolationException, ConnectivityException) as e:
+            # TF lookup failed - log warning (throttled to avoid spam)
+            self.get_logger().warn(
+                f'TF lookup failed (map → {self.robot_name}/base_footprint): {e}',
+                throttle_duration_sec=5.0
+            )
+            return False
 
     def scan_callback(self, msg: LaserScan):
         """Store laser scan data for reactive obstacle avoidance."""
@@ -175,7 +200,9 @@ class SimpleNavigationNode(Node):
 
     def control_loop(self):
         """Main control loop running at 10 Hz - executes state machine."""
-        if self.robot_pos is None or self.robot_yaw is None:
+        # Update robot pose from TF (EKF-corrected position in map frame)
+        if not self._update_robot_pose_from_tf():
+            # TF lookup failed - skip this control cycle
             return
 
         self._publish_all_visualizations()
@@ -237,7 +264,6 @@ class SimpleNavigationNode(Node):
             f'({len(distant_frontiers)}/{len(frontiers)} valid, dist={dist_to_selected:.2f}m, score={best_frontier.score:.3f})'
         )
 
-        self.previous_state = self.state
         self.state = State.PLAN_PATH
 
     def _handle_plan_path(self):
@@ -301,10 +327,9 @@ class SimpleNavigationNode(Node):
             self.path_deviation_threshold
         )
         if is_deviated:
-            self.replan_count += 1
             self.get_logger().warn(
                 f'[STATE: EXECUTE_PATH] PATH DEVIATION DETECTED! Distance from path: {deviation_distance:.2f}m '
-                f'(threshold: {self.path_deviation_threshold:.2f}m). Replanning... (replan #{self.replan_count})'
+                f'(threshold: {self.path_deviation_threshold:.2f}m). Replanning...'
             )
 
             # Stop the robot briefly
@@ -316,7 +341,6 @@ class SimpleNavigationNode(Node):
             self.current_waypoint_index = 0
 
             # Transition to PLAN_PATH to create new path to same goal
-            self.previous_state = self.state
             self.state = State.PLAN_PATH
             return
 
@@ -332,7 +356,6 @@ class SimpleNavigationNode(Node):
             self.current_goal = None
 
             # Transition to detect new frontiers
-            self.previous_state = self.state
             self.state = State.DETECT_FRONTIERS
             return
 
@@ -367,7 +390,6 @@ class SimpleNavigationNode(Node):
                 self.current_goal = best_frontier.position.copy()
 
                 # Transition to PLAN_PATH
-                self.previous_state = self.state
                 self.state = State.PLAN_PATH
                 return
 
@@ -417,7 +439,6 @@ class SimpleNavigationNode(Node):
             self.current_path = None
             self.current_waypoint_index = 0
 
-            self.previous_state = self.state
             self.state = State.PLAN_PATH
 
             cmd = Twist()
@@ -518,11 +539,20 @@ class SimpleNavigationNode(Node):
             self.frontier_markers_pub.publish(marker_array)
             return
 
+        # Use map header for frame and timestamp synchronization
+        # If map_header not available yet, use current time with odom frame (fallback)
+        if self.map_header is not None:
+            header_frame = self.map_header.frame_id
+            header_stamp = self.map_header.stamp
+        else:
+            header_frame = f'{self.robot_name}/odom'
+            header_stamp = self.get_clock().now().to_msg()
+
         # Publish each frontier as a large sphere
         for i, frontier in enumerate(self.all_frontiers[:20]):  # Show top 20
             marker = Marker()
-            marker.header.frame_id = f'{self.robot_name}/odom'
-            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.header.frame_id = header_frame
+            marker.header.stamp = header_stamp
             marker.ns = 'frontiers'
             marker.id = i
             marker.type = Marker.SPHERE
@@ -616,10 +646,18 @@ class SimpleNavigationNode(Node):
         clear_marker.action = Marker.DELETEALL
         marker_array.markers.append(clear_marker)
 
+        # Use map header for frame and timestamp synchronization
+        if self.map_header is not None:
+            header_frame = self.map_header.frame_id
+            header_stamp = self.map_header.stamp
+        else:
+            header_frame = f'{self.robot_name}/odom'
+            header_stamp = self.get_clock().now().to_msg()
+
         if 'offset_boundary' in hull_data and len(hull_data['offset_boundary']) > 0:
             offset_marker = Marker()
-            offset_marker.header.frame_id = f'{self.robot_name}/odom'
-            offset_marker.header.stamp = self.get_clock().now().to_msg()
+            offset_marker.header.frame_id = header_frame
+            offset_marker.header.stamp = header_stamp
             offset_marker.ns = 'offset_hull'
             offset_marker.id = 1
             offset_marker.type = Marker.LINE_STRIP

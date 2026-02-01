@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>multi_robot_mapping</name>
+  <name>autonomous_exploration</name>
   <version>0.0.1</version>
-  <description>Multi-robot SLAM system with TurtleBot3 in Gazebo Harmonic</description>
+  <description>Autonomous exploration system with TurtleBot3 SLAM in Gazebo Harmonic</description>
   <maintainer email="piyushbhansali8@gmail.com">piyush</maintainer>
   <license>Apache-2.0</license>
 

@@ -324,8 +324,9 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: tb3_1/odom
+    Fixed Frame: map
     Frame Rate: 30
+    Default Transform Timeout: 0.1
   Name: root
   Tools:
     - Class: rviz_default_plugins/Interact

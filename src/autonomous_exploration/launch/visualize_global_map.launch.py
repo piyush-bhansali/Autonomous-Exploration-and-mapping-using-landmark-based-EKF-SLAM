@@ -7,14 +7,14 @@ Use this to cleanly visualize how the stitched global map is evolving.
 
 Usage:
     # Launch the main system in one terminal:
-    ros2 launch multi_robot_mapping full_system.launch.py use_rviz:=false
+    ros2 launch autonomous_exploration full_system.launch.py use_rviz:=false
 
     # Launch this visualization in another terminal:
-    ros2 launch multi_robot_mapping visualize_global_map.launch.py
+    ros2 launch autonomous_exploration visualize_global_map.launch.py
 
     # Or for test mapping:
-    ros2 launch multi_robot_mapping test_mapping.launch.py use_rviz:=false pattern:=long_corridor
-    ros2 launch multi_robot_mapping visualize_global_map.launch.py
+    ros2 launch autonomous_exploration test_mapping.launch.py use_rviz:=false pattern:=long_corridor
+    ros2 launch autonomous_exploration visualize_global_map.launch.py
 """
 
 from launch import LaunchDescription
@@ -29,7 +29,7 @@ def generate_launch_description():
     """Generate launch description for global map visualization only"""
 
     # Package directory
-    pkg_multi_robot = get_package_share_directory('multi_robot_mapping')
+    pkg_multi_robot = get_package_share_directory('autonomous_exploration')
 
     # Launch arguments
     robot_name_arg = DeclareLaunchArgument(

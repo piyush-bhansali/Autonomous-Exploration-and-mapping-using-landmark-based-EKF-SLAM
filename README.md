@@ -1,6 +1,6 @@
-# Multi-Robot SLAM and Autonomous Exploration System
+# Autonomous Exploration System with SLAM
 
-**Complete autonomous exploration system for TurtleBot3 robots using GPU-accelerated SLAM, sensor fusion, and intelligent navigation.**
+**Complete autonomous exploration system for TurtleBot3 using GPU-accelerated SLAM, sensor fusion, and intelligent navigation.**
 
 ---
 
@@ -13,13 +13,13 @@ colcon build --symlink-install
 source install/setup.bash
 
 # Launch full autonomous exploration (maze world)
-ros2 launch multi_robot_mapping full_system.launch.py
+ros2 launch autonomous_exploration full_system.launch.py
 
 # Launch with park world
-ros2 launch multi_robot_mapping full_system.launch.py world:=park
+ros2 launch autonomous_exploration full_system.launch.py world:=park
 
 # Mapping only (no navigation)
-ros2 launch multi_robot_mapping full_system.launch.py enable_navigation:=false
+ros2 launch autonomous_exploration full_system.launch.py enable_navigation:=false
 ```
 
 ---
@@ -135,7 +135,7 @@ Sensor Data (LiDAR 10Hz, IMU 200Hz, Odom 10Hz)
 - `rrt_star.py` - Path planning
 - `pure_pursuit_controller.py` - Path tracking controller
 
-### 3. `multi_robot_mapping` - System Integration
+### 3. `autonomous_exploration` - System Integration
 
 **Launch File:** `full_system.launch.py`
 
@@ -255,13 +255,13 @@ python3 src/map_generation/verify_gpu.py
 ### Basic Autonomous Exploration
 
 ```bash
-ros2 launch multi_robot_mapping full_system.launch.py
+ros2 launch autonomous_exploration full_system.launch.py
 ```
 
 ### Mapping Without Navigation
 
 ```bash
-ros2 launch multi_robot_mapping full_system.launch.py enable_navigation:=false
+ros2 launch autonomous_exploration full_system.launch.py enable_navigation:=false
 
 # Control robot manually
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/tb3_1/cmd_vel

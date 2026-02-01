@@ -118,7 +118,7 @@ class ConvexFrontierDetector:
         
         dist, _ = kdtree.query(candidate)
 
-        if dist < self.robot_radius * 2.0:
+        if dist < 0.5:
             return False
 
         return self._has_open_direction(candidate, kdtree, hull_polygon)
@@ -170,7 +170,7 @@ class ConvexFrontierDetector:
             if self._is_direction_clear(point, check_point, kdtree):
                 open_count += 1
 
-        return open_count >= 2
+        return open_count >= 3
 
     def _is_direction_clear(self,
                            start: np.ndarray,

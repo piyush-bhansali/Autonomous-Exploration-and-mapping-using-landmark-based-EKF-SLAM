@@ -2,10 +2,9 @@
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan, PointCloud2, PointField, Imu
+from sensor_msgs.msg import LaserScan, PointCloud2
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, TransformStamped
-from std_msgs.msg import Header
 from tf2_ros import TransformBroadcaster
 import numpy as np
 import os
@@ -27,7 +26,12 @@ from map_generation.mapping_utils import (
     publish_global_map,
     quaternion_to_rotation_matrix
 )
-from multi_robot_mapping.qos_profiles import SCAN_QOS, ODOM_QOS, IMU_QOS
+from map_generation.transform_utils import (
+    compute_map_to_odom_transform,
+    compute_relative_motion_2d,
+    normalize_angle
+)
+from autonomous_exploration.qos_profiles import SCAN_QOS, ODOM_QOS
 import csv
 import time
 
@@ -73,14 +77,7 @@ class LocalSubmapGenerator(Node):
             LaserScan,
             f'/{self.robot_name}/scan',
             self.scan_callback,
-            SCAN_QOS  
-        )
-
-        self.imu_sub = self.create_subscription(
-            Imu,
-            f'/{self.robot_name}/imu',
-            self.imu_callback,
-            IMU_QOS  
+            SCAN_QOS
         )
 
         self.odom_sub = self.create_subscription(
@@ -121,20 +118,22 @@ class LocalSubmapGenerator(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # State variables
-        self.ekf_path = Path()  
-        self.ekf_path.header.frame_id = f'{self.robot_name}/odom'
-        self.current_pose = None
+        self.ekf_path = Path()
+        self.ekf_path.header.frame_id = 'map'  # EKF path in global map frame
+        self.current_pose = None  # Current pose in map frame (from EKF)
         self.submap_start_pose = None
         self.current_submap_points = []
         self.submap_id = 0
         self.data_lock = Lock()
 
         self.scans_in_current_submap = 0
-        self.total_scans_processed = 0
 
         self.create_timer(1.0, self._publish_global_map_callback)
 
-        self.latest_odom_pose = None
+        # Odometry tracking for delta pose computation
+        self.last_odom_pose = None  # Previous odometry pose (x, y, theta) in odom frame
+        self.latest_odom_pose = None  # Latest odometry pose for map→odom transform computation
+        self.latest_odom_timestamp = None  # Timestamp from latest odometry message
 
         # Ground truth tracking and CSV logging
         self.ground_truth_pose = None
@@ -145,38 +144,113 @@ class LocalSubmapGenerator(Node):
         self.get_logger().info(f'EKF vs Ground Truth data will be saved to: {self.csv_file_path}')
 
     def _publish_global_map_callback(self):
-
+        """Publish global map in map frame."""
         global_points = self.stitcher.get_global_map_points()
         publish_global_map(
             global_points,
             self.global_map_pub,
             self.get_clock(),
-            frame_id=f'{self.robot_name}/odom'
+            frame_id='map'  # Global map is in map frame
         )
 
+    def _publish_map_to_odom_tf(self):
+        """
+        Publish map → odom transform.
+
+        This transform represents the drift correction needed to align
+        the odometry frame with the globally-consistent map frame.
+
+        The transform is computed as:
+            T_map_to_odom = T_map_to_base * inv(T_odom_to_base)
+
+        where:
+            - T_map_to_base is the robot pose in map frame (from EKF)
+            - T_odom_to_base is the robot pose in odom frame (from odometry)
+        """
+        if self.current_pose is None or self.latest_odom_pose is None or self.latest_odom_timestamp is None:
+            self.get_logger().warn(
+                f'Cannot publish map->odom TF: current_pose={self.current_pose is not None}, '
+                f'latest_odom_pose={self.latest_odom_pose is not None}',
+                throttle_duration_sec=5.0
+            )
+            return
+
+        # Get EKF state (robot pose in map frame)
+        ekf_state = (
+            self.current_pose['x'],
+            self.current_pose['y'],
+            self.current_pose['theta']
+        )
+
+        # Get odometry pose (robot pose in odom frame)
+        odom_pose = (
+            self.latest_odom_pose['x'],
+            self.latest_odom_pose['y'],
+            self.latest_odom_pose['theta']
+        )
+
+        # Compute map → odom transform
+        x_correction, y_correction, theta_correction = compute_map_to_odom_transform(
+            ekf_state, odom_pose
+        )
+
+        # Publish map → odom TF (use timestamp from odometry message)
+        t = TransformStamped()
+        t.header.stamp = self.latest_odom_timestamp
+        t.header.frame_id = 'map'  # Parent frame
+        t.child_frame_id = f'{self.robot_name}/odom'  # Child frame
+        t.transform.translation.x = x_correction
+        t.transform.translation.y = y_correction
+        t.transform.translation.z = 0.0
+
+        qx, qy, qz, qw = yaw_to_quaternion(theta_correction)
+        t.transform.rotation.x = qx
+        t.transform.rotation.y = qy
+        t.transform.rotation.z = qz
+        t.transform.rotation.w = qw
+
+        self.tf_broadcaster.sendTransform(t)
+
+    def _publish_odom_to_base_footprint_tf(self, odom_msg):
+        """
+        Publish odom → base_footprint transform.
+
+        This transform represents the robot's pose as reported by wheel odometry.
+        It connects the odom frame to the robot's base_footprint frame.
+
+        Args:
+            odom_msg: Odometry message containing robot pose in odom frame
+        """
+        t = TransformStamped()
+        t.header.stamp = odom_msg.header.stamp
+        t.header.frame_id = f'{self.robot_name}/odom'
+        t.child_frame_id = f'{self.robot_name}/base_footprint'
+
+        # Copy pose directly from odometry message
+        t.transform.translation.x = odom_msg.pose.pose.position.x
+        t.transform.translation.y = odom_msg.pose.pose.position.y
+        t.transform.translation.z = odom_msg.pose.pose.position.z
+
+        t.transform.rotation.x = odom_msg.pose.pose.orientation.x
+        t.transform.rotation.y = odom_msg.pose.pose.orientation.y
+        t.transform.rotation.z = odom_msg.pose.pose.orientation.z
+        t.transform.rotation.w = odom_msg.pose.pose.orientation.w
+
+        self.tf_broadcaster.sendTransform(t)
+
     def _publish_ekf_pose(self):
-        
+        """
+        Publish EKF pose in map frame for visualization.
+        """
         if self.current_pose is None:
             return
 
         current_time = self.get_clock().now().to_msg()
 
-        t = TransformStamped()
-        t.header.stamp = current_time
-        t.header.frame_id = f'{self.robot_name}/odom'
-        t.child_frame_id = f'{self.robot_name}/base_footprint'
-        t.transform.translation.x = self.current_pose['x']
-        t.transform.translation.y = self.current_pose['y']
-        t.transform.translation.z = self.current_pose['z']
-        t.transform.rotation.x = self.current_pose['qx']
-        t.transform.rotation.y = self.current_pose['qy']
-        t.transform.rotation.z = self.current_pose['qz']
-        t.transform.rotation.w = self.current_pose['qw']
-        self.tf_broadcaster.sendTransform(t)
-
+        # Publish EKF pose as PoseStamped (in map frame)
         pose_msg = PoseStamped()
         pose_msg.header.stamp = current_time
-        pose_msg.header.frame_id = f'{self.robot_name}/odom'
+        pose_msg.header.frame_id = 'map'  # EKF pose is in map frame
         pose_msg.pose.position.x = self.current_pose['x']
         pose_msg.pose.position.y = self.current_pose['y']
         pose_msg.pose.position.z = self.current_pose['z']
@@ -186,6 +260,7 @@ class LocalSubmapGenerator(Node):
         pose_msg.pose.orientation.w = self.current_pose['qw']
         self.ekf_pose_pub.publish(pose_msg)
 
+        # Update EKF path (in map frame)
         if len(self.ekf_path.poses) == 0:
             self.ekf_path.poses.append(pose_msg)
         else:
@@ -194,23 +269,24 @@ class LocalSubmapGenerator(Node):
             dy = self.current_pose['y'] - last_pose.pose.position.y
             dist = np.sqrt(dx**2 + dy**2)
 
-            if dist > 0.1:  
+            if dist > 0.1:  # Add point every 10cm
                 self.ekf_path.poses.append(pose_msg)
 
         self.ekf_path.header.stamp = current_time
         self.ekf_path_pub.publish(self.ekf_path)
 
-    def imu_callback(self, msg):
-        
-        if not self.ekf_initialized:
-            return
-
-        omega = msg.angular_velocity.z
-
-        self.ekf.predict_imu(omega)
-
     def odom_callback(self, msg):
-        
+        """
+        Odometry callback - uses relative motion for EKF prediction.
+
+        Approach:
+        1. Extract current pose in odom frame
+        2. Compute delta pose from previous reading
+        3. Convert to control input [Δd, Δθ]
+        4. Apply EKF prediction with motion model
+        5. Publish map → odom transform
+        """
+        # Extract current odometry pose (in odom frame)
         x_odom = msg.pose.pose.position.x
         y_odom = msg.pose.pose.position.y
 
@@ -220,30 +296,70 @@ class LocalSubmapGenerator(Node):
         qw = msg.pose.pose.orientation.w
         theta_odom = quaternion_to_yaw(qx, qy, qz, qw)
 
-        vx = msg.twist.twist.linear.x
-        
+        # Current pose tuple for computations
+        current_odom_pose = (x_odom, y_odom, theta_odom)
 
+        # Store for map→odom transform computation
         self.latest_odom_pose = {
             'x': x_odom,
             'y': y_odom,
-            'z': 0.0,  
+            'z': 0.0,
             'theta': theta_odom,
-            'vx': vx,
             'qx': qx,
             'qy': qy,
             'qz': qz,
             'qw': qw
         }
+        self.latest_odom_timestamp = msg.header.stamp
 
+        # Initialize EKF on first odometry reading
         if not self.ekf_initialized:
-            self.ekf.initialize(x_odom, y_odom, theta_odom, vx, 0.0)
+            # Initialize EKF state in map frame (initially aligned with odom frame)
+            self.ekf.initialize(x_odom, y_odom, theta_odom)
             self.ekf_initialized = True
-            self.get_logger().info(
-                f'EKF initialized at odom pose: ({x_odom:.3f}, {y_odom:.3f}, {np.degrees(theta_odom):.2f}°)'
-            )
-        else:
-            self.ekf.update(x_odom, y_odom, theta_odom, vx_odom=vx)
+            self.last_odom_pose = current_odom_pose
 
+            self.get_logger().info(
+                f'EKF initialized at pose: ({x_odom:.3f}, {y_odom:.3f}, {np.degrees(theta_odom):.2f}°)'
+            )
+
+            # Initialize current pose from EKF
+            state = self.ekf.get_state()
+            qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
+
+            with self.data_lock:
+                self.current_pose = {
+                    'x': state['x'],
+                    'y': state['y'],
+                    'z': 0.0,
+                    'theta': state['theta'],
+                    'qx': qx,
+                    'qy': qy,
+                    'qz': qz,
+                    'qw': qw,
+                    'timestamp': self.get_clock().now().nanoseconds
+                }
+
+                if self.submap_start_pose is None:
+                    self.submap_start_pose = self.current_pose.copy()
+
+            return
+
+        # Compute relative motion from previous odometry reading
+        if self.last_odom_pose is not None:
+            # Compute control input [Δd, Δθ]
+            delta_d, delta_theta = compute_relative_motion_2d(
+                current_odom_pose,
+                self.last_odom_pose
+            )
+
+            # Apply EKF prediction with motion model
+            self.ekf.predict_with_relative_motion(delta_d, delta_theta)
+
+        # Update stored pose
+        self.last_odom_pose = current_odom_pose
+
+        # Get updated EKF state (in map frame)
         state = self.ekf.get_state()
         x = state['x']
         y = state['y']
@@ -266,6 +382,11 @@ class LocalSubmapGenerator(Node):
             if self.submap_start_pose is None:
                 self.submap_start_pose = self.current_pose.copy()
 
+        # Publish odom → base_footprint transform (from odometry)
+        self._publish_odom_to_base_footprint_tf(msg)
+
+        # Publish map → odom transform and EKF pose
+        self._publish_map_to_odom_tf()
         self._publish_ekf_pose()
 
     def ground_truth_callback(self, msg):
@@ -319,31 +440,37 @@ class LocalSubmapGenerator(Node):
         self.csv_file.flush()  # Ensure data is written immediately
 
     def _apply_pose_correction(self, dx: float, dy: float, dtheta: float,
-                               measurement_type: str, vx_odom=None, base_pose=None):
-        """Apply pose correction to EKF and update current pose.
+                               measurement_type: str, base_pose=None):
+        """
+        Apply pose correction to EKF and update current pose.
+
+        This is used for ICP and loop closure corrections.
 
         Args:
             dx: X correction in meters
             dy: Y correction in meters
             dtheta: Theta correction in radians
-            measurement_type: Type of measurement ('icp', 'loop_closure', 'odom')
-            vx_odom: Optional odometry linear velocity
+            measurement_type: Type of measurement ('icp' or 'loop_closure')
             base_pose: Base pose dict to apply correction to (defaults to self.current_pose)
         """
         if base_pose is None:
             base_pose = self.current_pose
 
+        # Compute corrected pose in map frame
         corrected_x = base_pose['x'] + dx
         corrected_y = base_pose['y'] + dy
         corrected_theta = base_pose['theta'] + dtheta
-        corrected_theta = np.arctan2(np.sin(corrected_theta), np.cos(corrected_theta))
+        corrected_theta = normalize_angle(corrected_theta)
 
+        # Apply EKF measurement update
         self.ekf.update(corrected_x, corrected_y, corrected_theta,
-                       vx_odom=vx_odom, measurement_type=measurement_type)
+                       measurement_type=measurement_type)
 
+        # Get updated state from EKF
         state = self.ekf.get_state()
         qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
 
+        # Update current pose
         self.current_pose['x'] = state['x']
         self.current_pose['y'] = state['y']
         self.current_pose['theta'] = state['theta']
@@ -403,8 +530,7 @@ class LocalSubmapGenerator(Node):
                             dy=correction_world[1],
                             dtheta=pose_correction['dtheta'],
                             measurement_type='icp',
-                            vx_odom=self.latest_odom_pose['vx'],
-                            base_pose=self.latest_odom_pose
+                            base_pose=self.current_pose
                         )
 
                         self._publish_ekf_pose()
@@ -420,7 +546,6 @@ class LocalSubmapGenerator(Node):
         with self.data_lock:
             self.current_submap_points.append(points_local)
             self.scans_in_current_submap += 1
-            self.total_scans_processed += 1
 
         if self.should_create_submap():
             self.create_submap()
@@ -482,7 +607,7 @@ class LocalSubmapGenerator(Node):
 
             submap_msg = numpy_to_pointcloud2(
                 points_world_viz,
-                f'{self.robot_name}/odom',
+                'map',  # Submaps are in global map frame
                 self.get_clock().now().to_msg()
             )
             self.current_submap_pub.publish(submap_msg)
@@ -506,8 +631,7 @@ class LocalSubmapGenerator(Node):
                             dx=lc_correction['dx'],
                             dy=lc_correction['dy'],
                             dtheta=lc_correction['dtheta'],
-                            measurement_type='loop_closure',
-                            vx_odom=None
+                            measurement_type='loop_closure'
                         )
 
                         self.get_logger().warn(
@@ -523,8 +647,7 @@ class LocalSubmapGenerator(Node):
                             dx=pose_correction['dx'],
                             dy=pose_correction['dy'],
                             dtheta=pose_correction['dtheta'],
-                            measurement_type='icp',
-                            vx_odom=None
+                            measurement_type='icp'
                         )
 
                     self._publish_ekf_pose()
@@ -544,7 +667,7 @@ class LocalSubmapGenerator(Node):
                     global_points,
                     self.global_map_pub,
                     self.get_clock(),
-                    frame_id=f'{self.robot_name}/odom'
+                    frame_id='map'  # Global map is in map frame
                 )
 
             self.current_submap_points = []

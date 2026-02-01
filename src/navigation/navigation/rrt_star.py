@@ -44,10 +44,10 @@ class RRTStar:
             self.x_min, self.y_min = self.obstacles_2d.min(axis=0)
             self.x_max, self.y_max = self.obstacles_2d.max(axis=0)
 
-        self.x_min -= 2
-        self.x_max += 2
-        self.y_min -= 2
-        self.y_max += 2
+        self.x_min -= 5
+        self.x_max += 5
+        self.y_min -= 5
+        self.y_max += 5
 
     def plan(self,
             start: np.ndarray,

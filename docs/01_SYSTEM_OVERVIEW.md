@@ -1,4 +1,4 @@
-# Multi-Robot SLAM and Autonomous Exploration System
+# Autonomous Exploration System with SLAM
 ## System Overview
 
 **Author:** Piyush Bhansali
@@ -105,7 +105,7 @@ thesis_ws/
 │   │   ├── rrt_star.py                (Path planning)
 │   │   └── pure_pursuit_controller.py (Path tracking)
 │   │
-│   └── multi_robot_mapping/       # Launch & Simulation
+│   └── autonomous_exploration/    # Launch & Simulation
 │       ├── launch/
 │       │   └── full_system.launch.py  (Complete system)
 │       ├── worlds/
@@ -214,7 +214,7 @@ thesis_ws/
 - `scan_danger_distance: 0.5` - Obstacle warning threshold
 - `min_frontier_distance: 2.0` - Minimum frontier selection distance
 
-### 3. Simulation Module (`multi_robot_mapping`)
+### 3. Simulation Module (`autonomous_exploration`)
 
 **Launch File:** `full_system.launch.py`
 **Configurable Options:**
@@ -222,7 +222,7 @@ thesis_ws/
 - `enable_navigation`: true | false (default: true)
 - `use_rviz`: true | false (default: true)
 
-**Supported Robots:** 1-2 TurtleBot3 units (configurable via NUM_ROBOTS)
+**Supported Robots:** TurtleBot3 Waffle Pi (configurable via NUM_ROBOTS)
 
 ---
 
@@ -326,13 +326,13 @@ source install/setup.bash
 ### Launch Full System
 ```bash
 # Complete autonomous exploration (Maze world)
-ros2 launch multi_robot_mapping full_system.launch.py
+ros2 launch autonomous_exploration full_system.launch.py
 
 # Open environment
-ros2 launch multi_robot_mapping full_system.launch.py world:=park
+ros2 launch autonomous_exploration full_system.launch.py world:=park
 
 # Mapping only (no navigation)
-ros2 launch multi_robot_mapping full_system.launch.py enable_navigation:=false
+ros2 launch autonomous_exploration full_system.launch.py enable_navigation:=false
 ```
 
 ### Monitor Performance

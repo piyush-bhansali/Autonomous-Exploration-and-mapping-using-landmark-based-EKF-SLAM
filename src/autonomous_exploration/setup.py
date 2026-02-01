@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 from glob import glob
 import os
 
-package_name = 'multi_robot_mapping'
+package_name = 'autonomous_exploration'
 
 def files_only(pattern):
     """Helper to filter out directories from glob results"""
@@ -61,7 +61,7 @@ setup(
     maintainer='piyush',
     maintainer_email='piyushbhansali8@gmail.com',
     
-    description='Multi-robot SLAM system with TurtleBot3 in Gazebo Harmonic',
+    description='Autonomous exploration system with TurtleBot3 SLAM in Gazebo Harmonic',
     license='Apache-2.0',
     
     tests_require=['pytest'],

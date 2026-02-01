@@ -20,7 +20,6 @@ class PurePursuit:
         self.velocity_gain = 0.5  # Velocity reduction factor on sharp turns
 
         self.omega_smooth = 0.0  # Smoothed angular velocity
-        self.prev_time = None    # For tracking control frequency
 
     def compute_control(self,
                        robot_pos: np.ndarray,  # [x, y]
@@ -99,8 +98,3 @@ class PurePursuit:
         angular_velocity = velocity * curvature
 
         return angular_velocity
-
-    def reset(self):
-
-        self.omega_smooth = 0.0
-        self.prev_time = None
