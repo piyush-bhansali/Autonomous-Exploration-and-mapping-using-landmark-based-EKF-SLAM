@@ -29,8 +29,6 @@ The mapping module consists of 8 Python files implementing GPU-accelerated SLAM 
 | `mapping_utils.py` | Coordinate transforms, scan-to-map ICP | ~374 | GPU+CPU |
 | `ekf_lib.py` | Extended Kalman Filter for pose estimation | ~203 | CPU |
 | `feature_extractor.py` | FPFH and geometric feature extraction | ~258 | GPU→CPU |
-| `loop_closure_detector.py` | Loop detection and verification | ~403 | GPU+CPU |
-| `gtsam_optimizer.py` | Pose graph optimization | ~296 | CPU |
 | `utils.py` | ROS2 message conversions, quaternion math | ~73 | CPU |
 
 ---
@@ -121,8 +119,6 @@ The mapping module consists of 8 Python files implementing GPU-accelerated SLAM 
    • LaserScan parsing
    • Quaternion math
    • ROS message conversions
-   • GTSAM pose graph optimization
-   • Scan Context matching (numpy operations)
 ```
 
 ---
@@ -143,7 +139,6 @@ def __init__(self):
     self.declare_parameter('save_directory', './submaps')          # str
     self.declare_parameter('voxel_size', 0.05)                     # float
     self.declare_parameter('feature_method', 'hybrid')             # str
-    self.declare_parameter('enable_loop_closure', True)            # bool
 ```
 
 #### Key Methods with Data Types
@@ -200,7 +195,6 @@ def __init__(self):
     # Measurement noise matrices: np.ndarray (3x3)
     self.R_odom = np.diag([0.005, 0.005, 0.02])          # Odometry noise
     self.R_icp = np.diag([0.0001, 0.0001, 0.0001])       # ICP noise (very accurate)
-    self.R_loop_closure = np.diag([0.0025, 0.0025, 0.0001])  # Loop closure noise
 
     # Process noise: np.ndarray (3x3)
     self.Q_imu = np.diag([0.0001, 0.0001, 0.0001])       # IMU prediction noise
@@ -234,7 +228,6 @@ y_pred = y + vx·sin(θ)·dt
 P = F @ P @ F.T + Q_imu
 ```
 
-**Update (Odometry/ICP/Loop Closure):**
 ```python
 K = P @ H.T @ (H @ P @ H.T + R)^(-1)  # Kalman gain
 state = state + K @ (z - H @ state)     # State update
@@ -255,7 +248,6 @@ def __init__(self,
              icp_max_correspondence_dist: float = 0.1,          # m
              icp_fitness_threshold: float = 0.45,               # ratio
              feature_extraction_method: str = 'hybrid',         # 'fpfh'|'iss'|'hybrid'
-             enable_loop_closure: bool = True):                 # bool
 ```
 
 | Parameter | Default | Type | Range | Impact |
@@ -264,7 +256,6 @@ def __init__(self,
 | `icp_max_correspondence_dist` | 0.1m | `float` | 0.05-0.3m | ICP convergence |
 | `icp_fitness_threshold` | 0.45 | `float` | 0.3-0.7 | ICP acceptance |
 | `feature_extraction_method` | 'hybrid' | `str` | 'fpfh', 'iss', 'hybrid' | Loop closure |
-| `enable_loop_closure` | True | `bool` | True/False | Enable LC |
 
 #### Methods with Data Types
 
@@ -316,7 +307,6 @@ Output: global_map_tensor (o3d.t.geometry.PointCloud, GPU VRAM)
 
 ### 4. `FeatureExtractor` (feature_extractor.py)
 
-**Purpose**: Extract geometric features for loop closure (GPU→CPU).
 
 #### Constructor Parameters
 
@@ -342,7 +332,6 @@ def __init__(self,
 | **geometric** | np.ndarray (K, 4) | Medium | GPU (NNS) → CPU | Local features |
 | **hybrid** | Both above | Medium | GPU→CPU | General purpose (recommended) |
 
-#### Scan Context Descriptor
 
 ```python
 # Parameters
@@ -370,9 +359,7 @@ num_sectors: 60
 
 ---
 
-### 5. `LoopClosureDetector` (loop_closure_detector.py)
 
-**Purpose**: Multi-stage loop closure detection (GPU+CPU).
 
 #### Constructor Parameters
 
@@ -390,7 +377,6 @@ def __init__(self,
 | Method | Input Types | Output Types | Device |
 |--------|-------------|--------------|--------|
 | `add_submap_to_index()` | `int, np.ndarray (2,)` | None | CPU |
-| `detect_loop_closure()` | `Dict, List[Dict], float` | `Optional[Dict]` | GPU+CPU |
 | `_stage1_coarse_matching()` | `Dict, List[Dict], float` | `List[Dict]` | CPU |
 | `_stage2_fine_verification()` | `Dict, List[Dict]` | `Optional[Dict]` | GPU+CPU |
 | `_ransac_2d()` | `np.ndarray (N, 3) × 2, int` | `Tuple[np.ndarray (4x4), np.ndarray (N,) bool]` | CPU |
@@ -403,8 +389,6 @@ def __init__(self,
 ```
 Stage 1: Coarse Matching (CPU)
 ├─ Spatial filtering (KD-tree): candidates within 5m radius
-├─ Scan Context cosine similarity: score > 0.65
-├─ Scan Context voting agreement: ratio > 0.5
 └─ Output: Top 5 candidates
 
 Stage 2: Fine Verification (GPU+CPU)
@@ -418,9 +402,7 @@ Output: Loop closure dict with transform (np.ndarray 4x4)
 
 ---
 
-### 6. `GTSAMOptimizer` (gtsam_optimizer.py)
 
-**Purpose**: Pose graph optimization using GTSAM (CPU-based).
 
 #### Constructor Parameters
 
@@ -437,25 +419,18 @@ def __init__(self,
 | Method | Input Types | Output Types | Device |
 |--------|-------------|--------------|--------|
 | `optimize_pose_graph()` | `List[Dict], Dict` | `Optional[List[np.ndarray (4x4)]]` | CPU |
-| `optimize_with_multiple_loop_closures()` | `List[Dict], List[Dict]` | `Optional[List[np.ndarray (4x4)]]` | CPU |
 | `get_statistics()` | None | `Dict` | CPU |
 
 #### Optimization Process
 
 ```python
-Input:  submaps (List[Dict]), loop_closure (Dict)
    ↓
-Step 1: Build GTSAM graph
-   - Prior factor on first pose: gtsam.PriorFactorPose2
-   - Odometry factors: gtsam.BetweenFactorPose2 (consecutive submaps)
-   - Loop closure factor: gtsam.BetweenFactorPose2 (matched submaps)
    ↓
 Step 2: Levenberg-Marquardt optimization
    - Max iterations: 100
    - Convergence: relative_error < 1e-5
    ↓
 Step 3: Extract optimized poses
-   - Convert gtsam.Pose2 → np.ndarray (4x4)
    ↓
 Output: List[np.ndarray (4x4)] - optimized transforms
 ```
@@ -500,8 +475,6 @@ Output: np.ndarray (CPU RAM), dict
 **Signature:**
 ```python
 def match_scan_context_cosine(
-    sc1: np.ndarray,          # (1, 1200) or (20, 60) - Scan Context 1
-    sc2: np.ndarray,          # (1, 1200) or (20, 60) - Scan Context 2
     num_rings: int = 20,      # Number of rings
     num_sectors: int = 60     # Number of sectors
 ) -> Tuple[float, int]:      # (best_similarity, best_shift)
@@ -518,8 +491,6 @@ def match_scan_context_cosine(
 **Signature:**
 ```python
 def match_scan_context_with_voting(
-    sc1: np.ndarray,                # (1, 1200) - Scan Context 1
-    sc2: np.ndarray,                # (1, 1200) - Scan Context 2
     num_rings: int = 20,
     num_sectors: int = 60,
     threshold: float = 0.5          # Minimum agreement ratio
@@ -545,7 +516,6 @@ def is_distinctive_submap(
 
 **Device**: CPU
 **Time**: ~1-2ms
-**Purpose**: Reject corridors/featureless areas for loop closure
 
 ---
 
@@ -706,8 +676,6 @@ def quaternion_to_rotation_matrix(
 | **LaserScan Parsing** | `transform_scan_to_relative_frame()` | Sequential processing, low computational cost |
 | **Quaternion Math** | `quaternion_to_yaw()`, etc. | Scalar operations |
 | **ROS Conversions** | `numpy_to_pointcloud2()` | Memory formatting, not compute-intensive |
-| **GTSAM Optimization** | `GTSAMOptimizer.optimize_pose_graph()` | External library (CPU-based) |
-| **Scan Context Matching** | `match_scan_context_cosine()` | Numpy operations, small data size |
 | **RANSAC** | `_ransac_2d()` | Random sampling, requires CPU control flow |
 
 ### **Memory Transfer Points (CPU ↔ GPU)**
@@ -743,10 +711,7 @@ def quaternion_to_rotation_matrix(
 | Parameter | Location | Default | Type | Impact | Tuning Range |
 |-----------|----------|---------|------|--------|--------------|
 | **icp_max_correspondence_dist** | SubmapStitcher | 0.1m | float | ICP convergence radius | 0.05-0.3m |
-| **R_loop_closure** | EKF | [0.0025, 0.0025, 0.0001] | np.ndarray (3,) | Loop closure trust | 0.001-0.005 |
-| **enable_loop_closure** | SubmapStitcher | True | bool | Enable loop detection | True/False |
 | **feature_method** | FeatureExtractor | 'hybrid' | str | Feature type | 'fpfh', 'iss', 'hybrid', 'scan_context', 'geometric' |
-| **spatial_search_radius** | LoopClosureDetector | 5.0m | float | Loop candidate search | 3-10m |
 
 ---
 
@@ -754,11 +719,6 @@ def quaternion_to_rotation_matrix(
 
 | Parameter | Location | Default | Type | Impact | Tuning Range |
 |-----------|----------|---------|------|--------|--------------|
-| **scan_context_threshold** | LoopClosureDetector | 0.7 | float | Place recognition strictness | 0.6-0.9 |
-| **min_feature_matches** | LoopClosureDetector | 15 | int | Feature matching requirement | 10-30 |
-| **ransac_threshold** | LoopClosureDetector | 0.1m | float | RANSAC inlier threshold | 0.05-0.2m |
-| **translation_noise_sigma** | GTSAMOptimizer | 0.1m | float | GTSAM translation uncertainty | 0.05-0.3m |
-| **rotation_noise_sigma** | GTSAMOptimizer | 0.05rad | float | GTSAM rotation uncertainty | 0.01-0.1rad |
 | **save_directory** | LocalSubmapGenerator | './submaps' | str | Map save location | Any path |
 | **robot_name** | LocalSubmapGenerator | 'tb3_1' | str | ROS2 namespace | Any string |
 
@@ -792,7 +752,6 @@ scans_per_submap = 60          # Standard
 voxel_size = 0.04              # Medium-high resolution
 icp_fitness_threshold = 0.35   # More lenient (poor constraints)
 R_odom = [0.006, 0.006, 0.025] # Balanced trust
-enable_loop_closure = False    # Corridors not distinctive
 ```
 
 #### **Cluttered Environments (Furniture, Obstacles)**
@@ -800,7 +759,6 @@ enable_loop_closure = False    # Corridors not distinctive
 scans_per_submap = 40          # More frequent submaps
 voxel_size = 0.04              # Higher resolution
 icp_fitness_threshold = 0.5    # Stricter (good features)
-enable_loop_closure = True     # Helpful for revisiting
 feature_method = 'hybrid'      # Use all features
 ```
 
@@ -872,11 +830,9 @@ R_icp = [0.00008, 0.00008, 0.00008]  # Trust ICP corrections more
 
 **Solution**:
 ```python
-enable_loop_closure = True         # Ensure enabled
 spatial_search_radius = 7.0        # Larger search radius
 scan_context_threshold = 0.65      # Lower threshold (more lenient)
 min_feature_matches = 10           # Fewer required matches
-icp_fitness_threshold = 0.25       # More lenient ICP (loop closure)
 ```
 
 ---
@@ -885,10 +841,6 @@ icp_fitness_threshold = 0.25       # More lenient ICP (loop closure)
 
 | Priority | Configuration | Use Case | GPU Load | CPU Load |
 |----------|---------------|----------|----------|----------|
-| **Max Speed** | voxel_size=0.1, scans_per_submap=120, loop_closure=False | Fast exploration | Low | Low |
-| **Max Quality** | voxel_size=0.02, scans_per_submap=30, loop_closure=True, feature_method='hybrid' | Detailed mapping | High | Medium |
-| **Balanced** | voxel_size=0.05, scans_per_submap=80, loop_closure=True | General purpose | Medium | Medium |
-| **GPU-Limited** | voxel_size=0.06, scans_per_submap=100, loop_closure=False | No CUDA GPU | N/A | High |
 
 ---
 
@@ -924,8 +876,6 @@ LaserScan (ROS msg)
 1. `local_submap_generator.py` - Main parameters (lines 39-53)
 2. `ekf_lib.py` - Noise covariances (lines 17-39)
 3. `submap_stitcher.py` - ICP thresholds (lines 17-26)
-4. `loop_closure_detector.py` - Loop detection thresholds (lines 23-33)
-5. `gtsam_optimizer.py` - Pose graph parameters (lines 11-19)
 
 ---
 

@@ -3,12 +3,9 @@
 import numpy as np
 import open3d as o3d
 import open3d.core as o3c
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict
 import time
-import os
 from map_generation.feature_extractor import FeatureExtractor
-from map_generation.loop_closure_detector import LoopClosureDetector
-from map_generation.gtsam_optimizer import GTSAMOptimizer
 
 
 class SubmapStitcher:
@@ -17,21 +14,18 @@ class SubmapStitcher:
                  voxel_size: float = 0.05,
                  icp_max_correspondence_dist: float = 0.05,
                  icp_fitness_threshold: float = 0.45,
-                 feature_extraction_method: str = 'hybrid',
-                 enable_loop_closure: bool = True):
+                 feature_extraction_method: str = 'hybrid'):
 
         self.voxel_size = voxel_size
         self.icp_max_dist = icp_max_correspondence_dist
         self.icp_fitness_threshold = icp_fitness_threshold
-        self.enable_loop_closure = enable_loop_closure
-
         # GPU configuration (always enabled)
         if o3c.cuda.is_available():
             self.device = o3c.Device("CUDA:0")
         else:
             self.device = o3c.Device("CPU:0")
 
-        # Submap storage (for loop closure)
+        # Submap storage
         self.submaps = []
         self.global_map_tensor = o3d.t.geometry.PointCloud(self.device)
 
@@ -43,17 +37,6 @@ class SubmapStitcher:
         self.feature_extractor = FeatureExtractor(
             method=feature_extraction_method
         )
-
-        # Loop closure
-        if enable_loop_closure:
-            self.loop_closure_detector = LoopClosureDetector()
-            self.gtsam_optimizer = GTSAMOptimizer(
-                translation_noise_sigma=0.1,  
-                rotation_noise_sigma=0.05       
-            )
-        else:
-            self.loop_closure_detector = None
-            self.gtsam_optimizer = None
 
     def process_submap(self, points: np.ndarray, submap_id: int) -> o3d.t.geometry.PointCloud:
 
@@ -142,10 +125,7 @@ class SubmapStitcher:
             'qw': end_pose['qw']
         }
 
-        features = None
-        if self.enable_loop_closure:
-            
-            features = self.extract_features(pcd_tensor, submap_id)
+        features = self.extract_features(pcd_tensor, submap_id)
 
         global_transform = transformation_matrix
 
@@ -168,12 +148,6 @@ class SubmapStitcher:
             }
 
             self.submaps.append(submap_data)
-
-            if self.loop_closure_detector is not None:
-                self.loop_closure_detector.add_submap_to_index(
-                    submap_id,
-                    np.array([pose_center['x'], pose_center['y']])
-                )
 
             return True, None  
 
@@ -220,100 +194,6 @@ class SubmapStitcher:
 
         self.submaps.append(submap_data)
 
-        if self.loop_closure_detector is not None:
-            self.loop_closure_detector.add_submap_to_index(
-                submap_id,
-                np.array([pose_center['x'], pose_center['y']])
-            )
-
-        if self.enable_loop_closure:
-            if features is not None:
-                loop_closure = self.loop_closure_detector.detect_loop_closure(
-                    submap_data,
-                    self.submaps,
-                    min_time_separation=30.0
-                )
-
-                if loop_closure is not None:
-                    # Extract loop closure details
-                    current_id = loop_closure['current_id']
-                    match_id = loop_closure['match_id']
-                    fitness = loop_closure['fitness']
-                    num_inliers = loop_closure['num_inliers']
-                    similarity = loop_closure.get('scan_context_similarity', 0.0)
-
-                    print(f"\n{'='*80}")
-                    print(f"  ✓✓✓ LOOP CLOSURE DETECTED ✓✓✓")
-                    print(f"{'='*80}")
-                    print(f"  Current Submap:     {current_id}")
-                    print(f"  Matched Submap:     {match_id}")
-                    print(f"  Time Separation:    {self.submaps[current_id]['timestamp_created'] - self.submaps[match_id]['timestamp_created']:.1f}s")
-                    print(f"  ICP Fitness:        {fitness:.4f}")
-                    print(f"  RANSAC Inliers:     {num_inliers}")
-                    print(f"  Scan Context Score: {similarity:.4f}")
-                    print(f"  Method:             {loop_closure['method']}")
-                    print(f"{'-'*80}")
-
-                    # Use GTSAM for pose graph optimization
-                    optimized_transforms = self.gtsam_optimizer.optimize_pose_graph(
-                        submaps=self.submaps,
-                        loop_closure=loop_closure
-                    )
-
-                    if optimized_transforms is not None:
-                        # Calculate pose correction for current robot position
-                        current_submap_id = len(self.submaps) - 1  # Most recent submap
-                        old_transform = self.submaps[current_submap_id]['global_transform']  # Before optimization
-                        new_transform = optimized_transforms[current_submap_id]  # After optimization
-
-                        pose_correction_matrix = np.linalg.inv(old_transform) @ new_transform
-
-                        # Extract 2D correction
-                        dx_lc = pose_correction_matrix[0, 3]
-                        dy_lc = pose_correction_matrix[1, 3]
-                        dtheta_lc = np.arctan2(pose_correction_matrix[1, 0], pose_correction_matrix[0, 0])
-
-                        # Calculate total correction magnitude
-                        translation_correction = np.sqrt(dx_lc**2 + dy_lc**2)
-
-                        # Store loop closure correction for robot pose update
-                        loop_closure_correction = {
-                            'dx': dx_lc,
-                            'dy': dy_lc,
-                            'dtheta': dtheta_lc,
-                            'submap_id': current_submap_id,
-                            'loop_match_id': loop_closure['match_id']
-                        }
-
-                        print(f"  POSE GRAPH OPTIMIZATION:")
-                        print(f"    Translation Correction: {translation_correction:.3f}m (dx={dx_lc:.3f}m, dy={dy_lc:.3f}m)")
-                        print(f"    Rotation Correction:    {np.degrees(dtheta_lc):.2f}°")
-                        print(f"    Applied to Submap:      {current_submap_id}")
-
-                        for i, optimized_transform in enumerate(optimized_transforms):
-                            self.submaps[i]['global_transform'] = optimized_transform
-
-                        self._rebuild_global_map()
-
-                        stats = self.gtsam_optimizer.get_statistics()
-                        if stats['last_error'] is not None:
-                            initial_error = stats['last_error']['initial']
-                            final_error = stats['last_error']['final']
-                            error_reduction = stats['last_error']['improvement']
-                            improvement_pct = (error_reduction / initial_error * 100) if initial_error > 0 else 0
-
-                            print(f"  GTSAM OPTIMIZATION RESULTS:")
-                            print(f"    Initial Error:      {initial_error:.4f}")
-                            print(f"    Final Error:        {final_error:.4f}")
-                            print(f"    Error Reduction:    {error_reduction:.4f} ({improvement_pct:.1f}%)")
-                            print(f"    Total Optimizations: {stats['optimization_count']}")
-
-                        print(f"{'='*80}\n")
-
-                        if pose_correction is None:
-                            pose_correction = {}
-                        pose_correction['loop_closure'] = loop_closure_correction
-
         self.global_map_tensor.point.positions = o3c.concatenate([
             self.global_map_tensor.point.positions,
             pcd_aligned_tensor.point.positions
@@ -346,14 +226,14 @@ class SubmapStitcher:
         return self._cached_numpy_map
 
     def _rebuild_global_map(self):
-        """Rebuild global map after loop closure optimization"""
+        """Rebuild global map after global transform updates."""
         # Clear current global map
         self.global_map_tensor = o3d.t.geometry.PointCloud(self.device)
 
-        # Re-stitch all submaps with optimized transforms
+        # Re-stitch all submaps with current transforms
         for submap in self.submaps:
-            
-            pcd_tensor = submap['point_cloud']  
+
+            pcd_tensor = submap['point_cloud']
             transform_tensor = o3c.Tensor(submap['global_transform'], dtype=o3c.float32, device=self.device)
             pcd_transformed = pcd_tensor.transform(transform_tensor)
 

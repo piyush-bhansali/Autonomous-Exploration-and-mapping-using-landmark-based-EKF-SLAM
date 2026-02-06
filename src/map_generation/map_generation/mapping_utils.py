@@ -65,11 +65,63 @@ def scan_to_map_icp(
             dy = transform[1, 3]
             dtheta = np.arctan2(transform[1, 0], transform[0, 0])
 
+            covariance = None
+            try:
+                # Estimate covariance from point-to-point residuals (2D)
+                # P = sigma^2 * (sum_i J_i^T J_i)^-1
+                tree = KDTree(accumulated_points_world[:, :2])
+                transformed_source = points_corrected[:, :2]
+                distances, indices = tree.query(transformed_source)
+
+                max_dist = 0.1
+                inlier_mask = distances < max_dist
+                if np.count_nonzero(inlier_mask) >= 6:
+                    src_inliers = scan_points_world[inlier_mask][:, :2]
+                    tgt_inliers = accumulated_points_world[indices[inlier_mask]][:, :2]
+
+                    c = np.cos(dtheta)
+                    s = np.sin(dtheta)
+                    R = np.array([[c, -s], [s, c]])
+                    dR_dtheta = np.array([[-s, -c], [c, -s]])
+
+                    A = np.zeros((3, 3))
+                    rss = 0.0
+                    dof = 0
+
+                    for p_s, p_t in zip(src_inliers, tgt_inliers):
+                        p_pred = (R @ p_s) + np.array([dx, dy])
+                        r = p_t - p_pred
+
+                        dp_dtheta = dR_dtheta @ p_s
+
+                        J = np.array([
+                            [-1.0, 0.0, -dp_dtheta[0]],
+                            [0.0, -1.0, -dp_dtheta[1]]
+                        ])
+
+                        A += J.T @ J
+                        rss += float(r.T @ r)
+                        dof += 2
+
+                    dof = max(dof - 3, 1)
+                    sigma2 = rss / dof
+
+                    try:
+                        A_inv = np.linalg.inv(A)
+                    except np.linalg.LinAlgError:
+                        A_inv = np.linalg.pinv(A)
+
+                    covariance = sigma2 * A_inv
+            except Exception as e:
+                if logger:
+                    logger.warn(f'ICP covariance estimation failed: {e}', throttle_duration_sec=5.0)
+
             pose_correction = {
                 'dx': dx,
                 'dy': dy,
                 'dtheta': dtheta,
-                'fitness': fitness
+                'fitness': fitness,
+                'covariance': covariance
             }
 
             return points_corrected, pose_correction
@@ -80,95 +132,6 @@ def scan_to_map_icp(
         if logger:
             logger.warn(f'Scan-to-map ICP failed: {e}', throttle_duration_sec=5.0)
         return scan_points_world, None
-
-
-def match_scan_context_cosine(
-    sc1: np.ndarray,
-    sc2: np.ndarray,
-    num_rings: int = 20,
-    num_sectors: int = 60
-) -> Tuple[float, int]:
-    
-    if sc1.ndim == 1:
-        grid1 = sc1.reshape(num_rings, num_sectors)
-    elif sc1.shape[0] == 1:
-        grid1 = sc1.reshape(num_rings, num_sectors)
-    else:
-        grid1 = sc1
-
-    if sc2.ndim == 1:
-        grid2 = sc2.reshape(num_rings, num_sectors)
-    elif sc2.shape[0] == 1:
-        grid2 = sc2.reshape(num_rings, num_sectors)
-    else:
-        grid2 = sc2
-
-    best_sim = -1
-    best_shift = 0
-
-    for shift in range(num_sectors):
-        grid2_shifted = np.roll(grid2, shift, axis=1)
-
-        flat1 = grid1.flatten()
-        flat2 = grid2_shifted.flatten()
-
-        norm1 = np.linalg.norm(flat1)
-        norm2 = np.linalg.norm(flat2)
-
-        if norm1 > 0 and norm2 > 0:
-            similarity = np.dot(flat1, flat2) / (norm1 * norm2)
-
-            if similarity > best_sim:
-                best_sim = similarity
-                best_shift = shift
-
-    return best_sim, best_shift
-
-
-def match_scan_context_with_voting(
-    sc1: np.ndarray,
-    sc2: np.ndarray,
-    num_rings: int = 20,
-    num_sectors: int = 60,
-    threshold: float = 0.5
-) -> Tuple[float, int, Optional[np.ndarray]]:
-    
-    if sc1.ndim == 1:
-        grid1 = sc1.reshape(num_rings, num_sectors)
-    elif sc1.shape[0] == 1:
-        grid1 = sc1.reshape(num_rings, num_sectors)
-    else:
-        grid1 = sc1
-
-    if sc2.ndim == 1:
-        grid2 = sc2.reshape(num_rings, num_sectors)
-    elif sc2.shape[0] == 1:
-        grid2 = sc2.reshape(num_rings, num_sectors)
-    else:
-        grid2 = sc2
-
-    best_agreement = 0
-    best_shift = 0
-    best_mask = None
-
-    for shift in range(num_sectors):
-        grid2_shifted = np.roll(grid2, shift, axis=1)
-
-        both_occupied = (grid1 > 0.5) & (grid2_shifted > 0.5)
-        both_empty = (grid1 <= 0.5) & (grid2_shifted <= 0.5)
-        agreement_mask = both_occupied | both_empty
-
-        agreement_ratio = np.sum(agreement_mask) / agreement_mask.size
-
-        if agreement_ratio > best_agreement:
-            best_agreement = agreement_ratio
-            best_shift = shift
-            best_mask = agreement_mask
-
-    if best_agreement < threshold:
-        return 0.0, 0, None
-
-    return best_agreement, best_shift, best_mask
 
 
 def is_distinctive_submap(

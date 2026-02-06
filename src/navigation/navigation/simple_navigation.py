@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from geometry_msgs.msg import Twist, Point
-from nav_msgs.msg import Odometry, Path
+from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import PointCloud2, LaserScan
 from visualization_msgs.msg import Marker, MarkerArray

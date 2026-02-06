@@ -97,7 +97,6 @@ The SLAM mapping module builds accurate 3D point cloud maps in real-time using:
 |--------|-----------|
 | **Memory** | O(N) → O(n × k) where n << N |
 | **Computation** | Smaller ICP search spaces |
-| **Loop Closure** | Submap-level associations |
 | **Recovery** | Errors isolated to submaps |
 
 ### Submap Lifecycle
@@ -120,7 +119,6 @@ for each scan:
         # Submap complete
         4. Create PointCloud from accumulated scans
         5. Voxel downsample (5cm)
-        6. Extract features (Scan Context)
         7. Send to Submap Stitcher
         8. Reset current_submap_scans = []
         9. scan_count = 0
@@ -467,7 +465,6 @@ self.declare_parameter('scans_per_submap', 80)
 self.declare_parameter('save_directory', './submaps')
 self.declare_parameter('voxel_size', 0.05)
 self.declare_parameter('feature_method', 'hybrid')
-self.declare_parameter('enable_loop_closure', True)
 ```
 
 ### Tuning Guide
@@ -476,7 +473,6 @@ self.declare_parameter('enable_loop_closure', True)
 |-----------|---------|--------|--------|
 | `scans_per_submap` | 80 | Submap size | ↑ = larger submaps, less overhead<br>↓ = smaller submaps, more features |
 | `voxel_size` | 0.05 | Downsampling | ↑ = faster, less detail<br>↓ = slower, more detail |
-| `enable_loop_closure` | true | Global optimization | true = consistent, slower<br>false = fast, drifts over time |
 
 ### ICP Tuning
 
@@ -568,10 +564,8 @@ Solution:
 **Issue 3: Map Drift**
 ```
 Symptom: Map distorts over time
-Cause: EKF tuning issues or loop closure disabled
 Solution:
 - Reduce: Q (process noise) in EKF
-- Enable: loop closure detection (enable_loop_closure = true)
 - Tune: R_icp (ICP measurement noise) for better scan-to-map corrections
 ```
 

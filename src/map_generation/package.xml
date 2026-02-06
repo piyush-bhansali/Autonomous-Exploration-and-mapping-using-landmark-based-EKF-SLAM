@@ -3,7 +3,7 @@
 <package format="3">
   <name>map_generation</name>
   <version>0.1.0</version>
-  <description>SLAM mapping with EKF fusion, loop closure detection, and GTSAM optimization</description>
+  <description>SLAM mapping with EKF fusion and ICP corrections</description>
   <maintainer email="piyushbhansali8@gmail.com">piyush</maintainer>
   <license>Apache-2.0</license>
 
@@ -13,8 +13,6 @@
   <depend>tf2_ros</depend>
   <depend>tf2_sensor_msgs</depend>
 
-  <!-- GTSAM for pose graph optimization -->
-  <exec_depend>python3-gtsam</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

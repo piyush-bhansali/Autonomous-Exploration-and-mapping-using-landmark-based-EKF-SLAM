@@ -59,7 +59,6 @@ The system enables robots to autonomously explore unknown environments, build ac
 │  │  ┌─────────┐  ┌─────────┐  ┌──────────────────────────┐ │   │
 │  │  │   EKF   │  │Scan-to- │  │    Submap Stitcher       │ │   │
 │  │  │ Fusion  │→ │Map ICP  │→ │  - Feature Extraction    │ │   │
-│  │  │200 Hz   │  │GPU-Accel│  │  - Loop Closure (GTSAM)  │ │   │
 │  │  └─────────┘  └─────────┘  └──────────────────────────┘ │   │
 │  └──────────────────────────────────┬───────────────────────┘   │
 │                                     │                            │
@@ -94,9 +93,6 @@ thesis_ws/
 │   │   ├── local_submap_generator.py  (Main SLAM node)
 │   │   ├── ekf_lib.py                 (EKF sensor fusion)
 │   │   ├── submap_stitcher.py         (Map integration)
-│   │   ├── feature_extractor.py       (Scan Context features)
-│   │   ├── loop_closure_detector.py   (Place recognition)
-│   │   ├── gtsam_optimizer.py         (Pose graph optimization)
 │   │   └── mapping_utils.py           (ICP, transforms)
 │   │
 │   ├── navigation/                # Autonomous Exploration
@@ -124,8 +120,6 @@ thesis_ws/
 - ✅ **Sensor Fusion**: EKF combines IMU (200Hz), Odometry (10Hz), and ICP corrections
 - ✅ **Submap-Based Mapping**: Memory-efficient incremental map building (80 scans/submap)
 - ✅ **Real-time ICP**: Scan-to-map alignment for drift correction every scan
-- ✅ **Loop Closure Detection**: Scan Context + RANSAC + ICP verification
-- ✅ **Pose Graph Optimization**: GTSAM-based backend for global consistency
 - ✅ **Point Cloud Maps**: No occupancy grid conversion - native 3D representation
 
 ### Navigation & Exploration
@@ -156,7 +150,6 @@ thesis_ws/
 | **Middleware** | ROS2 | Jazzy (Iron) | Robot communication framework |
 | **Simulator** | Gazebo | Harmonic | Physics-based environment simulation |
 | **Point Cloud** | Open3D | 0.18+ | GPU-accelerated 3D processing |
-| **Optimization** | GTSAM | 4.2+ | Pose graph backend |
 | **Clustering** | scikit-learn | Latest | DBSCAN frontier clustering |
 | **Numerical** | NumPy | Latest | Matrix operations |
 | **Spatial** | SciPy | Latest | KD-trees, transformations |
@@ -194,7 +187,6 @@ thesis_ws/
 **Key Parameters:**
 - `scans_per_submap: 80` - Number of scans before creating new submap
 - `voxel_size: 0.05` - Downsampling resolution (5cm)
-- `enable_loop_closure: true` - Enable GTSAM optimization
 
 ### 2. Navigation Module (`navigation`)
 
@@ -255,7 +247,6 @@ Accumulate in Current Submap
     ↓
 (if 80 scans reached)
     ↓
-Create New Submap → Extract Features → Loop Closure Check
     ↓
 Merge into Global Map (GPU-accelerated)
 ```
@@ -288,9 +279,7 @@ Publish cmd_vel
 | **Map Update Rate** | 10 Hz | Every LiDAR scan processed |
 | **Submap Generation** | 0.1 Hz | Every 8 seconds (80 scans) |
 | **ICP Alignment Time** | <50 ms | GPU-accelerated |
-| **Loop Closure Detection** | 1 Hz | Continuous background checks |
 | **Pose Estimation** | 200 Hz | EKF prediction rate |
-| **Map Accuracy** | <5 cm | With loop closure enabled |
 
 ### Navigation Performance
 
@@ -359,7 +348,6 @@ This documentation is organized into the following modules:
 1. **System Overview** (this document)
 2. **SLAM & Mapping Module** - Point cloud mapping, submaps, ICP
 3. **EKF Sensor Fusion** - Multi-sensor localization
-4. **Loop Closure & Optimization** - GTSAM backend, Scan Context features
 5. **Navigation Module** - Frontier detection, RRT*, Pure Pursuit
 6. **ROS2 Integration** - Nodes, topics, launch files, parameters
 
@@ -371,7 +359,6 @@ Each document provides in-depth technical details, algorithms, and implementatio
 
 - **ROS2 Documentation**: https://docs.ros.org/en/jazzy/
 - **Open3D Documentation**: http://www.open3d.org/docs/
-- **GTSAM Documentation**: https://gtsam.org/
 - **Gazebo Harmonic**: https://gazebosim.org/docs/harmonic/
 
 ---

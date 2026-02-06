@@ -221,8 +221,7 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'robot_name': robot_name,
-                'save_directory': './submaps',
-                'enable_loop_closure': True
+                'save_directory': './submaps'
             }]
         )
 
