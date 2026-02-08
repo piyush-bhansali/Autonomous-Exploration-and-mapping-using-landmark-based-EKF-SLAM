@@ -107,31 +107,14 @@ def compute_map_to_odom_transform(ekf_state, odom_pose):
 
 
 def compute_relative_motion_2d(pose_current, pose_previous):
-    """
-    Compute relative motion between two consecutive poses.
-
-    This computes the motion in the robot's frame at the previous pose,
-    which is used as the control input [Δd, Δθ] for the EKF prediction.
-
-    Args:
-        pose_current: Current pose (x1, y1, theta1)
-        pose_previous: Previous pose (x0, y0, theta0)
-
-    Returns:
-        Tuple (delta_d, delta_theta) where:
-            - delta_d: Distance traveled (meters)
-            - delta_theta: Change in heading (radians)
-    """
+   
     x1, y1, theta1 = pose_current
     x0, y0, theta0 = pose_previous
 
-    # Compute delta in the odom/world frame
     dx_world = x1 - x0
     dy_world = y1 - y0
     delta_theta = normalize_angle(theta1 - theta0)
 
-    # Transform to robot frame at t=0
-    # (Motion is more natural to express in the robot's perspective)
     dx_robot = dx_world * np.cos(theta0) + dy_world * np.sin(theta0)
     dy_robot = -dx_world * np.sin(theta0) + dy_world * np.cos(theta0)
 

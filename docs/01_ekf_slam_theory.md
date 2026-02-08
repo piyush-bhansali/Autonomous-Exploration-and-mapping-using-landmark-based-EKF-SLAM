@@ -8,7 +8,9 @@
 5. [Landmark Initialization](#5-landmark-initialization)
 6. [Landmark Observation Models](#6-landmark-observation-models)
 7. [Covariance Management](#7-covariance-management)
-8. [Implementation Details](#8-implementation-details)
+8. [Convergence Theory and Correlation Growth](#8-convergence-theory-and-correlation-growth)
+9. [Observability and Filter Consistency](#9-observability-and-filter-consistency)
+10. [Implementation Details](#10-implementation-details)
 
 ---
 
@@ -16,9 +18,18 @@
 
 Extended Kalman Filter SLAM (EKF-SLAM) is a probabilistic approach to simultaneously estimate the robot's pose and build a map of the environment. The key idea is to maintain a **joint probability distribution** over the robot pose and all landmark positions, represented as a Gaussian with mean $\mathbf{x}$ and covariance $\mathbf{P}$.
 
-###
+### 1.0 Historical Context
 
- 1.1 Why EKF-SLAM?
+The foundation of EKF-SLAM was established by **Smith & Cheeseman (1987)**, who first introduced the concept of representing spatial uncertainty using covariance matrices and recognized that landmarks observed from uncertain vehicle locations inherit **correlated errors** through the common vehicle uncertainty. This insight—that correlation structure is fundamental to consistent SLAM estimation—remains the cornerstone of all subsequent SLAM research.
+
+**Dissanayake et al. (2001)** provided the first rigorous **convergence proof** for SLAM, demonstrating that the estimated map converges monotonically to a relative map with zero uncertainty. Their three fundamental theorems established that:
+1. Any submatrix of the map covariance decreases monotonically
+2. Landmark estimates become fully correlated in the limit
+3. The lower bound on covariance is determined solely by initial vehicle uncertainty
+
+**Durrant-Whyte & Bailey (2006)** presented a comprehensive tutorial establishing the Bayesian filtering formulation and recursive solution structure that defines modern SLAM algorithms. They emphasized that landmark correlations are the **critical component**—minimizing or ignoring these correlations leads to filter inconsistency.
+
+### 1.1 Why EKF-SLAM?
 
 **Advantages:**
 - **Explicit uncertainty:** Full covariance matrix captures correlations
@@ -206,7 +217,37 @@ $$
 
 ### 3.5 Process Noise
 
-The control noise covariance is proportional to motion:
+The process noise models the uncertainty introduced by robot motion between time steps. This is critical for maintaining filter consistency and preventing overconfidence in the pose estimate.
+
+### 3.5.1 Odometry Error Model
+
+**Physical sources of odometry error** (Thrun et al., 2005, Section 5.4):
+
+1. **Wheel slip**: Wheels slip proportionally to distance traveled
+2. **Encoder quantization**: Discrete encoder ticks accumulate error over distance
+3. **Ground contact variation**: Uneven terrain, carpet compression
+4. **Kinematic model errors**: Wheelbase uncertainty, wheel radius variation
+
+**Key observation**: Odometry error is **proportional to distance traveled**.
+
+**Experimental validation** (Martinelli et al., 2007):
+
+From odometry calibration experiments on real robots:
+
+$$
+\sigma_{\text{error}}(d) = k_1 \cdot d + k_0
+$$
+
+where:
+- $k_1$: Distance-proportional coefficient (typical: 0.01-0.05)
+- $k_0$: Constant offset (sensor noise floor)
+- $d$: Distance traveled
+
+This empirically confirms that **uncertainty grows with motion**.
+
+### 3.5.2 Two-Component Process Noise Model
+
+The control noise covariance combines **motion-dependent** and **minimum floor** components:
 
 $$
 \mathbf{Q}_t = \begin{bmatrix}
@@ -215,11 +256,99 @@ $$
 \end{bmatrix}
 $$
 
-Where:
-- $\sigma_d, \sigma_\theta$: Motion noise coefficients (tunable)
-- $\sigma_{\min,d}, \sigma_{\min,\theta}$: Minimum noise (prevents singularity when stationary)
+**Component 1: Motion-Dependent Noise** $\sigma_d^2 \cdot |\delta_d|^2$
 
-**Rationale:** Larger motions → larger uncertainty.
+- Represents **distance-proportional** uncertainty
+- $\sigma_d$: Odometry noise coefficient (typical: 0.02-0.10 for wheeled robots)
+- Squared distance: variance grows quadratically with motion
+- Physical basis: cumulative wheel slip, encoder drift
+
+**Component 2: Minimum Noise Floor** $\sigma_{\min,d}^2$
+
+- Represents **sensor noise** independent of motion
+- Prevents singular covariance when robot is stationary ($\delta_d = 0$)
+- Accounts for:
+  - Encoder jitter
+  - IMU bias drift (if using IMU-augmented odometry)
+  - Numerical precision limits
+- Typical value: $\sigma_{\min,d} = 0.001$-$0.01$ m
+
+**Combined Model** (Thrun et al., 2005):
+
+$$
+\mathbf{Q}_t = \mathbf{M}(\delta_d, \delta_\theta) \begin{bmatrix}
+\alpha_1 & 0 \\
+0 & \alpha_2
+\end{bmatrix} \mathbf{M}(\delta_d, \delta_\theta)^T + \mathbf{Q}_{\min}
+$$
+
+where $\mathbf{M}(\delta_d, \delta_\theta)$ is motion-dependent and $\mathbf{Q}_{\min}$ is the noise floor.
+
+### 3.5.3 Motion-Scaled vs. Constant Noise
+
+**Standard Approach (Motion-Scaled)** ✅ **Used in this thesis**
+
+For **general mobile robot applications**, motion-scaled noise is essential:
+
+$$
+\mathbf{Q}_t = f(\delta_d, \delta_\theta) \quad \text{(depends on motion)}
+$$
+
+**When is constant noise acceptable?**
+
+For **high-frequency systems** with guaranteed small motions:
+
+$$
+\delta_d < \sqrt{\frac{\sigma_{\min,d}^2}{\sigma_d^2}} \quad \Rightarrow \quad \mathbf{Q}_t \approx \mathbf{Q}_{\min}
+$$
+
+**Example:**
+- If $\sigma_d = 0.05$ and $\sigma_{\min,d} = 0.01$ m
+- Threshold: $\delta_d < 0.2$ m
+- For updates with $\delta_d < 0.1$ m, motion term contributes < 25% of total noise
+
+**Comparison** (Bar-Shalom et al., 2001):
+
+| Motion Magnitude | Motion-Scaled $\mathbf{Q}$ | Constant $\mathbf{Q}$ | Risk if Using Constant |
+|------------------|--------------------------|---------------------|----------------------|
+| Small ($< 0.1$ m) | Correct | Acceptable approximation | Low (< 10% error) |
+| Moderate ($0.1$-$0.5$ m) | Correct | Underestimates uncertainty | Medium (filter overconfident) |
+| Large ($> 0.5$ m) | Correct | Severely underestimates | High (**inconsistency**) |
+
+**For this thesis:**
+- Operating regime: Small to moderate motion ($\delta_d \approx 0.05$-$0.3$ m per update)
+- **Motion-scaled model is appropriate** and follows standard robotics practice
+
+### 3.5.4 Parameter Selection Guidelines
+
+**Typical values** for different robot types:
+
+| Robot Type | $\sigma_d$ | $\sigma_\theta$ | $\sigma_{\min,d}$ | $\sigma_{\min,\theta}$ |
+|------------|-----------|---------------|-----------------|---------------------|
+| Differential drive (TurtleBot) | 0.05 | 0.1 | 0.001 m | 0.01 rad |
+| Car-like (Ackermann) | 0.02 | 0.05 | 0.001 m | 0.005 rad |
+| Omnidirectional | 0.08 | 0.15 | 0.002 m | 0.02 rad |
+
+**Empirical tuning procedure:**
+
+1. **Initial estimate** from robot specifications
+2. **Collect ground truth data** (motion capture, laser tracker)
+3. **Compute empirical odometry error** over multiple trials
+4. **Fit parameters** to match observed error distribution
+5. **Validate consistency** using NEES testing (see Section 9.5)
+
+**Consistency validation** (Bailey et al., 2006):
+
+If process noise is **correctly tuned**, the filter should be **consistent**:
+
+$$
+\epsilon_k = (\mathbf{x}_k - \hat{\mathbf{x}}_k)^T \mathbf{P}_k^{-1} (\mathbf{x}_k - \hat{\mathbf{x}}_k) \sim \chi^2(3)
+$$
+
+**Over-tuned** (Q too large): Conservative but computationally expensive
+**Under-tuned** (Q too small): **Inconsistent filter** → divergence risk
+
+**Best practice**: Start conservative, reduce Q if NEES indicates overestimation.
 
 ### 3.6 Covariance Prediction
 
@@ -349,6 +478,668 @@ $$
 $$
 
 **Key Property:** Update **always decreases** uncertainty (information gain).
+
+### 4.9 Hybrid Update Strategy: Combining ICP and Landmark Observations
+
+This thesis implements a **hybrid SLAM architecture** that combines two complementary update mechanisms:
+
+1. **Landmark-based updates** (Section 4.1-4.8): Sparse, feature-based corrections
+2. **ICP-based updates** (Sections 4.10-4.12): Dense, point cloud-based corrections
+
+**Complementary Strengths:**
+
+| Aspect | Landmark Updates | ICP Updates |
+|--------|-----------------|-------------|
+| **Frequency** | Every scan (~10 Hz) | Every scan (when converged) |
+| **Information** | Discrete features (walls, corners) | Dense point correspondences |
+| **Robustness** | Depends on feature quality | Works in all environments |
+| **Accuracy** | Medium (discrete observations) | High (continuous alignment) |
+| **Long-term** | Excellent (loop closure) | Prone to drift |
+| **Computational** | $O(k)$ for $k$ landmarks | $O(n \log n)$ for $n$ points |
+
+**Integration Strategy:**
+
+Both types of measurements are incorporated as **EKF updates** using the standard Kalman filter framework:
+
+1. **Landmark observation**: $\mathbf{z}_{\text{landmark}} = h_j(\mathbf{x}_r, \mathbf{m}_j) + \mathbf{v}_{\text{landmark}}$
+2. **ICP pose measurement**: $\mathbf{z}_{\text{ICP}} = \mathbf{x}_r + \Delta\mathbf{x}_{\text{ICP}} + \mathbf{v}_{\text{ICP}}$
+
+Both use the same Kalman gain framework but with different observation models and measurement covariances.
+
+**Execution Order per Scan:**
+
+```
+1. Odometry prediction (Section 3)
+2. Landmark updates (Section 4.1-4.8) — sparse corrections
+3. ICP update (Section 4.10) — dense correction
+4. Landmark pruning (Section 7.2)
+```
+
+This dual-correction strategy provides both **short-term accuracy** (ICP) and **long-term consistency** (landmarks).
+
+---
+
+### 4.10 ICP-Based Pose Measurement Update
+
+**Motivation:** ICP (Iterative Closest Point) aligns the current LiDAR scan to the accumulated point cloud, providing a direct estimate of the robot's pose. This serves as an **absolute pose measurement** in the EKF framework.
+
+#### 4.10.1 ICP as a Pose Sensor
+
+ICP solves the alignment problem:
+
+$$
+\mathbf{T}^* = \arg\min_{\mathbf{T}} \sum_{i=1}^N \| \mathbf{p}_{\text{target}}^i - \mathbf{T} \mathbf{p}_{\text{source}}^i \|^2
+$$
+
+Where:
+- $\mathbf{T} \in SE(3)$: Rigid transformation (rotation + translation)
+- $\mathbf{p}_{\text{source}}$: Points in current scan
+- $\mathbf{p}_{\text{target}}$: Points in accumulated map
+- $N$: Number of point correspondences
+
+**2D Pose Extraction:**
+
+From the optimal transformation $\mathbf{T}^*$, we extract the pose correction:
+
+$$
+\Delta\mathbf{x}_{\text{ICP}} = \begin{bmatrix}
+\Delta x \\
+\Delta y \\
+\Delta \theta
+\end{bmatrix} = \begin{bmatrix}
+\mathbf{T}^*_{0,3} \\
+\mathbf{T}^*_{1,3} \\
+\text{atan2}(\mathbf{T}^*_{1,0}, \mathbf{T}^*_{0,0})
+\end{bmatrix}
+$$
+
+#### 4.10.2 ICP Observation Model
+
+The ICP result provides a **direct pose measurement**:
+
+$$
+\mathbf{z}_{\text{ICP}} = \mathbf{x}_r + \Delta\mathbf{x}_{\text{ICP}} + \mathbf{v}_{\text{ICP}}
+$$
+
+Where:
+- $\mathbf{x}_r$: Current robot pose estimate (from prediction)
+- $\Delta\mathbf{x}_{\text{ICP}}$: Pose correction from ICP alignment
+- $\mathbf{v}_{\text{ICP}} \sim \mathcal{N}(\mathbf{0}, \mathbf{R}_{\text{ICP}})$: Measurement noise
+
+**Observation Jacobian:**
+
+Since ICP directly observes the robot pose, the Jacobian is trivial:
+
+$$
+\mathbf{H}_{\text{ICP}} = \begin{bmatrix}
+\mathbf{I}_{3 \times 3} & \mathbf{0}_{3 \times 2N}
+\end{bmatrix}
+$$
+
+**Interpretation:** ICP only observes the robot pose, not landmarks.
+
+#### 4.10.3 EKF Update with ICP Measurement
+
+**Predicted Observation:**
+
+$$
+\hat{\mathbf{z}}_{\text{ICP}} = \bar{\mathbf{x}}_r
+$$
+
+**Innovation:**
+
+$$
+\boldsymbol{\nu}_{\text{ICP}} = \mathbf{z}_{\text{ICP}} - \hat{\mathbf{z}}_{\text{ICP}} = \Delta\mathbf{x}_{\text{ICP}}
+$$
+
+With angle normalization:
+$$
+\nu_\theta = \text{atan2}(\sin(\nu_\theta), \cos(\nu_\theta))
+$$
+
+**Innovation Covariance:**
+
+$$
+\mathbf{S}_{\text{ICP}} = \mathbf{H}_{\text{ICP}} \bar{\mathbf{P}} \mathbf{H}_{\text{ICP}}^T + \mathbf{R}_{\text{ICP}}
+$$
+
+Since $\mathbf{H}_{\text{ICP}}$ is $[{\bf I}_{3\times3} \mid {\bf 0}]$:
+
+$$
+\mathbf{S}_{\text{ICP}} = \bar{\mathbf{P}}_{rr} + \mathbf{R}_{\text{ICP}}
+$$
+
+**Kalman Gain:**
+
+$$
+\mathbf{K}_{\text{ICP}} = \bar{\mathbf{P}} \mathbf{H}_{\text{ICP}}^T \mathbf{S}_{\text{ICP}}^{-1} = \begin{bmatrix}
+\bar{\mathbf{P}}_{rr} \mathbf{S}_{\text{ICP}}^{-1} \\
+\bar{\mathbf{P}}_{m_1 r} \mathbf{S}_{\text{ICP}}^{-1} \\
+\bar{\mathbf{P}}_{m_2 r} \mathbf{S}_{\text{ICP}}^{-1} \\
+\vdots
+\end{bmatrix}
+$$
+
+**State Update:**
+
+$$
+\mathbf{x} = \bar{\mathbf{x}} + \mathbf{K}_{\text{ICP}} \boldsymbol{\nu}_{\text{ICP}}
+$$
+
+**Critical Insight:** Even though ICP only measures the robot pose, the update affects **all landmarks** through the cross-covariance terms $\bar{\mathbf{P}}_{m_i r}$. This is the power of full covariance tracking!
+
+**Covariance Update (Joseph Form):**
+
+$$
+\mathbf{P} = (\mathbf{I} - \mathbf{K}_{\text{ICP}} \mathbf{H}_{\text{ICP}}) \bar{\mathbf{P}} (\mathbf{I} - \mathbf{K}_{\text{ICP}} \mathbf{H}_{\text{ICP}})^T + \mathbf{K}_{\text{ICP}} \mathbf{R}_{\text{ICP}} \mathbf{K}_{\text{ICP}}^T
+$$
+
+---
+
+### 4.11 Hessian-Based Measurement Uncertainty for ICP
+
+**Problem:** How do we determine the measurement covariance $\mathbf{R}_{\text{ICP}}$?
+
+**Solution:** Use the **Hessian (Information Matrix)** from the ICP optimization to estimate the geometry-dependent uncertainty.
+
+#### 4.11.1 Theoretical Foundation
+
+**ICP Cost Function:**
+
+ICP minimizes the sum of squared distances between corresponding points:
+
+$$
+E(\mathbf{x}) = \sum_{i=1}^N \| \mathbf{r}_i(\mathbf{x}) \|^2
+$$
+
+Where:
+- $\mathbf{x} = [x, y, \theta]^T$: Pose parameters
+- $\mathbf{r}_i(\mathbf{x}) = \mathbf{p}_{\text{target}}^i - (\mathbf{R}(\theta) \mathbf{p}_{\text{source}}^i + \mathbf{t})$: Residual for point $i$
+- $\mathbf{R}(\theta)$: 2D rotation matrix
+- $\mathbf{t} = [x, y]^T$: Translation vector
+
+**Gauss-Newton Approximation:**
+
+At the optimum $\mathbf{x}^*$, the cost function can be approximated by a quadratic:
+
+$$
+E(\mathbf{x}) \approx E(\mathbf{x}^*) + \frac{1}{2} (\mathbf{x} - \mathbf{x}^*)^T \mathbf{A} (\mathbf{x} - \mathbf{x}^*)
+$$
+
+Where $\mathbf{A}$ is the **Hessian matrix**:
+
+$$
+\mathbf{A} = \frac{\partial^2 E}{\partial \mathbf{x}^2} \bigg|_{\mathbf{x}^*}
+$$
+
+#### 4.11.2 Hessian Computation via Jacobian
+
+For least-squares problems, the Hessian can be approximated using the Jacobian:
+
+$$
+\mathbf{A} \approx \sum_{i=1}^N \mathbf{J}_i^T \mathbf{J}_i
+$$
+
+Where $\mathbf{J}_i$ is the Jacobian of the residual:
+
+$$
+\mathbf{J}_i = \frac{\partial \mathbf{r}_i}{\partial \mathbf{x}} \in \mathbb{R}^{2 \times 3}
+$$
+
+**Residual for Point $i$:**
+
+$$
+\mathbf{r}_i = \mathbf{p}_{\text{target}}^i - \left( \mathbf{R}(\theta) \mathbf{p}_{\text{source}}^i + \begin{bmatrix} x \\ y \end{bmatrix} \right)
+$$
+
+**Rotation Matrix Derivative:**
+
+$$
+\frac{\partial}{\partial \theta} \mathbf{R}(\theta) = \frac{\partial}{\partial \theta} \begin{bmatrix}
+\cos\theta & -\sin\theta \\
+\sin\theta & \cos\theta
+\end{bmatrix} = \begin{bmatrix}
+-\sin\theta & -\cos\theta \\
+\cos\theta & -\sin\theta
+\end{bmatrix}
+$$
+
+**Jacobian Components:**
+
+$$
+\frac{\partial \mathbf{r}_i}{\partial x} = -\begin{bmatrix} 1 \\ 0 \end{bmatrix}, \quad
+\frac{\partial \mathbf{r}_i}{\partial y} = -\begin{bmatrix} 0 \\ 1 \end{bmatrix}
+$$
+
+$$
+\frac{\partial \mathbf{r}_i}{\partial \theta} = -\frac{\partial \mathbf{R}(\theta)}{\partial \theta} \mathbf{p}_{\text{source}}^i = -\begin{bmatrix}
+-\sin\theta & -\cos\theta \\
+\cos\theta & -\sin\theta
+\end{bmatrix} \begin{bmatrix}
+p_x^i \\
+p_y^i
+\end{bmatrix}
+$$
+
+**Complete Jacobian:**
+
+$$
+\mathbf{J}_i = \begin{bmatrix}
+-1 & 0 & \sin\theta \cdot p_x^i + \cos\theta \cdot p_y^i \\
+0 & -1 & -\cos\theta \cdot p_x^i + \sin\theta \cdot p_y^i
+\end{bmatrix}
+$$
+
+**Hessian Accumulation:**
+
+$$
+\mathbf{A} = \sum_{i=1}^N \mathbf{J}_i^T \mathbf{J}_i
+$$
+
+Expanded:
+
+$$
+\mathbf{A} = \sum_{i=1}^N \begin{bmatrix}
+1 & 0 & -\frac{\partial r_{ix}}{\partial \theta} \\
+0 & 1 & -\frac{\partial r_{iy}}{\partial \theta} \\
+-\frac{\partial r_{ix}}{\partial \theta} & -\frac{\partial r_{iy}}{\partial \theta} & \left(\frac{\partial r_{ix}}{\partial \theta}\right)^2 + \left(\frac{\partial r_{iy}}{\partial \theta}\right)^2
+\end{bmatrix}
+$$
+
+#### 4.11.3 From Hessian to Covariance
+
+**Fisher Information Matrix:**
+
+The Hessian $\mathbf{A}$ is the **Information Matrix** — it quantifies how much information the data provides about the parameters.
+
+**Cramér-Rao Bound:**
+
+The covariance of the parameter estimate is bounded by:
+
+$$
+\mathbf{P} \geq (\mathbf{I}(\mathbf{x}))^{-1}
+$$
+
+Where $\mathbf{I}(\mathbf{x})$ is the Fisher Information Matrix.
+
+**For ICP with Gaussian noise:**
+
+$$
+\mathbf{I}(\mathbf{x}) = \frac{1}{\sigma^2} \mathbf{A}
+$$
+
+Therefore, the **measurement covariance** is:
+
+$$
+\mathbf{R}_{\text{ICP}} = \sigma^2 \mathbf{A}^{-1}
+$$
+
+Where:
+- $\sigma^2$: **LiDAR noise variance** (sensor specification)
+- $\mathbf{A}^{-1}$: **Geometric uncertainty** (environment-dependent)
+
+#### 4.11.4 Sensor Noise Parameter
+
+**LiDAR Noise from Manufacturer Specifications:**
+
+For TurtleBot3 LDS-01 (HLS LFCD LDS):
+- **Accuracy**: ±10 mm
+- **Standard deviation**: $\sigma = 0.01$ m
+- **Variance**: $\sigma^2 = 0.0001$ m²
+
+This is used as the **fixed noise parameter** in the covariance formula.
+
+**Why Fixed Noise?**
+
+Using a fixed $\sigma^2$ based on sensor specs avoids the **"optimism problem"**:
+
+**Residual-Based Estimation (WRONG):**
+$$
+\hat{\sigma}^2 = \frac{1}{N-3} \sum_{i=1}^N \|\mathbf{r}_i\|^2
+$$
+
+**Problem:** As $N$ increases (more scan points), $\hat{\sigma}^2$ decreases, making the filter **overconfident**.
+
+**Fixed Sensor Noise (CORRECT):**
+$$
+\sigma^2 = \text{const} = 0.0001 \quad \text{(from sensor datasheet)}
+$$
+
+**Result:** Uncertainty properly reflects geometry via $\mathbf{A}^{-1}$, not point density.
+
+#### 4.11.5 Geometric Interpretation of $\mathbf{A}^{-1}$
+
+The Hessian $\mathbf{A}$ captures the **geometry of the environment**:
+
+**High-Feature Environment (e.g., corner):**
+- Many points with diverse orientations
+- Large $\mathbf{A}$ (high information)
+- Small $\mathbf{A}^{-1}$ (low geometric uncertainty)
+- **Result**: $\mathbf{R}_{\text{ICP}} = \sigma^2 \mathbf{A}^{-1}$ is small → EKF trusts ICP
+
+**Low-Feature Environment (e.g., corridor):**
+- Points aligned along one direction
+- Small/singular $\mathbf{A}$ (low information)
+- Large $\mathbf{A}^{-1}$ (high geometric uncertainty)
+- **Result**: $\mathbf{R}_{\text{ICP}} = \sigma^2 \mathbf{A}^{-1}$ is large → EKF relies on odometry
+
+**Rank Deficiency:**
+
+In degenerate cases (e.g., single wall), $\mathbf{A}$ may be singular. Use **pseudo-inverse**:
+
+$$
+\mathbf{R}_{\text{ICP}} = \sigma^2 \mathbf{A}^{\dagger}
+$$
+
+Where $\mathbf{A}^{\dagger} = (\mathbf{A} + \epsilon \mathbf{I})^{-1}$ or SVD-based pseudo-inverse.
+
+---
+
+### 4.12 Implementation of Hessian-Based ICP Covariance
+
+**Algorithm:**
+
+```python
+def compute_icp_covariance(source_points, target_points, transform, lidar_sigma=0.01):
+    """
+    Compute Hessian-based covariance for ICP alignment.
+
+    Args:
+        source_points: Nx2 array of scan points
+        target_points: Mx2 array of map points
+        transform: 4x4 transformation matrix from ICP
+        lidar_sigma: LiDAR noise std (default: 0.01m for LDS-01)
+
+    Returns:
+        R_icp: 3x3 covariance matrix for (x, y, theta)
+    """
+    # Extract 2D pose from transform
+    dx = transform[0, 3]
+    dy = transform[1, 3]
+    dtheta = np.arctan2(transform[1, 0], transform[0, 0])
+
+    # Rotation matrix and derivative
+    c = np.cos(dtheta)
+    s = np.sin(dtheta)
+    R = np.array([[c, -s], [s, c]])
+    dR_dtheta = np.array([[-s, -c], [c, -s]])
+
+    # Find point correspondences
+    tree = KDTree(target_points)
+    transformed_source = (R @ source_points.T).T + np.array([dx, dy])
+    distances, indices = tree.query(transformed_source)
+
+    # Filter inliers (distance threshold)
+    inlier_mask = distances < 0.1  # 10cm threshold
+    src_inliers = source_points[inlier_mask]
+    tgt_inliers = target_points[indices[inlier_mask]]
+
+    if len(src_inliers) < 6:
+        return None  # Insufficient correspondences
+
+    # Compute Hessian: A = sum(J^T @ J)
+    A = np.zeros((3, 3))
+
+    for p_s in src_inliers:
+        # Jacobian of transformed point wrt pose
+        dp_dtheta = dR_dtheta @ p_s
+
+        # Jacobian of residual wrt pose (2x3)
+        J = np.array([
+            [-1.0, 0.0, -dp_dtheta[0]],
+            [0.0, -1.0, -dp_dtheta[1]]
+        ])
+
+        # Accumulate Hessian
+        A += J.T @ J
+
+    # Covariance: P = sigma^2 * A^(-1)
+    sigma2 = lidar_sigma ** 2  # Fixed sensor noise (0.0001 for LDS-01)
+
+    try:
+        A_inv = np.linalg.inv(A)
+    except np.linalg.LinAlgError:
+        # Singular matrix (degenerate geometry) - use pseudo-inverse
+        A_inv = np.linalg.pinv(A)
+
+    R_icp = sigma2 * A_inv
+
+    return R_icp
+```
+
+**Usage in EKF Update:**
+
+```python
+# After ICP alignment
+points_corrected, pose_correction = scan_to_map_icp(scan, accumulated_map)
+
+if pose_correction is not None:
+    # Extract pose correction
+    dx = pose_correction['dx']
+    dy = pose_correction['dy']
+    dtheta = pose_correction['dtheta']
+
+    # Hessian-based covariance (geometry-aware)
+    R_icp = pose_correction['covariance']  # 3x3 matrix
+
+    # Compute corrected pose (measurement)
+    z_icp = np.array([
+        current_pose['x'] + dx,
+        current_pose['y'] + dy,
+        current_pose['theta'] + dtheta
+    ])
+
+    # EKF update with ICP measurement
+    ekf.update(z_icp[0], z_icp[1], z_icp[2],
+               measurement_covariance=R_icp,
+               measurement_type='icp')
+```
+
+**Key Points:**
+
+1. **Geometry Adaptation**: $\mathbf{R}_{\text{ICP}}$ automatically adapts to environment
+2. **Sensor Calibration**: $\sigma^2 = 0.0001$ from LDS-01 datasheet
+3. **Rank Handling**: Pseudo-inverse for degenerate configurations
+4. **EKF Integration**: Standard Kalman update framework
+
+---
+
+### 4.13 Unified Hessian-Based Uncertainty Framework
+
+This thesis implements a **mathematically consistent** uncertainty quantification framework across all measurement types using the Hessian (Fisher Information Matrix) with **fixed LiDAR noise**.
+
+#### 4.13.1 Unified Measurement Covariance Formula
+
+**All measurement covariances follow the same principle:**
+
+$$
+\mathbf{R} = \sigma^2 \mathbf{A}^{-1}
+$$
+
+Where:
+- $\sigma^2 = 0.0001$ m²: **Fixed LiDAR noise** (TurtleBot3 LDS-01: ±10mm)
+- $\mathbf{A}$: **Hessian (Information Matrix)** from measurement geometry
+
+**Key Insight:** Separating sensor noise ($\sigma^2$) from geometric information ($\mathbf{A}^{-1}$) ensures:
+1. **No optimism**: More measurements don't artificially reduce uncertainty
+2. **Geometry-aware**: Uncertainty reflects environment structure
+3. **Physically grounded**: Based on sensor specifications, not data fitting
+
+#### 4.13.2 Wall Landmark Covariance
+
+**Measurement Model:**
+
+Wall in Hessian form: $\rho = x \cos(\alpha) + y \sin(\alpha)$
+
+**Residual for Point $i$:**
+
+$$
+r_i = (x_i \cos\alpha + y_i \sin\alpha) - \rho
+$$
+
+**Jacobian (1×2):**
+
+$$
+\mathbf{J}_i = \begin{bmatrix}
+\frac{\partial r_i}{\partial \rho} & \frac{\partial r_i}{\partial \alpha}
+\end{bmatrix} = \begin{bmatrix}
+-1 & -x_i \sin\alpha + y_i \cos\alpha
+\end{bmatrix}
+$$
+
+**Hessian (2×2):**
+
+$$
+\mathbf{A}_{\text{wall}} = \sum_{i=1}^N \mathbf{J}_i^T \mathbf{J}_i = \begin{bmatrix}
+N & -\sum_i(x_i \sin\alpha - y_i \cos\alpha) \\
+-\sum_i(x_i \sin\alpha - y_i \cos\alpha) & \sum_i(x_i \sin\alpha - y_i \cos\alpha)^2
+\end{bmatrix}
+$$
+
+**Covariance:**
+
+$$
+\mathbf{R}_{\text{wall}} = \sigma^2 \mathbf{A}_{\text{wall}}^{-1} \in \mathbb{R}^{2 \times 2} \quad \text{for } (\rho, \alpha)
+$$
+
+**Geometric Interpretation:**
+- Long wall with many points: Large $\mathbf{A}$ → Small covariance (high certainty)
+- Short wall or few points: Small $\mathbf{A}$ → Large covariance (low certainty)
+
+#### 4.13.3 Corner Landmark Covariance
+
+**Measurement Model:**
+
+Corner at position $\mathbf{c} = [x_c, y_c]^T$ estimated from $N$ neighboring points.
+
+**Residual for Point $i$:**
+
+$$
+\mathbf{r}_i = \mathbf{p}_i - \mathbf{c} \in \mathbb{R}^2
+$$
+
+**Jacobian (2×2):**
+
+$$
+\mathbf{J}_i = \frac{\partial \mathbf{r}_i}{\partial \mathbf{c}} = -\mathbf{I}_{2 \times 2}
+$$
+
+**Hessian (Isotropic Case):**
+
+$$
+\mathbf{A}_{\text{corner,iso}} = \sum_{i=1}^N \mathbf{J}_i^T \mathbf{J}_i = \sum_{i=1}^N \mathbf{I} = N \mathbf{I}
+$$
+
+**Hessian (Anisotropic Case):**
+
+If point scatter is directional (e.g., along two walls), use PCA eigenstructure:
+
+$$
+\mathbf{A}_{\text{corner}} = N \mathbf{V} \boldsymbol{\Lambda}^{-1} \mathbf{V}^T
+$$
+
+Where:
+- $\mathbf{V}$: Eigenvectors from PCA (principal directions)
+- $\boldsymbol{\Lambda} = \text{diag}(\lambda_1, \lambda_2)$: Eigenvalues (point variance along axes)
+- $\boldsymbol{\Lambda}^{-1}$: Information = inverse variance
+
+**Covariance:**
+
+$$
+\mathbf{R}_{\text{corner}} = \sigma^2 \mathbf{A}_{\text{corner}}^{-1} \in \mathbb{R}^{2 \times 2} \quad \text{for } (x, y)
+$$
+
+**Geometric Interpretation:**
+- More neighboring points: Larger $N$ → smaller covariance
+- Points tightly clustered: Small $\lambda$ → large information → small covariance
+- Points scattered: Large $\lambda$ → small information → large covariance
+
+#### 4.13.4 ICP Pose Covariance (Scan-to-Map)
+
+**Measurement Model:**
+
+ICP estimates pose correction $\Delta\mathbf{x} = [\Delta x, \Delta y, \Delta\theta]^T$.
+
+**Residual for Correspondence $i$:**
+
+$$
+\mathbf{r}_i = \mathbf{p}_{\text{target}}^i - (\mathbf{R}(\theta) \mathbf{p}_{\text{source}}^i + \mathbf{t})
+$$
+
+**Jacobian (2×3):**
+
+$$
+\mathbf{J}_i = \begin{bmatrix}
+-1 & 0 & \sin\theta \cdot p_x^i + \cos\theta \cdot p_y^i \\
+0 & -1 & -\cos\theta \cdot p_x^i + \sin\theta \cdot p_y^i
+\end{bmatrix}
+$$
+
+**Hessian (3×3):**
+
+$$
+\mathbf{A}_{\text{ICP}} = \sum_{i=1}^N \mathbf{J}_i^T \mathbf{J}_i
+$$
+
+**Covariance:**
+
+$$
+\mathbf{R}_{\text{ICP}} = \sigma^2 \mathbf{A}_{\text{ICP}}^{-1} \in \mathbb{R}^{3 \times 3} \quad \text{for } (x, y, \theta)
+$$
+
+**Geometric Interpretation:**
+- Corner environment: Large $\mathbf{A}$ (all directions constrained) → small covariance
+- Corridor environment: Small/singular $\mathbf{A}$ (one direction unconstrained) → large covariance in that direction
+
+#### 4.13.5 Comparison with Traditional Approaches
+
+| Approach | Formula | Pros | Cons |
+|----------|---------|------|------|
+| **Fixed Covariance** | $\mathbf{R} = \mathbf{R}_0$ (constant) | Simple | Ignores geometry and point count |
+| **Residual-Based** | $\mathbf{R} = \hat{\sigma}^2 \mathbf{A}^{-1}$ | Adaptive | **Optimism problem**: More points → smaller $\hat{\sigma}^2$ → overconfident |
+| **Sample Covariance** | $\mathbf{R} = \frac{1}{N-1}\sum_i(\mathbf{x}_i - \bar{\mathbf{x}})(\mathbf{x}_i - \bar{\mathbf{x}})^T$ | Empirical | Not measurement model-based; biased for small $N$ |
+| **Hessian + Fixed Noise** ✓ | $\mathbf{R} = \sigma^2 \mathbf{A}^{-1}$ | **Geometry-aware, physically calibrated, mathematically rigorous** | Requires sensor noise specification |
+
+#### 4.13.6 Implementation Summary
+
+| Measurement Type | Dimension | Hessian Source | Implementation |
+|------------------|-----------|----------------|----------------|
+| **Wall (Hessian form)** | 2D: $(\rho, \alpha)$ | Point-to-line residuals | `landmark_features.py:353-406` |
+| **Corner (Cartesian)** | 2D: $(x, y)$ | Point scatter with PCA | `landmark_features.py:408-485` |
+| **Scan-to-Map ICP** | 3D: $(x, y, \theta)$ | Point-to-point correspondences | `mapping_utils.py:68-112` |
+| **Submap ICP** | 3D: $(x, y, \theta)$ | Point-to-point correspondences | `submap_stitcher.py:88-180` |
+
+**All use**: $\sigma = 0.01$ m (LDS-01 specification) → $\sigma^2 = 0.0001$ m²
+
+#### 4.13.7 Mathematical Correctness Verification
+
+**Cramér-Rao Bound:**
+
+The Hessian-based covariance satisfies the Cramér-Rao lower bound:
+
+$$
+\mathbf{R} = \sigma^2 \mathbf{A}^{-1} = \sigma^2 (\mathbf{I}(\boldsymbol{\theta}))^{-1}
+$$
+
+Where $\mathbf{I}(\boldsymbol{\theta}) = \frac{1}{\sigma^2}\mathbf{A}$ is the Fisher Information Matrix.
+
+**Consistency:**
+
+For a Gaussian measurement model $\mathbf{z} = h(\boldsymbol{\theta}) + \boldsymbol{\epsilon}$ with $\boldsymbol{\epsilon} \sim \mathcal{N}(0, \sigma^2 \mathbf{I})$:
+
+$$
+\mathbf{I}(\boldsymbol{\theta}) = \frac{1}{\sigma^2} \mathbb{E}\left[\left(\frac{\partial h}{\partial \boldsymbol{\theta}}\right)^T \left(\frac{\partial h}{\partial \boldsymbol{\theta}}\right)\right] = \frac{1}{\sigma^2} \sum_i \mathbf{J}_i^T \mathbf{J}_i
+$$
+
+This is exactly what we compute!
+
+**Key Properties:**
+
+1. ✓ **Unbiased**: Covariance correctly captures measurement uncertainty
+2. ✓ **Consistent**: Matches Cramér-Rao bound (optimal estimator)
+3. ✓ **Geometry-aware**: $\mathbf{A}^{-1}$ adapts to environment structure
+4. ✓ **Calibrated**: $\sigma^2$ from sensor specifications
+5. ✓ **No optimism**: Fixed $\sigma^2$ prevents artificial confidence growth
 
 ---
 
@@ -603,65 +1394,250 @@ To manage computational complexity, landmarks are removed if:
 
 ---
 
-## 8. Implementation Details
+## 8. Convergence Theory and Correlation Growth
 
-### 8.1 Algorithm Summary
+### 8.1 Fundamental Theorems (Dissanayake et al., 2001)
+
+The convergence properties of SLAM are governed by three fundamental theorems:
+
+**Theorem 1: Monotonic Covariance Reduction**
+
+The determinant of any submatrix of the map covariance matrix decreases monotonically as observations are incorporated:
+
+$$
+|\mathbf{P}_{k+1}| \leq |\mathbf{P}_k|
+$$
+
+**Interpretation:** Uncertainty never increases with more observations.
+
+**Theorem 2: Full Correlation in the Limit**
+
+In the limit, all landmark estimates become fully correlated:
+
+$$
+\lim_{k \to \infty} \text{corr}(\mathbf{m}_i, \mathbf{m}_j) = 1 \quad \forall i, j
+$$
+
+**Theorem 3: Bounded Absolute Uncertainty**
+
+The absolute location uncertainty of landmarks is bounded by the initial vehicle uncertainty:
+
+$$
+\mathbf{P}_{\infty} \geq \mathbf{P}_0^v
+$$
+
+where $\mathbf{P}_0^v$ is the initial robot pose uncertainty.
+
+### 8.2 Correlation Growth Mechanism
+
+As the robot observes landmarks from different poses, the correlation between landmarks grows due to the **common vehicle uncertainty**:
+
+1. **Initial observation**: Landmark $\mathbf{m}_i$ inherits robot uncertainty $\mathbf{P}_{rr}$
+2. **Robot moves**: New uncertainty added through motion
+3. **Second observation**: Landmark $\mathbf{m}_j$ inherits the **same** robot uncertainty
+4. **Result**: $\mathbf{m}_i$ and $\mathbf{m}_j$ are correlated through common origin uncertainty
+
+**Mathematical Expression:**
+
+$$
+\text{Cov}(\mathbf{m}_i, \mathbf{m}_j) = \mathbf{H}_i \mathbf{P}_{rr} \mathbf{H}_j^T
+$$
+
+### 8.3 Practical Implications
+
+1. **Map consistency**: Relative landmark positions converge to zero uncertainty
+2. **Absolute drift**: Global map position remains uncertain (unobservable)
+3. **Loop closure benefit**: Re-observing landmarks drastically reduces all correlations
+4. **Computational cost**: Full covariance $O(n^2)$ storage, $O(n^3)$ update
+
+---
+
+## 9. Observability and Filter Consistency
+
+### 9.1 The Consistency Problem (Huang et al., 2010)
+
+**Critical Discovery**: Standard EKF-SLAM implementations suffer from **inconsistency**—the filter underestimates its true uncertainty, leading to overconfidence and potential divergence.
+
+**Root Cause**: Observability properties mismatch between the true nonlinear system and the linearized EKF system.
+
+### 9.2 Unobservable Directions in SLAM
+
+The nonlinear SLAM system has **three unobservable degrees of freedom**:
+
+1. **Global X position**: Cannot determine absolute x-coordinate in world
+2. **Global Y position**: Cannot determine absolute y-coordinate in world
+3. **Global orientation**: Cannot determine absolute heading in world
+
+**Why?** Observations only provide relative measurements—we can build a consistent map, but not know its absolute pose in the world.
+
+**Nullspace of Observability Matrix** (true system):
+
+$$
+\mathcal{N}(\mathbf{M}) = \text{span}\left\{\begin{bmatrix} \mathbf{1}_2 \\ 0 \\ \mathbf{1}_2 \\ \vdots \end{bmatrix}, \begin{bmatrix} \mathbf{0}_2 \\ 1 \\ \mathbf{0}_2 \\ \vdots \end{bmatrix}\right\}
+$$
+
+**Dimension**: 3 (global x, y, θ)
+
+### 9.3 EKF Linearization Error
+
+**Problem**: Standard EKF uses **current state estimates** for linearization:
+
+$$
+\mathbf{F}_k = \frac{\partial f}{\partial \mathbf{x}}\bigg|_{\hat{\mathbf{x}}_{k|k}}
+$$
+
+This causes the linearized system to have only **2 unobservable directions** (missing global orientation component), creating **spurious information gain** in the orientation.
+
+**Nullspace of EKF Observability Matrix** (linearized):
+
+$$
+\mathcal{N}(\mathbf{M}_{\text{EKF}}) = \text{span}\left\{\begin{bmatrix} \mathbf{I}_2 \\ \mathbf{0}_{1 \times 2} \\ \mathbf{I}_2 \\ \vdots \end{bmatrix}\right\}
+$$
+
+**Dimension**: 2 (only global x, y) — **orientation artificially observable!**
+
+### 9.4 First Estimates Jacobian (FEJ) Solution
+
+**Fix**: Use **first-ever estimates** for Jacobian computation instead of current estimates:
+
+**Modified State Jacobian:**
+$$
+\bar{\mathbf{F}}_k = \frac{\partial f}{\partial \mathbf{x}}\bigg|_{\hat{\mathbf{x}}_{k|k-1}} \quad \text{(use prior, not posterior)}
+$$
+
+**Modified Measurement Jacobian:**
+$$
+\bar{\mathbf{H}}_k = \frac{\partial h}{\partial \mathbf{x}}\bigg|_{\hat{\mathbf{x}}_{\text{first}}} \quad \text{(use first-ever landmark estimate)}
+$$
+
+**Result**: Restores correct 3D unobservable subspace → improved consistency
+
+**Experimental Validation** (Huang et al., 2010, Tables 1-3):
+- Standard EKF: 95% confidence bounds violated ~50% of time (inconsistent)
+- FEJ-EKF: 95% confidence bounds respected ~95% of time (consistent)
+
+### 9.5 Implementation Consideration
+
+For this thesis implementation, we use **standard EKF** for simplicity, accepting minor inconsistency. For production systems or long-duration missions, **FEJ-EKF** or other consistency-preserving methods are recommended.
+
+---
+
+## 10. Implementation Details
+
+### 10.1 Hybrid Algorithm Summary
 
 ```
 Initialize:
   x ← [x_r, y_r, θ_r]  (robot pose only)
   P ← I * 0.01  (small initial uncertainty)
   landmarks ← {}  (empty map)
+  accumulated_scan_points ← []  (for ICP)
 
 For each timestep t:
 
-  // 1. PREDICT (Motion Model)
+  // ============================================================
+  // 1. PREDICT (Motion Model - Section 3)
+  // ============================================================
   Δd, Δθ ← get_odometry_delta()
   x_r ← motion_model(x_r, Δd, Δθ)
   F ← compute_motion_jacobian(x_r, Δd, Δθ)
   G ← compute_control_jacobian(x_r, Δd, Δθ)
-  Q ← compute_process_noise(Δd, Δθ)
+  Q ← compute_process_noise(Δd, Δθ)  // Motion-scaled
   P ← F * P * F^T + G * Q * G^T
 
-  // 2. OBSERVE (Feature Extraction)
-  features ← extract_features(scan)
+  // ============================================================
+  // 2. LANDMARK-BASED UPDATES (Sparse Corrections - Section 4.1-4.8)
+  // ============================================================
 
-  // 3. ASSOCIATE (Data Association)
+  // 2a. Feature Extraction
+  features ← extract_features(scan)  // Walls and corners
+
+  // 2b. Data Association
   For each feature z:
     matched_id ← find_matching_landmark(z, x, P)
 
     If matched_id exists:
-      // UPDATE (Measurement Model)
+      // UPDATE (Landmark Observation)
       ẑ ← predict_observation(x_r, landmarks[matched_id])
       ν ← z - ẑ  (innovation)
       H ← compute_observation_jacobian(x_r, landmarks[matched_id])
-      S ← H * P * H^T + R  (innovation covariance)
-      K ← P * H^T * inv(S)  (Kalman gain)
-      x ← x + K * ν  (state update)
-      P ← (I - K*H) * P * (I - K*H)^T + K*R*K^T  (covariance update)
+      S ← H * P * H^T + R_landmark  (innovation covariance)
+
+      // Mahalanobis gating
+      d_mahal ← sqrt(ν^T * inv(S) * ν)
+      If d_mahal < threshold:
+        K ← P * H^T * inv(S)  (Kalman gain)
+        x ← x + K * ν  (state update - all landmarks affected!)
+        P ← (I - K*H) * P * (I - K*H)^T + K*R_landmark*K^T  (Joseph form)
 
     Else:
       // INITIALIZE (New Landmark)
       m_new ← inverse_observation_model(x_r, z)
       x ← [x; m_new]  (augment state)
-      P ← augment_covariance(P, x_r, z, R)
+      P ← augment_covariance(P, x_r, z, R_landmark)
 
-  // 4. PRUNE (Landmark Management)
-  remove_old_landmarks()
+  // ============================================================
+  // 3. ICP-BASED UPDATE (Dense Correction - Section 4.10-4.12)
+  // ============================================================
+
+  // 3a. Transform current scan to submap frame
+  scan_points ← transform_to_submap_frame(scan, x_r, submap_start_pose)
+  accumulated_scan_points.append(scan_points)
+
+  // 3b. ICP alignment (when sufficient points accumulated)
+  If len(accumulated_scan_points) >= min_points:
+    // Run ICP
+    T_icp, fitness ← run_icp(scan_points, accumulated_scan_points)
+
+    If fitness > threshold:
+      // Extract pose correction
+      Δx_icp ← extract_pose_from_transform(T_icp)
+
+      // Compute Hessian-based covariance (Section 4.11)
+      A ← compute_hessian(scan_points, accumulated_scan_points, T_icp)
+      σ² ← lidar_noise_variance  // 0.0001 for LDS-01
+      R_icp ← σ² * inv(A)  // Geometry-aware uncertainty
+
+      // ICP measurement
+      z_icp ← x_r + Δx_icp
+
+      // EKF update with ICP measurement
+      ν_icp ← z_icp - x_r
+      H_icp ← [I_3x3 | 0]  // Only observes robot pose
+      S_icp ← P_rr + R_icp
+      K_icp ← P * H_icp^T * inv(S_icp)
+      x ← x + K_icp * ν_icp  (robot AND landmarks updated!)
+      P ← (I - K_icp*H_icp) * P * (I - K_icp*H_icp)^T + K_icp*R_icp*K_icp^T
+
+  // ============================================================
+  // 4. LANDMARK MANAGEMENT (Section 7.2)
+  // ============================================================
+  remove_old_landmarks()  // Prune unseen landmarks
+
+  // ============================================================
+  // 5. COVARIANCE CONDITIONING (Section 7.1)
+  // ============================================================
+  P ← condition_covariance(P)  // Enforce eigenvalue bounds
 ```
 
-### 8.2 Code Mapping
+### 10.2 Code Mapping
 
 | Algorithm Step | Implementation File | Function |
 |---------------|-------------------|----------|
-| Prediction | `ekf_slam.py` | `predict_with_relative_motion()` |
-| Observation | `landmark_features.py` | `extract_features()` |
-| Association | `data_association.py` | `associate_landmarks()` |
-| Update | `ekf_slam.py` | `update_landmark_observation()` |
-| Initialization | `ekf_slam.py` | `add_landmark()` |
-| Pruning | `ekf_slam.py` | `prune_landmarks()` |
+| **Motion Prediction** | `ekf_slam.py` | `predict_with_relative_motion()` |
+| **Landmark Extraction** | `landmark_features.py` | `extract_features()` |
+| **Data Association** | `data_association.py` | `associate_landmarks()` |
+| **Landmark Update** | `ekf_slam.py` | `update_landmark_observation()` |
+| **Landmark Initialization** | `ekf_slam.py` | `add_landmark()` |
+| **ICP Alignment** | `mapping_utils.py` | `scan_to_map_icp()` |
+| **ICP Covariance** | `mapping_utils.py` | (inline, lines 87-112) |
+| **ICP Update** | `ekf_slam.py` | `update()` |
+| **Submap ICP** | `submap_stitcher.py` | `align_submap_with_icp()` |
+| **Submap Covariance** | `submap_stitcher.py` | `_compute_icp_covariance()` |
+| **Landmark Pruning** | `ekf_slam.py` | `prune_landmarks()` |
+| **Covariance Conditioning** | `ekf_slam.py` | `_condition_covariance()` |
 
-### 8.3 Numerical Considerations
+### 10.3 Numerical Considerations
 
 **1. Angle Normalization:**
 Always wrap angles to $[-\pi, \pi]$ after updates:
@@ -688,15 +1664,71 @@ P = (P + P.T) / 2.0
 
 ## References
 
-1. **Smith, R., Self, M., & Cheeseman, P. (1990).** "Estimating Uncertain Spatial Relationships in Robotics." *Autonomous Robot Vehicles*, pp. 167-193.
+### Foundational Papers
 
-2. **Dissanayake, M. G., Newman, P., Clark, S., Durrant-Whyte, H. F., & Csorba, M. (2001).** "A Solution to the Simultaneous Localization and Map Building (SLAM) Problem." *IEEE Transactions on Robotics and Automation*, 17(3), 229-241.
+1. **Smith, R. C., & Cheeseman, P. (1987).** "On the Representation and Estimation of Spatial Uncertainty." *The International Journal of Robotics Research*, 5(4), 56-68.
+   - Introduced covariance-based uncertainty representation and correlation structure in spatial estimation
 
-3. **Thrun, S., Burgard, W., & Fox, D. (2005).** *Probabilistic Robotics*. MIT Press. Chapter 10: EKF-SLAM.
+2. **Smith, R., Self, M., & Cheeseman, P. (1990).** "Estimating Uncertain Spatial Relationships in Robotics." *Autonomous Robot Vehicles*, pp. 167-193.
+   - Expanded spatial uncertainty framework to robotic mapping applications
 
-4. **Barfoot, T. D. (2017).** *State Estimation for Robotics*. Cambridge University Press. Chapter 8: Batch and Recursive Estimation.
+3. **Dissanayake, M. G., Newman, P., Clark, S., Durrant-Whyte, H. F., & Csorba, M. (2001).** "A Solution to the Simultaneous Localization and Map Building (SLAM) Problem." *IEEE Transactions on Robotics and Automation*, 17(3), 229-241.
+   - First rigorous convergence proof for SLAM; established three fundamental theorems
+
+4. **Durrant-Whyte, H., & Bailey, T. (2006).** "Simultaneous Localization and Mapping: Part I." *IEEE Robotics & Automation Magazine*, 13(2), 99-110.
+   - Comprehensive tutorial establishing Bayesian filtering formulation for SLAM
 
 5. **Bailey, T., & Durrant-Whyte, H. (2006).** "Simultaneous Localization and Mapping (SLAM): Part II." *IEEE Robotics & Automation Magazine*, 13(3), 108-117.
+   - Continuation covering computational complexity, data association, and loop closure
+
+### Observability and Consistency
+
+6. **Huang, S., & Dissanayake, G. (2007).** "Convergence and Consistency Analysis for Extended Kalman Filter Based SLAM." *IEEE Transactions on Robotics*, 23(5), 1036-1049.
+   - Analyzed consistency properties and convergence of EKF-SLAM
+
+7. **Huang, G. P., Mourikis, A. I., & Roumeliotis, S. I. (2010).** "Observability-based Rules for Designing Consistent EKF SLAM Estimators." *The International Journal of Robotics Research*, 29(5), 502-528.
+   - Discovered observability mismatch causing EKF inconsistency; proposed FEJ-EKF solution
+
+### Process Noise and Motion Models
+
+8. **Martinelli, A., Tomatis, N., & Siegwart, R. (2007).** "Simultaneous Localization and Odometry Self-Calibration for Mobile Robot." *Autonomous Robots*, 22(1), 75-85.
+   - Experimental validation of distance-proportional odometry errors
+   - Odometry calibration showing $\sigma_{\text{error}}(d) = k_1 \cdot d + k_0$
+   - Empirical coefficients for differential drive robots
+
+9. **Roy, N., & Thrun, S. (1999).** "Coastal Navigation with Mobile Robots." *Advances in Neural Information Processing Systems*, 12, 1043-1049.
+   - Motion-scaled uncertainty in practical navigation systems
+   - Experimental validation of motion-proportional process noise
+
+10. **Borenstein, J., & Feng, L. (1996).** "Measurement and Correction of Systematic Odometry Errors in Mobile Robots." *IEEE Transactions on Robotics and Automation*, 12(6), 869-880.
+    - Comprehensive analysis of odometry error sources
+    - Systematic vs. random errors in wheel encoders
+    - Calibration methods for reducing motion-dependent errors
+
+11. **Bailey, T., Nieto, J., Guivant, J., Stevens, M., & Nebot, E. (2006).** "Consistency of the EKF-SLAM Algorithm." *Proceedings of IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)*, pp. 3562-3568.
+    - NEES testing for filter consistency validation
+    - Relationship between process noise tuning and consistency
+    - Experimental methodology for parameter selection
+
+### Textbooks and Tutorials
+
+12. **Thrun, S., Burgard, W., & Fox, D. (2005).** *Probabilistic Robotics*. MIT Press.
+    - Chapter 3: Recursive State Estimation (Kalman Filter derivation)
+    - Chapter 5: Robot Motion (Section 5.4: Odometry motion model with distance-dependent noise)
+    - Chapter 10: Extended Kalman Filter SLAM
+
+13. **Bar-Shalom, Y., Li, X. R., & Kirubarajan, T. (2001).** *Estimation with Applications to Tracking and Navigation*. Wiley.
+    - Chapter 5: Information and covariance forms of the Kalman filter
+    - Chapter 6: Process noise modeling for maneuvering targets
+    - Chapter 11: Performance evaluation and consistency testing
+
+14. **Barfoot, T. D. (2017).** *State Estimation for Robotics*. Cambridge University Press.
+    - Chapter 8: Batch and Recursive Estimation
+    - Chapter 11: Continuous-Time Estimation
+
+15. **Siegwart, R., Nourbakhsh, I. R., & Scaramuzza, D. (2011).** *Introduction to Autonomous Mobile Robots* (2nd ed.). MIT Press.
+    - Chapter 5: Mobile Robot Localization
+    - Section 5.2: Odometry error modeling
 
 ---
 

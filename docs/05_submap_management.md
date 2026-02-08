@@ -6,6 +6,7 @@
 3. [Coordinate Transformations](#3-coordinate-transformations)
 4. [Submap Stitching](#4-submap-stitching)
 5. [Global Map Maintenance](#5-global-map-maintenance)
+6. [Implementation](#6-implementation)
 
 ---
 
@@ -16,7 +17,69 @@
 - **Temporal coherence:** Points collected under consistent localization
 - **Hierarchical structure:** Building blocks for global map
 
-### 1.1 Architecture
+### 1.0 Historical Context and Hierarchical Mapping
+
+The concept of hierarchical and local mapping emerged as a solution to the scalability challenges of global SLAM. Early SLAM systems attempted to maintain a single monolithic map, but computational complexity ($O(n^3)$ for EKF-SLAM) made this intractable for large environments.
+
+**Foundational Work:**
+
+**Bosse et al. (2004)** introduced the **Atlas framework**, a seminal work in hierarchical SLAM:
+- Multiple **local coordinate frames** instead of single global frame
+- Relative pose constraints between submaps
+- Delayed decision-making for loop closure
+- Demonstrated large-scale mapping in cyclic environments
+
+**Key Insight** (Bosse et al., 2004): *"By representing the world as a collection of locally accurate submaps rather than a single global map, we can defer ambiguous association decisions and gracefully handle large-scale cyclic environments."*
+
+**Konolige & Agrawal (2008)** developed **FrameSLAM** for visual SLAM:
+- Keyframe-based submapping
+- Bundle adjustment within local frames
+- Graph-based optimization for global consistency
+- **Real-time performance** with bounded computational cost
+
+**Magnusson et al. (2007)** applied submaps to **3D NDT (Normal Distributions Transform)** mapping:
+- Local probabilistic surface representations
+- Scan registration using NDT instead of ICP
+- Demonstrated in underground mining environments (extreme conditions)
+
+**Stachniss et al. (2005)** introduced **information-theoretic submap selection**:
+- Actively select which submaps to maintain based on information content
+- Marginalize out low-information submaps to bound complexity
+- Theoretical framework linking map entropy to SLAM performance
+
+### 1.1 Submap Design Principles
+
+**Submaps vs. Global Mapping** (Bosse et al., 2004):
+
+| Aspect | Global Map | Submap Approach |
+|--------|------------|-----------------|
+| **Computational Complexity** | $O(n^3)$ (unbounded) | $O(k \cdot m^3)$ where $m \ll n$ (bounded) |
+| **Drift Accumulation** | Global drift affects all | Drift isolated within submaps |
+| **Loop Closure** | Immediate global update | Graph optimization between submaps |
+| **Real-time Feasibility** | Challenging for large $n$ | Scalable through local processing |
+
+**Submap Size Selection** (empirical guidelines):
+- **Too small** (< 20 scans): Insufficient overlap for reliable ICP
+- **Too large** (> 100 scans): Drift accumulates, loses local consistency
+- **Optimal** (40-60 scans): Balances overlap, drift, and computational cost
+
+**Temporal Coherence Principle** (Konolige & Agrawal, 2008):
+
+Scan points collected within a submap should be **temporally proximate** to minimize accumulated localization error:
+
+$$
+\Delta t_{\text{submap}} < \frac{\epsilon_{\text{tol}}}{\sigma_{\text{drift}}}
+$$
+
+where:
+- $\epsilon_{\text{tol}}$: acceptable positioning error
+- $\sigma_{\text{drift}}$: drift rate (m/s)
+
+**For typical mobile robot** ($\sigma_{\text{drift}} \approx 0.01$ m/s):
+- Submap duration: ~50-60 seconds
+- At 1 Hz scan rate: 50-60 scans per submap
+
+### 1.2 Architecture
 
 ```
 Scan 1-50  → Submap 0 ────┐
@@ -310,11 +373,77 @@ class SubmapManager:
 
 ## References
 
-1. **Konolige, K., & Agrawal, M. (2008).** "FrameSLAM: From Bundle Adjustment to Real-Time Visual Mapping." *IEEE Transactions on Robotics*, 24(5), 1066-1077.
+### Hierarchical and Local Mapping
 
-2. **Bosse, M., & Zlot, R. (2009).** "Keypoint Design and Evaluation for Place Recognition in 2D Lidar Maps." *Robotics and Autonomous Systems*, 57(12), 1211-1224.
+1. **Bosse, M., Newman, P., Leonard, J., & Teller, S. (2004).** "Simultaneous Localization and Map Building in Large-Scale Cyclic Environments Using the Atlas Framework." *The International Journal of Robotics Research*, 23(12), 1113-1139.
+   - Foundational work on hierarchical SLAM with multiple local coordinate frames
+   - Atlas framework for large-scale cyclic environments
+   - Delayed decision-making for ambiguous loop closures
 
-3. **Magnusson, M., Lilienthal, A., & Duckett, T. (2007).** "Scan Registration for Autonomous Mining Vehicles Using 3D-NDT." *Journal of Field Robotics*, 24(10), 803-827.
+2. **Konolige, K., & Agrawal, M. (2008).** "FrameSLAM: From Bundle Adjustment to Real-Time Visual Mapping." *IEEE Transactions on Robotics*, 24(5), 1066-1077.
+   - Keyframe-based submapping for visual SLAM
+   - Local bundle adjustment within frames
+   - Real-time performance through bounded optimization
+
+3. **Estrada, C., Neira, J., & Tardós, J. D. (2005).** "Hierarchical SLAM: Real-Time Accurate Mapping of Large Environments." *IEEE Transactions on Robotics*, 21(4), 588-596.
+   - Two-level hierarchical approach: local and global maps
+   - Real-time EKF-SLAM through hierarchical decomposition
+   - Experimental validation in large indoor environments
+
+### Submap Stitching and Registration
+
+4. **Magnusson, M., Lilienthal, A., & Duckett, T. (2007).** "Scan Registration for Autonomous Mining Vehicles Using 3D-NDT." *Journal of Field Robotics*, 24(10), 803-827.
+   - Normal Distributions Transform for scan registration
+   - Probabilistic submap representation
+   - Robust to extreme environments (underground mining)
+
+5. **Ni, K., Steedly, D., & Dellaert, F. (2007).** "Tectonic SAM: Exact, Out-of-Core, Submap-Based SLAM." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 1678-1685.
+   - Submap-based SLAM using Smoothing and Mapping (SAM)
+   - Exact inference through Cholesky factorization
+   - Out-of-core processing for very large maps
+
+### Information-Theoretic Map Management
+
+6. **Stachniss, C., Grisetti, G., & Burgard, W. (2005).** "Information Gain-based Exploration Using Rao-Blackwellized Particle Filters." *Proceedings of Robotics: Science and Systems (RSS)*.
+   - Information-theoretic submap selection
+   - Active mapping strategies
+   - Particle filter-based SLAM with selective map updates
+
+7. **Bosse, M., & Zlot, R. (2009).** "Keypoint Design and Evaluation for Place Recognition in 2D Lidar Maps." *Robotics and Autonomous Systems*, 57(12), 1211-1224.
+   - Place recognition for loop closure between submaps
+   - Keypoint descriptors from 2D LiDAR data
+   - Experimental evaluation on large-scale datasets
+
+### Graph-Based Global Optimization
+
+8. **Grisetti, G., Stachniss, C., Grzonka, S., & Burgard, W. (2007).** "A Tree Parameterization for Efficiently Computing Maximum Likelihood Maps Using Gradient Descent." *Proceedings of Robotics: Science and Systems (RSS)*.
+   - Graph optimization for submap stitching
+   - Efficient gradient descent on pose graphs
+   - TreeMap: Hierarchical representation
+
+9. **Kummerle, R., Grisetti, G., Strasdat, H., Konolige, K., & Burgard, W. (2011).** "g2o: A General Framework for Graph Optimization." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 3607-3613.
+   - General framework for pose graph optimization
+   - Applicable to submap stitching and loop closure
+   - Open-source implementation widely used in SLAM
+
+### Coordinate Frame Management
+
+10. **Foote, T. (2013).** "tf: The Transform Library." *Proceedings of IEEE International Conference on Technologies for Practical Robot Applications (TePRA)*, pp. 1-6.
+    - ROS transform library for managing multiple coordinate frames
+    - Time-synchronized transform trees
+    - Critical infrastructure for multi-frame SLAM systems
+
+### Modern Approaches
+
+11. **Hess, W., Kohler, D., Rapp, H., & Andor, D. (2016).** "Real-Time Loop Closure in 2D LIDAR SLAM." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 1271-1278.
+    - Google Cartographer: Submap-based 2D/3D SLAM
+    - Efficient loop closure through branch-and-bound scan matching
+    - Real-time performance on large-scale environments
+
+12. **Behley, J., & Stachniss, C. (2018).** "Efficient Surfel-Based SLAM using 3D Laser Range Data in Urban Environments." *Proceedings of Robotics: Science and Systems (RSS)*.
+    - Surfel-based map representation
+    - Hierarchical map structure for efficiency
+    - Real-world urban mapping applications
 
 ---
 

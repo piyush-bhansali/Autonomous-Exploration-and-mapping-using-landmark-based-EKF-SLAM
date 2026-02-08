@@ -15,7 +15,8 @@ def scan_to_map_icp(
     accumulated_points_world: np.ndarray,
     device: o3c.Device,
     voxel_size: float,
-    logger=None
+    logger=None,
+    lidar_noise_sigma: float = 0.01
 ) -> Tuple[np.ndarray, Optional[dict]]:
         
     if len(scan_points_world) < 50 or len(accumulated_points_world) < 50:
@@ -67,8 +68,8 @@ def scan_to_map_icp(
 
             covariance = None
             try:
-                # Estimate covariance from point-to-point residuals (2D)
-                # P = sigma^2 * (sum_i J_i^T J_i)^-1
+                # Estimate Hessian-based covariance with fixed LiDAR noise
+                # P = sigma^2 * A^(-1) where A = sum(J^T @ J)
                 tree = KDTree(accumulated_points_world[:, :2])
                 transformed_source = points_corrected[:, :2]
                 distances, indices = tree.query(transformed_source)
@@ -84,14 +85,10 @@ def scan_to_map_icp(
                     R = np.array([[c, -s], [s, c]])
                     dR_dtheta = np.array([[-s, -c], [c, -s]])
 
+                    # Compute Hessian (Information Matrix)
                     A = np.zeros((3, 3))
-                    rss = 0.0
-                    dof = 0
 
                     for p_s, p_t in zip(src_inliers, tgt_inliers):
-                        p_pred = (R @ p_s) + np.array([dx, dy])
-                        r = p_t - p_pred
-
                         dp_dtheta = dR_dtheta @ p_s
 
                         J = np.array([
@@ -99,16 +96,18 @@ def scan_to_map_icp(
                             [0.0, -1.0, -dp_dtheta[1]]
                         ])
 
+                        # Accumulate Hessian
                         A += J.T @ J
-                        rss += float(r.T @ r)
-                        dof += 2
 
-                    dof = max(dof - 3, 1)
-                    sigma2 = rss / dof
+                    # Use fixed LiDAR noise from TurtleBot3 LDS-01 specs (±10mm)
+                    # σ = 0.01m → σ² = 0.0001
+                    # This avoids the "optimism" problem where more points → smaller σ²
+                    sigma2 = lidar_noise_sigma ** 2
 
                     try:
                         A_inv = np.linalg.inv(A)
                     except np.linalg.LinAlgError:
+                        # Use pseudo-inverse if singular (e.g., in featureless corridors)
                         A_inv = np.linalg.pinv(A)
 
                     covariance = sigma2 * A_inv

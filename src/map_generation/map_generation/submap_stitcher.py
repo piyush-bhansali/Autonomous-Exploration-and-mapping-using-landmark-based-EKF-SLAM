@@ -4,6 +4,7 @@ import numpy as np
 import open3d as o3d
 import open3d.core as o3c
 from typing import Optional, Tuple, Dict
+from scipy.spatial import KDTree
 import time
 
 
@@ -12,11 +13,14 @@ class SubmapStitcher:
     def __init__(self,
                  voxel_size: float = 0.05,
                  icp_max_correspondence_dist: float = 0.05,
-                 icp_fitness_threshold: float = 0.45):
+                 icp_fitness_threshold: float = 0.45,
+                 lidar_noise_sigma: float = 0.01):
 
         self.voxel_size = voxel_size
         self.icp_max_dist = icp_max_correspondence_dist
         self.icp_fitness_threshold = icp_fitness_threshold
+        # LiDAR noise from TurtleBot3 LDS-01 specs (±10mm accuracy)
+        self.lidar_noise_sigma = lidar_noise_sigma  # σ = 0.01m → σ² = 0.0001
         # GPU configuration (always enabled)
         if o3c.cuda.is_available():
             self.device = o3c.Device("CUDA:0")
@@ -43,8 +47,8 @@ class SubmapStitcher:
     def align_submap_with_icp(self,
                        source: o3d.t.geometry.PointCloud,
                        target: o3d.t.geometry.PointCloud,
-                       initial_guess: Optional[np.ndarray] = None) -> Tuple[bool, np.ndarray, float]:
-        
+                       initial_guess: Optional[np.ndarray] = None) -> Tuple[bool, np.ndarray, float, Optional[np.ndarray]]:
+
         if initial_guess is None:
             initial_guess = np.eye(4)
 
@@ -62,9 +66,9 @@ class SubmapStitcher:
             init_source_to_target=init_transform,
             estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
             criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
-                max_iteration=50, 
-                relative_fitness=1e-6,  
-                relative_rmse=1e-6     
+                max_iteration=50,
+                relative_fitness=1e-6,
+                relative_rmse=1e-6
             )
         )
 
@@ -75,7 +79,96 @@ class SubmapStitcher:
 
         success = reg_result.fitness >= self.icp_fitness_threshold
 
-        return success, transform, reg_result.fitness
+        # Compute Hessian-based covariance (P = σ² * A^(-1))
+        covariance = self._compute_icp_covariance(
+            source_tensor,
+            target_tensor,
+            transform
+        )
+
+        return success, transform, reg_result.fitness, covariance
+
+    def _compute_icp_covariance(self,
+                                source: o3d.t.geometry.PointCloud,
+                                target: o3d.t.geometry.PointCloud,
+                                transform: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Compute Hessian-based covariance for ICP alignment.
+
+        Returns 3x3 covariance matrix for (x, y, theta) based on:
+        P = σ² * A^(-1)
+
+        where A is the Hessian (information matrix) from point correspondences.
+        """
+        try:
+            # Convert tensors to numpy arrays for KDTree
+            source_points = source.point.positions.cpu().numpy()[:, :2]  # 2D (x, y)
+            target_points = target.point.positions.cpu().numpy()[:, :2]
+
+            if len(source_points) < 6 or len(target_points) < 6:
+                return None
+
+            # Extract 2D pose from transform
+            dx = transform[0, 3]
+            dy = transform[1, 3]
+            dtheta = np.arctan2(transform[1, 0], transform[0, 0])
+
+            # Rotation matrix and derivative
+            c = np.cos(dtheta)
+            s = np.sin(dtheta)
+            R = np.array([[c, -s], [s, c]])
+            dR_dtheta = np.array([[-s, -c], [c, -s]])
+
+            # Find correspondences using KDTree
+            tree = KDTree(target_points)
+            transformed_source = (R @ source_points.T).T + np.array([dx, dy])
+            distances, indices = tree.query(transformed_source)
+
+            # Filter inliers
+            max_dist = self.icp_max_dist
+            inlier_mask = distances < max_dist
+
+            if np.count_nonzero(inlier_mask) < 6:
+                return None
+
+            src_inliers = source_points[inlier_mask]
+            tgt_inliers = target_points[indices[inlier_mask]]
+
+            # Compute Hessian A = sum(J^T @ J)
+            A = np.zeros((3, 3))
+
+            for p_s, p_t in zip(src_inliers, tgt_inliers):
+                # Jacobian of predicted point wrt pose (x, y, theta)
+                dp_dtheta = dR_dtheta @ p_s
+
+                # Jacobian: residual = target - predicted
+                # ∂r/∂x = -1, ∂r/∂y = -1, ∂r/∂θ = -dp_dtheta
+                J = np.array([
+                    [-1.0, 0.0, -dp_dtheta[0]],
+                    [0.0, -1.0, -dp_dtheta[1]]
+                ])
+
+                # Accumulate Hessian (Information Matrix)
+                A += J.T @ J
+
+            # Use fixed LiDAR noise instead of estimating from residuals
+            # This avoids the "optimism" problem where more points → smaller σ²
+            sigma2 = self.lidar_noise_sigma ** 2
+
+            # Covariance: P = σ² * A^(-1)
+            try:
+                A_inv = np.linalg.inv(A)
+            except np.linalg.LinAlgError:
+                # Use pseudo-inverse if singular (e.g., in featureless corridors)
+                A_inv = np.linalg.pinv(A)
+
+            covariance = sigma2 * A_inv
+
+            return covariance
+
+        except Exception as e:
+            # Return None if covariance computation fails
+            return None
 
     def integrate_submap_to_global_map(self,
                                        points: np.ndarray,
@@ -123,10 +216,10 @@ class SubmapStitcher:
 
             return True, None  
 
-        success, global_transform_refined, fitness = self.align_submap_with_icp(
+        success, global_transform_refined, fitness, covariance = self.align_submap_with_icp(
             source=pcd_tensor,
             target=self.global_map_tensor,
-            initial_guess=global_transform  
+            initial_guess=global_transform
         )
 
         icp_correction = np.linalg.inv(global_transform) @ global_transform_refined
@@ -146,7 +239,8 @@ class SubmapStitcher:
                 'dx': icp_correction[0, 3],
                 'dy': icp_correction[1, 3],
                 'dtheta': np.arctan2(icp_correction[1, 0], icp_correction[0, 0]),
-                'type': 'submap_icp'
+                'type': 'submap_icp',
+                'covariance': covariance  # Hessian-based measurement uncertainty
             }
         transform_refined_tensor = o3c.Tensor(global_transform_refined, dtype=o3c.float32, device=self.device)
         pcd_aligned_tensor = pcd_tensor.transform(transform_refined_tensor)
