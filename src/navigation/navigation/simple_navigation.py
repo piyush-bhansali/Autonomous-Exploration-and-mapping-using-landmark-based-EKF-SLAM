@@ -15,7 +15,7 @@ import threading
 from scipy.spatial import KDTree
 
 from navigation.convex_frontier_detector import ConvexFrontierDetector
-from map_generation.utils import quaternion_to_yaw
+from map_generation.transform_utils import quaternion_to_yaw
 from navigation.rrt_star import RRTStar
 from navigation.pure_pursuit_controller import PurePursuit
 from autonomous_exploration.qos_profiles import (

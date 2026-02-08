@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 import numpy as np
 from typing import List, Dict, Tuple
 
@@ -9,22 +8,37 @@ def associate_landmarks(
     observed_features: List[Dict],
     ekf_slam,
     max_mahalanobis_dist: float = 5.99,  # Chi-squared 2-DOF, 95% confidence
-    max_euclidean_dist: float = 1.0
+    max_euclidean_dist: float = 1.0,
+    debug: bool = False
 ) -> Tuple[List[Tuple[int, int]], List[int]]:
-    
+
     matched = []
     unmatched = []
 
     if len(ekf_slam.landmarks) == 0:
         # No landmarks yet - all observations are new
+        if debug:
+            print(f"[DATA_ASSOC] No existing landmarks, all {len(observed_features)} features are new")
         return matched, list(range(len(observed_features)))
 
     # Robot pose
     x_r, y_r, theta_r = ekf_slam.state[0:3]
 
+    if debug:
+        print(f"\n[DATA_ASSOC] Robot pose: ({x_r:.3f}, {y_r:.3f}, {theta_r:.3f})")
+        print(f"[DATA_ASSOC] Observed features: {len(observed_features)}")
+        print(f"[DATA_ASSOC] Existing landmarks: {len(ekf_slam.landmarks)}")
+
     for feat_idx, feature in enumerate(observed_features):
         best_landmark_id = None
         best_mahalanobis = float('inf')
+
+        if debug:
+            print(f"\n[DATA_ASSOC] Feature {feat_idx}: type={feature['type']}")
+            if feature['type'] == 'wall':
+                print(f"  Observed: rho={feature['rho']:.3f}, alpha={feature['alpha']:.3f}")
+            elif feature['type'] == 'corner':
+                print(f"  Observed: pos={feature['position']}")
 
         # Try matching with each existing landmark
         for landmark_id, lm_data in ekf_slam.landmarks.items():
@@ -42,7 +56,14 @@ def associate_landmarks(
 
                 # Spatial gating: check if wall is within range
                 dist_to_wall = abs(lm_rho - (x_r * np.cos(lm_alpha) + y_r * np.sin(lm_alpha)))
+
+                if debug:
+                    print(f"  Landmark {landmark_id}: rho={lm_rho:.3f}, alpha={lm_alpha:.3f}")
+                    print(f"    Dist to wall: {dist_to_wall:.3f}m (threshold: {max_euclidean_dist:.3f}m)")
+
                 if dist_to_wall > max_euclidean_dist:
+                    if debug:
+                        print(f"    REJECTED: Spatial gating (too far)")
                     continue
 
                 # Predicted observation (wall in robot frame)
@@ -84,7 +105,14 @@ def associate_landmarks(
 
                 # Spatial gating: Euclidean distance
                 dist_to_corner = np.sqrt((lm_x - x_r)**2 + (lm_y - y_r)**2)
+
+                if debug:
+                    print(f"  Landmark {landmark_id}: pos=({lm_x:.3f}, {lm_y:.3f})")
+                    print(f"    Dist to corner: {dist_to_corner:.3f}m (threshold: {max_euclidean_dist:.3f}m)")
+
                 if dist_to_corner > max_euclidean_dist:
+                    if debug:
+                        print(f"    REJECTED: Spatial gating (too far)")
                     continue
 
                 # Predicted observation (corner in robot frame)
@@ -135,16 +163,37 @@ def associate_landmarks(
                 mahal_dist_sq = innovation.T @ S_inv @ innovation
                 mahal_dist = float(np.sqrt(mahal_dist_sq))
             except np.linalg.LinAlgError:
+                if debug:
+                    print(f"    REJECTED: Singular innovation covariance")
                 continue
+
+            if debug:
+                print(f"    Innovation: {innovation}")
+                print(f"    Mahalanobis distance: {mahal_dist:.3f} (threshold: {max_mahalanobis_dist:.3f})")
 
             # Chi-squared gating
             if mahal_dist_sq < max_mahalanobis_dist**2 and mahal_dist < best_mahalanobis:
+                if debug:
+                    print(f"    PASSED: Best match so far (dist={mahal_dist:.3f})")
                 best_mahalanobis = mahal_dist
                 best_landmark_id = landmark_id
+            else:
+                if debug:
+                    if mahal_dist_sq >= max_mahalanobis_dist**2:
+                        print(f"    REJECTED: Mahalanobis distance too large")
+                    else:
+                        print(f"    REJECTED: Not the best match")
 
         if best_landmark_id is not None:
+            if debug:
+                print(f"  => MATCHED to landmark {best_landmark_id} (dist={best_mahalanobis:.3f})")
             matched.append((feat_idx, best_landmark_id))
         else:
+            if debug:
+                print(f"  => UNMATCHED (new landmark)")
             unmatched.append(feat_idx)
+
+    if debug:
+        print(f"\n[DATA_ASSOC] SUMMARY: {len(matched)} matched, {len(unmatched)} unmatched")
 
     return matched, unmatched

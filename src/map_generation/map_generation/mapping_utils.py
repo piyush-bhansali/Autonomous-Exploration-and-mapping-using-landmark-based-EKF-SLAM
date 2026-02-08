@@ -7,7 +7,7 @@ from scipy.spatial.transform import Rotation
 import open3d as o3d
 import open3d.core as o3c
 
-from map_generation.utils import quaternion_to_rotation_matrix, numpy_to_pointcloud2
+from map_generation.transform_utils import quaternion_to_rotation_matrix, numpy_to_pointcloud2
 
 
 def scan_to_map_icp(
