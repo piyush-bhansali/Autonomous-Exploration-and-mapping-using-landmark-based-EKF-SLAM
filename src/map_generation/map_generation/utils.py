@@ -4,6 +4,7 @@
 import numpy as np
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Header
+from scipy.spatial.transform import Rotation
 
 
 # =============================================================================
@@ -43,30 +44,49 @@ def numpy_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud
 
 
 # =============================================================================
-# Quaternion Conversions
+# Quaternion Conversions (using scipy.spatial.transform.Rotation)
 # =============================================================================
 
 def quaternion_to_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
-    
-    siny_cosp = 2.0 * (qw * qz + qx * qy)
-    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
-    return np.arctan2(siny_cosp, cosy_cosp)
+    """
+    Extract yaw angle from quaternion.
+
+    Args:
+        qx, qy, qz, qw: Quaternion components (scalar-last convention)
+
+    Returns:
+        Yaw angle in radians
+    """
+    rotation = Rotation.from_quat([qx, qy, qz, qw])
+    # Extract Euler angles in ZYX convention (yaw, pitch, roll)
+    euler = rotation.as_euler('zyx', degrees=False)
+    return euler[0]  # Return yaw (z-axis rotation)
 
 
 def yaw_to_quaternion(yaw: float) -> tuple:
-   
-    qx = 0.0
-    qy = 0.0
-    qz = np.sin(yaw / 2.0)
-    qw = np.cos(yaw / 2.0)
-    return (qx, qy, qz, qw)
+    """
+    Convert yaw angle to quaternion (pure z-axis rotation).
+
+    Args:
+        yaw: Yaw angle in radians
+
+    Returns:
+        Tuple (qx, qy, qz, qw) in scalar-last convention
+    """
+    rotation = Rotation.from_euler('z', yaw, degrees=False)
+    quat = rotation.as_quat()  # Returns [x, y, z, w]
+    return (quat[0], quat[1], quat[2], quat[3])
 
 
 def quaternion_to_rotation_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
-    
-    R = np.array([
-        [1 - 2*(qy**2 + qz**2), 2*(qx*qy - qw*qz), 2*(qx*qz + qw*qy)],
-        [2*(qx*qy + qw*qz), 1 - 2*(qx**2 + qz**2), 2*(qy*qz - qw*qx)],
-        [2*(qx*qz - qw*qy), 2*(qy*qz + qw*qx), 1 - 2*(qx**2 + qy**2)]
-    ])
-    return R
+    """
+    Convert quaternion to 3x3 rotation matrix.
+
+    Args:
+        qx, qy, qz, qw: Quaternion components (scalar-last convention)
+
+    Returns:
+        3x3 rotation matrix as numpy array
+    """
+    rotation = Rotation.from_quat([qx, qy, qz, qw])
+    return rotation.as_matrix()

@@ -134,90 +134,6 @@ def scan_to_map_icp(
         return scan_points_world, None
 
 
-def is_distinctive_submap(
-    geometric_descriptors: np.ndarray,
-    min_distinctiveness: float = 0.25,
-    min_keypoints: int = 15
-) -> Tuple[bool, Dict]:
-    
-    if len(geometric_descriptors) < min_keypoints:
-        return False, {'reason': 'too_few_keypoints', 'num_keypoints': len(geometric_descriptors)}
-
-    linearity = geometric_descriptors[:, 0]
-    planarity = geometric_descriptors[:, 1]
-    scattering = geometric_descriptors[:, 2]
-    avg_dist = geometric_descriptors[:, 3]
-
-    mean_linearity = np.mean(linearity)
-    if mean_linearity > 0.7: 
-        return False, {
-            'reason': 'corridor_detected',
-            'mean_linearity': float(mean_linearity)
-        }
-
-    scattering_variance = np.var(scattering)
-    if scattering_variance < 0.01:  # Very uniform
-        return False, {
-            'reason': 'low_geometric_diversity',
-            'scattering_var': float(scattering_variance)
-        }
-
-    feature_variance = np.mean([
-        np.var(linearity),
-        np.var(planarity),
-        np.var(scattering),
-        np.var(avg_dist)
-    ])
-
-    if feature_variance < min_distinctiveness:
-        return False, {
-            'reason': 'low_feature_diversity',
-            'feature_var': float(feature_variance)
-        }
-
-    corner_points = (linearity < 0.3) & (scattering > 0.4)
-    corner_ratio = np.sum(corner_points) / len(linearity)
-
-    if corner_ratio < 0.1:  
-        return False, {
-            'reason': 'no_distinctive_features',
-            'corner_ratio': float(corner_ratio)
-        }
-
-    return True, {
-        'mean_linearity': float(mean_linearity),
-        'scattering_var': float(scattering_variance),
-        'feature_var': float(feature_variance),
-        'corner_ratio': float(corner_ratio),
-        'num_keypoints': len(geometric_descriptors)
-    }
-
-
-def match_geometric_features(
-    descriptors1: np.ndarray,
-    descriptors2: np.ndarray,
-    max_distance: float = 0.75
-) -> np.ndarray:
-    
-    if len(descriptors1) == 0 or len(descriptors2) == 0:
-        return np.array([])
-
-    tree = KDTree(descriptors2)
-
-    distances, indices = tree.query(descriptors1)
-
-    valid = distances < max_distance
-
-    matches = np.column_stack([
-        np.arange(len(descriptors1))[valid],
-        indices[valid],
-        distances[valid]
-    ])
-
-    return matches
-
-
-
 def publish_global_map(
     global_points: Optional[np.ndarray],
     publisher,
@@ -315,3 +231,95 @@ def transform_scan_to_relative_frame(
     points_local = (R_base_to_local @ points_lidar_frame.T).T + t_lidar_to_local
 
     return points_local
+
+
+def publish_feature_markers(
+    features: list,
+    scan_timestamp,
+    publisher,
+    robot_name: str
+) -> None:
+    """
+    Publish visualization markers for detected features (walls and corners).
+
+    Args:
+        features: List of feature dictionaries with 'type', position/parameters, etc.
+        scan_timestamp: Timestamp from scan message for TF synchronization
+        publisher: ROS publisher for MarkerArray messages
+        robot_name: Name of the robot (for frame_id)
+    """
+    from visualization_msgs.msg import Marker, MarkerArray
+    from std_msgs.msg import ColorRGBA
+
+    marker_array = MarkerArray()
+
+    for i, feature in enumerate(features):
+        marker = Marker()
+        marker.header.frame_id = f'{robot_name}/base_scan'  # Features in robot frame
+        marker.header.stamp = scan_timestamp  # Use scan timestamp for TF sync
+        marker.ns = 'scan_features'
+        marker.id = i
+        marker.action = Marker.ADD
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 200000000  # 0.2 seconds
+
+        if feature['type'] == 'corner':
+            # Corners: Red spheres at Cartesian position
+            marker.type = Marker.SPHERE
+            marker.scale.x = 0.15
+            marker.scale.y = 0.15
+            marker.scale.z = 0.15
+            marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Red
+
+            # Position from Cartesian coordinates
+            marker.pose.position.x = float(feature['position'][0])
+            marker.pose.position.y = float(feature['position'][1])
+            marker.pose.position.z = 0.0
+
+        elif feature['type'] == 'wall':
+            # Walls: Blue cylinders at closest point on wall
+            marker.type = Marker.CYLINDER
+            marker.scale.x = 0.08  # Diameter
+            marker.scale.y = 0.08
+            marker.scale.z = 0.2   # Height
+            marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.6)  # Blue
+
+            # Wall in Hessian form: ρ = x*cos(α) + y*sin(α)
+            # Closest point on wall to origin: (ρ*cos(α), ρ*sin(α))
+            rho = feature['rho']
+            alpha = feature['alpha']
+
+            marker.pose.position.x = float(rho * np.cos(alpha))
+            marker.pose.position.y = float(rho * np.sin(alpha))
+            marker.pose.position.z = 0.0
+
+            # Orient cylinder along wall direction (perpendicular to normal)
+            marker.pose.orientation.z = np.sin(alpha / 2.0)
+            marker.pose.orientation.w = np.cos(alpha / 2.0)
+
+        marker_array.markers.append(marker)
+
+        # Add text label showing feature info
+        text_marker = Marker()
+        text_marker.header = marker.header
+        text_marker.ns = 'feature_labels'
+        text_marker.id = i + 1000  # Offset to avoid ID collision
+        text_marker.type = Marker.TEXT_VIEW_FACING
+        text_marker.action = Marker.ADD
+        text_marker.pose.position.x = marker.pose.position.x
+        text_marker.pose.position.y = marker.pose.position.y
+        text_marker.pose.position.z = 0.3  # Above the feature
+        text_marker.scale.z = 0.1  # Text size
+        text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)  # White
+
+        # Different labels for walls vs corners
+        if feature['type'] == 'wall':
+            text_marker.text = f"WALL\n{feature['strength']:.2f}m"
+        else:
+            text_marker.text = f"CORNER\n{feature['strength']:.0f}°"
+
+        text_marker.lifetime = marker.lifetime
+
+        marker_array.markers.append(text_marker)
+
+    publisher.publish(marker_array)

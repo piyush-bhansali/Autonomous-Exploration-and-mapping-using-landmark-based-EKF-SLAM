@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-EKF-SLAM with Landmark-Based Localization
-
-Proper statistical SLAM implementation:
-- State: [x, y, θ, l1_x, l1_y, l2_x, l2_y, ...]
-- Landmarks: Geometric features (corners, line endpoints)
-- Sliding window: Remove landmarks not seen recently
-- Proper covariance propagation throughout
-"""
 
 import numpy as np
 from typing import Dict, Tuple, Optional
@@ -23,17 +14,15 @@ class LandmarkEKFSLAM:
         # Robot state: [x, y, θ]
         self.state = np.zeros(3)
 
-        # Covariance matrix (grows as landmarks are added)
-        self.P = np.eye(3) * 0.1
+        # Covariance matrix 
+        self.P = np.eye(3) * 0.01
 
         # Process noise (odometry)
         self.Q = np.diag([
-            0.01,   # Distance variance σ²_Δd
-            0.005   # Angular variance σ²_Δθ
+            0.01,   
+            0.005   
         ])
-
-        # Landmark database
-        # landmark_id -> {'state_index': int, 'last_seen': int, 'observations': int, 'feature_type': str}
+       
         self.landmarks = {}
         self.next_landmark_id = 0
 
@@ -47,10 +36,26 @@ class LandmarkEKFSLAM:
         self.current_scan_number = 0
         self.landmark_update_count = 0
 
+    def _condition_covariance(self, P: np.ndarray, min_eigenvalue: float = 1e-6,
+                             max_eigenvalue: float = 100.0) -> np.ndarray:
+      
+        P_sym = (P + P.T) / 2.0
+
+        eigvals, eigvecs = np.linalg.eigh(P_sym)
+
+        eigvals_clamped = np.clip(eigvals, min_eigenvalue, max_eigenvalue)
+
+        P_conditioned = eigvecs @ np.diag(eigvals_clamped) @ eigvecs.T
+
+        n = len(P)
+        P_conditioned += np.eye(n) * 1e-9
+
+        return P_conditioned
+
     def initialize(self, x: float, y: float, theta: float):
         """Initialize robot pose."""
         self.state = np.array([x, y, theta])
-        self.P = np.eye(3) * 0.1
+        self.P = np.eye(3) * 0.01
         self.initialized = True
 
     def predict_with_relative_motion(self, delta_d: float, delta_theta: float):
@@ -71,7 +76,6 @@ class LandmarkEKFSLAM:
 
         self.state[0:3] = [x_new, y_new, theta_new]
 
-        # Jacobian of motion model w.r.t. robot pose
         n = len(self.state)
         F = np.eye(n)
         F[0:3, 0:3] = np.array([
@@ -80,7 +84,6 @@ class LandmarkEKFSLAM:
             [0.0, 0.0,  1.0]
         ])
 
-        # Jacobian w.r.t. control input [Δd, Δθ]
         G = np.zeros((n, 2))
         G[0:3, :] = np.array([
             [np.cos(theta_mid), -0.5 * delta_d * np.sin(theta_mid)],
@@ -88,33 +91,34 @@ class LandmarkEKFSLAM:
             [0.0,                1.0]
         ])
 
-        # Scale process noise by motion magnitude
         motion_distance = abs(delta_d)
         motion_rotation = abs(delta_theta)
-        Q_scaled = np.diag([
-            self.Q[0, 0] * (motion_distance + 0.01),
-            self.Q[1, 1] * (motion_rotation + 0.001)
-        ])
 
-        # Covariance prediction
+        # Add minimum variance to prevent zero when stationary
+        min_distance_var = 0.0001  # (1cm)²
+        min_rotation_var = 0.000001  # (~0.06°)²
+
+        sigma_d_sq = self.Q[0, 0] * motion_distance**2 + min_distance_var
+        sigma_theta_sq = self.Q[1, 1] * motion_rotation**2 + min_rotation_var
+
+        Q_scaled = np.diag([sigma_d_sq, sigma_theta_sq])
+
         self.P = F @ self.P @ F.T + G @ Q_scaled @ G.T
 
-        # Ensure symmetry
-        self.P = (self.P + self.P.T) / 2.0
+        self.P = self._condition_covariance(self.P)
 
     def add_landmark(self,
                     z_x: float,
                     z_y: float,
                     feature: Dict,
                     scan_number: int) -> int:
-        # Transform observation to map frame
+        
         x_r, y_r, theta_r = self.state[0:3]
 
-        # Observation noise (from feature quality)
         R_obs = feature.get('covariance', np.eye(2) * 0.05**2)
 
         if feature['type'] == 'wall':
-            # Wall in Hessian form (rho, alpha) in robot frame
+            
             rho_r = z_x
             alpha_r = z_y
 
@@ -126,7 +130,6 @@ class LandmarkEKFSLAM:
 
             rho_m = rho_r + x_r * cos_a + y_r * sin_a
 
-            # Augment state vector
             self.state = np.append(self.state, [rho_m, alpha_m])
 
             # Jacobian wrt robot pose
@@ -154,14 +157,13 @@ class LandmarkEKFSLAM:
             # Augment state vector
             self.state = np.append(self.state, [lm_x, lm_y])
 
-            # Observation Jacobian for initialization
-            # ∂h^(-1)/∂robot_pose
+            # Jacobian wrt robot pose
             H_r = np.array([
                 [1.0, 0.0, -sin_theta * z_x - cos_theta * z_y],
                 [0.0, 1.0,  cos_theta * z_x - sin_theta * z_y]
             ])
 
-            # ∂h^(-1)/∂observation
+            # Jacobian wrt observation (rho_r, alpha_r)
             H_z = np.array([
                 [cos_theta, -sin_theta],
                 [sin_theta,  cos_theta]
@@ -171,7 +173,6 @@ class LandmarkEKFSLAM:
         P_rr = self.P[0:3, 0:3]  # Robot pose covariance
         P_lm = H_r @ P_rr @ H_r.T + H_z @ R_obs @ H_z.T
 
-        # Cross-covariance between existing state and new landmark
         # P_xl = P_xx_all * H_r^T  -> (N x 3) * (3 x 2) = (N x 2)
         P_rl = self.P[:, 0:3] @ H_r.T
 
@@ -260,6 +261,7 @@ class LandmarkEKFSLAM:
             lm_y = self.state[idx + 1]
 
             # Predicted observation (landmark in robot frame)
+            # Rotation by -θ_r to transform from map to robot frame
             dx = lm_x - x_r
             dy = lm_y - y_r
 
@@ -272,16 +274,22 @@ class LandmarkEKFSLAM:
             # Innovation
             innovation = np.array([z_x - z_pred_x, z_y - z_pred_y])
 
-            # ∂h/∂robot_pose
-            H[0, 0] = -cos_theta
-            H[0, 1] =  sin_theta
-            H[0, 2] = -dx * sin_theta - dy * cos_theta
+            # Observation model: h(x) = R(-θ_r) * (lm - robot_pos)
+            # where R(-θ_r) = [[cos(θ_r), sin(θ_r)], [-sin(θ_r), cos(θ_r)]]
+            #
+            # ∂h/∂robot_pose - using actual angle θ_r (not -θ_r) for clarity
+            c = np.cos(theta_r)
+            s = np.sin(theta_r)
 
-            H[1, 0] = -sin_theta
-            H[1, 1] = -cos_theta
-            H[1, 2] =  dx * cos_theta - dy * sin_theta
+            H[0, 0] = -c
+            H[0, 1] = -s
+            H[0, 2] = -s * dx + c * dy
 
-            # ∂h/∂landmark
+            H[1, 0] = s
+            H[1, 1] = -c
+            H[1, 2] = -c * dx - s * dy
+
+            # ∂h/∂landmark - using rotation matrix R(-θ_r)
             H[0, idx] = cos_theta
             H[0, idx+1] = -sin_theta
 
@@ -291,9 +299,24 @@ class LandmarkEKFSLAM:
         # Innovation covariance
         S = H @ self.P @ H.T + measurement_covariance
 
+        # Outlier rejection using Mahalanobis distance test
+        try:
+            S_inv = np.linalg.inv(S)
+            mahal_dist_sq = float(innovation.T @ S_inv @ innovation)
+        except np.linalg.LinAlgError:
+            # Singular covariance - reject update
+            return
+
+        # Chi-squared test (2-DOF, 99.7% confidence interval = 13.8)
+        # This rejects ~0.3% of valid measurements but catches most outliers
+        chi_sq_threshold = 13.8
+        if mahal_dist_sq > chi_sq_threshold:
+            # Reject outlier - innovation too large given uncertainty
+            return
+
         # Kalman gain
         try:
-            K = self.P @ H.T @ np.linalg.inv(S)
+            K = self.P @ H.T @ S_inv
         except np.linalg.LinAlgError:
             return
 
@@ -308,8 +331,8 @@ class LandmarkEKFSLAM:
         I_KH = I - K @ H
         self.P = I_KH @ self.P @ I_KH.T + K @ measurement_covariance @ K.T
 
-        # Ensure symmetry
-        self.P = (self.P + self.P.T) / 2.0
+        # Condition covariance
+        self.P = self._condition_covariance(self.P)
 
         self.landmark_update_count += 1
 
@@ -347,7 +370,9 @@ class LandmarkEKFSLAM:
         I = np.eye(n)
         I_KH = I - K @ H
         self.P = I_KH @ self.P @ I_KH.T + K @ measurement_covariance @ K.T
-        self.P = (self.P + self.P.T) / 2.0
+
+        # Condition covariance
+        self.P = self._condition_covariance(self.P)
 
     def prune_landmarks(self, current_scan_number: int):
        

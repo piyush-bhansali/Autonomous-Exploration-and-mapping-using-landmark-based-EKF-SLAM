@@ -2,9 +2,7 @@
 
 
 import numpy as np
-from sensor_msgs.msg import LaserScan
-import struct
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import LaserScan, PointCloud2
 
 
 def calculate_path_length(path: list) -> float:
@@ -66,16 +64,33 @@ def transform_points_to_global(points: np.ndarray, robot_pos: np.ndarray, robot_
 
 
 def parse_pointcloud2(msg: PointCloud2) -> np.ndarray:
-    
-    points = []
-    for i in range(msg.width):
-        offset = i * msg.point_step
-        x = struct.unpack_from('f', msg.data, offset + 0)[0]
-        y = struct.unpack_from('f', msg.data, offset + 4)[0]
-        z = struct.unpack_from('f', msg.data, offset + 8)[0]
-        points.append([x, y, z])
+    """
+    Parse PointCloud2 message to numpy array (optimized with numpy).
 
-    return np.array(points)
+    Args:
+        msg: PointCloud2 message
+
+    Returns:
+        Nx3 numpy array with [x, y, z] coordinates
+    """
+    # Use numpy structured array for fast parsing
+    # Assuming point_step is 12 (3 floats of 4 bytes each)
+    dtype = np.dtype([
+        ('x', np.float32),
+        ('y', np.float32),
+        ('z', np.float32)
+    ])
+
+    # Reshape raw data into structured array
+    points_structured = np.frombuffer(msg.data, dtype=dtype)
+
+    # Convert to regular Nx3 array
+    points = np.zeros((len(points_structured), 3), dtype=np.float32)
+    points[:, 0] = points_structured['x']
+    points[:, 1] = points_structured['y']
+    points[:, 2] = points_structured['z']
+
+    return points
 
 
 def check_scan_for_obstacles(

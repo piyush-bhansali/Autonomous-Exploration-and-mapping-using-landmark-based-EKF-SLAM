@@ -18,7 +18,13 @@ from navigation.convex_frontier_detector import ConvexFrontierDetector
 from map_generation.utils import quaternion_to_yaw
 from navigation.rrt_star import RRTStar
 from navigation.pure_pursuit_controller import PurePursuit
-from autonomous_exploration.qos_profiles import MAP_QOS, SCAN_QOS
+from autonomous_exploration.qos_profiles import (
+    MAP_QOS,
+    SCAN_QOS,
+    CMD_VEL_QOS,
+    PATH_QOS,
+    VISUALIZATION_QOS
+)
 from navigation import navigation_utils as nav_utils
 
 
@@ -105,10 +111,10 @@ class SimpleNavigationNode(Node):
         )
 
         # Publishers
-        self.cmd_pub = self.create_publisher(Twist, f'/{self.robot_name}/cmd_vel', 10)
-        self.frontier_markers_pub = self.create_publisher(MarkerArray, f'/{self.robot_name}/frontier_markers', 10)
-        self.path_pub = self.create_publisher(Path, f'/{self.robot_name}/planned_path', 10)
-        self.hull_markers_pub = self.create_publisher(MarkerArray, f'/{self.robot_name}/hull_boundary', 10)
+        self.cmd_pub = self.create_publisher(Twist, f'/{self.robot_name}/cmd_vel', CMD_VEL_QOS)
+        self.frontier_markers_pub = self.create_publisher(MarkerArray, f'/{self.robot_name}/frontier_markers', VISUALIZATION_QOS)
+        self.path_pub = self.create_publisher(Path, f'/{self.robot_name}/planned_path', PATH_QOS)
+        self.hull_markers_pub = self.create_publisher(MarkerArray, f'/{self.robot_name}/hull_boundary', VISUALIZATION_QOS)
 
         # Control timer (10 Hz)
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -614,12 +620,12 @@ class SimpleNavigationNode(Node):
         self.frontier_markers_pub.publish(marker_array)
 
     def _publish_path(self):
-        
+
         if self.current_path is None or len(self.current_path) == 0:
             return
 
         path_msg = Path()
-        path_msg.header.frame_id = f'{self.robot_name}/odom'
+        path_msg.header.frame_id = 'map'
         path_msg.header.stamp = self.get_clock().now().to_msg()
 
         for waypoint in self.current_path:

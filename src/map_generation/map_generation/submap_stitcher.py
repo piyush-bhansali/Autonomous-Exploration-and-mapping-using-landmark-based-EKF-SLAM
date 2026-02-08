@@ -5,7 +5,6 @@ import open3d as o3d
 import open3d.core as o3c
 from typing import Optional, Tuple, Dict
 import time
-from map_generation.feature_extractor import FeatureExtractor
 
 
 class SubmapStitcher:
@@ -13,8 +12,7 @@ class SubmapStitcher:
     def __init__(self,
                  voxel_size: float = 0.05,
                  icp_max_correspondence_dist: float = 0.05,
-                 icp_fitness_threshold: float = 0.45,
-                 feature_extraction_method: str = 'hybrid'):
+                 icp_fitness_threshold: float = 0.45):
 
         self.voxel_size = voxel_size
         self.icp_max_dist = icp_max_correspondence_dist
@@ -33,11 +31,6 @@ class SubmapStitcher:
         self._cached_numpy_map = None
         self._map_dirty = True
 
-        # Feature extraction (downsampling done in process_submap)
-        self.feature_extractor = FeatureExtractor(
-            method=feature_extraction_method
-        )
-
     def process_submap(self, points: np.ndarray, submap_id: int) -> o3d.t.geometry.PointCloud:
 
         points_tensor = o3c.Tensor(points.astype(np.float32), dtype=o3c.float32, device=self.device)
@@ -46,24 +39,6 @@ class SubmapStitcher:
         pcd_tensor = pcd_tensor.voxel_down_sample(voxel_size=self.voxel_size)
 
         return pcd_tensor
-
-    def extract_features(self, pcd: o3d.t.geometry.PointCloud, submap_id: int) -> Optional[Dict]:
-       
-        try:
-            features = self.feature_extractor.extract(pcd)
-
-            if features['method'] == 'hybrid':
-                num_keypoints = features['metadata']['geometric']['num_keypoints']
-            else:
-                num_keypoints = features['metadata']['num_keypoints']
-
-            if num_keypoints == 0:
-                return None
-
-            return features
-
-        except Exception as e:
-            return None
 
     def align_submap_with_icp(self,
                        source: o3d.t.geometry.PointCloud,
@@ -125,8 +100,6 @@ class SubmapStitcher:
             'qw': end_pose['qw']
         }
 
-        features = self.extract_features(pcd_tensor, submap_id)
-
         global_transform = transformation_matrix
 
         if submap_id == 0:
@@ -137,12 +110,11 @@ class SubmapStitcher:
 
             submap_data = {
                 'id': submap_id,
-                'point_cloud': pcd_tensor,  
-                'features': features,
+                'point_cloud': pcd_tensor,
                 'pose_start': start_pose,
                 'pose_end': end_pose,
                 'pose_center': pose_center,
-                'global_transform': global_transform,  
+                'global_transform': global_transform,
                 'scan_count': scan_count,
                 'timestamp_created': time.time()
             }
@@ -183,11 +155,10 @@ class SubmapStitcher:
         submap_data = {
             'id': submap_id,
             'point_cloud': pcd_tensor,  # In submap-local frame
-            'features': features,
             'pose_start': start_pose,
             'pose_end': end_pose,
             'pose_center': pose_center,
-            'global_transform': global_transform_refined,  
+            'global_transform': global_transform_refined,
             'scan_count': scan_count,
             'timestamp_created': time.time()
         }

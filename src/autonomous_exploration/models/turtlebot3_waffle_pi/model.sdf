@@ -515,7 +515,7 @@
       <!-- Wheel encoder noise -->
       <noise>0.015</noise>
 
-      <tf_topic>tf</tf_topic>
+      <tf_topic>/model/{robot_name}/tf</tf_topic>
       <publish_odom_tf>true</publish_odom_tf>
 
     </plugin>

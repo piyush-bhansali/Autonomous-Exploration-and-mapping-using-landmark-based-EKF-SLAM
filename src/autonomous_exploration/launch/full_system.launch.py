@@ -153,6 +153,12 @@ def generate_launch_description():
             f'<child_frame_id>{robot_name}/base_footprint</child_frame_id>'
         )
 
+        # Fix DiffDrive plugin tf_topic to use proper namespaced topic for bridge
+        robot_sdf_content = robot_sdf_content.replace(
+            '<tf_topic>/model/{robot_name}/tf</tf_topic>',
+            f'<tf_topic>/model/{robot_name}/tf</tf_topic>'
+        )
+
         # Spawn robot node
         spawn_robot = Node(
             package='ros_gz_sim',

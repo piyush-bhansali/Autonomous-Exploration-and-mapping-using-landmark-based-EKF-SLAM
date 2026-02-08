@@ -3,12 +3,22 @@
   ros_type_name: "sensor_msgs/msg/JointState"
   gz_type_name: "gz.msgs.Model"
   direction: GZ_TO_ROS
+  qos:
+    reliability: best_effort
+    durability: volatile
+    history: keep_last
+    depth: 10
 
 - ros_topic_name: "/{robot_name}/odom"
   gz_topic_name: "/model/{robot_name}/odometry"
   ros_type_name: "nav_msgs/msg/Odometry"
   gz_type_name: "gz.msgs.Odometry"
   direction: GZ_TO_ROS
+  qos:
+    reliability: best_effort
+    durability: volatile
+    history: keep_last
+    depth: 10
 
 # TF bridge for odom -> base_footprint transform from DiffDrive plugin
 # The DiffDrive plugin publishes TF with namespaced frame names (tb3_1/odom -> tb3_1/base_footprint)
@@ -19,12 +29,22 @@
   ros_type_name: "tf2_msgs/msg/TFMessage"
   gz_type_name: "gz.msgs.Pose_V"
   direction: GZ_TO_ROS
+  qos:
+    reliability: reliable
+    durability: volatile
+    history: keep_last
+    depth: 100
 
 - ros_topic_name: "/{robot_name}/imu"
   gz_topic_name: "/world/{world_name}/model/{robot_name}/link/imu_link/sensor/tb3_imu/imu"
   ros_type_name: "sensor_msgs/msg/Imu"
   gz_type_name: "gz.msgs.IMU"
   direction: GZ_TO_ROS
+  qos:
+    reliability: best_effort
+    durability: volatile
+    history: keep_last
+    depth: 50
 
 - ros_topic_name: "/{robot_name}/scan"
   gz_topic_name: "/world/{world_name}/model/{robot_name}/link/base_scan/sensor/hls_lfcd_lds/scan"
@@ -42,9 +62,19 @@
   ros_type_name: "geometry_msgs/msg/Twist"
   gz_type_name: "gz.msgs.Twist"
   direction: ROS_TO_GZ
+  qos:
+    reliability: reliable
+    durability: volatile
+    history: keep_last
+    depth: 10
 
 - ros_topic_name: "/{robot_name}/ground_truth_pose"
   gz_topic_name: "/model/{robot_name}/pose"
   ros_type_name: "geometry_msgs/msg/PoseStamped"
   gz_type_name: "gz.msgs.Pose"
   direction: GZ_TO_ROS
+  qos:
+    reliability: best_effort
+    durability: volatile
+    history: keep_last
+    depth: 10

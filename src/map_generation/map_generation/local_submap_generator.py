@@ -5,8 +5,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, PointCloud2
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, TransformStamped
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
+from visualization_msgs.msg import MarkerArray
 from tf2_ros import TransformBroadcaster
 import numpy as np
 import os
@@ -27,6 +26,7 @@ from map_generation.mapping_utils import (
     compute_relative_pose,
     transform_scan_to_relative_frame,
     publish_global_map,
+    publish_feature_markers,
     quaternion_to_rotation_matrix
 )
 from map_generation.transform_utils import (
@@ -34,8 +34,15 @@ from map_generation.transform_utils import (
     compute_relative_motion_2d,
     normalize_angle
 )
-from autonomous_exploration.qos_profiles import SCAN_QOS, ODOM_QOS
-import csv
+from map_generation.evaluation_utils import GroundTruthTracker
+from autonomous_exploration.qos_profiles import (
+    SCAN_QOS,
+    ODOM_QOS,
+    POSE_QOS,
+    MAP_QOS,
+    PATH_QOS,
+    VISUALIZATION_QOS
+)
 
 
 class LocalSubmapGenerator(Node):
@@ -48,31 +55,28 @@ class LocalSubmapGenerator(Node):
         self.robot_name = self.get_parameter('robot_name').value
         self.save_dir = self.get_parameter('save_directory').value
 
-        self.scans_per_submap = 50      
-        self.voxel_size = 0.05         
-        self.feature_method = 'hybrid'  
-        
+        self.scans_per_submap = 50
+        self.voxel_size = 0.05
+
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
 
         self.ekf = LandmarkEKFSLAM(
-            max_landmark_range=5.0,           
-            landmark_timeout_scans=50,        
-            min_observations_for_init=2       
+            max_landmark_range=5.0,
+            landmark_timeout_scans=50,
+            min_observations_for_init=2
         )
         self.ekf_initialized = False
 
-        
         self.feature_extractor = LandmarkFeatureExtractor(
-            min_points_per_line=8,           
-            line_fit_threshold=0.03,         
-            min_line_length=0.3,             
-            corner_angle_threshold=25.0      
+            min_points_per_line=10,
+            line_fit_threshold=0.05,
+            min_line_length=0.5,
+            corner_angle_threshold=45.0
         )
 
         self.stitcher = SubmapStitcher(
-            voxel_size=self.voxel_size,
-            feature_extraction_method=self.feature_method
+            voxel_size=self.voxel_size
         )
 
         if o3c.cuda.is_available():
@@ -100,34 +104,34 @@ class LocalSubmapGenerator(Node):
             PoseStamped,
             f'/{self.robot_name}/ground_truth_pose',
             self.ground_truth_callback,
-            10
+            POSE_QOS
         )
 
         self.current_submap_pub = self.create_publisher(
             PointCloud2,
             f'/{self.robot_name}/current_submap',
-            10
+            MAP_QOS
         )
         self.global_map_pub = self.create_publisher(
             PointCloud2,
             f'/{self.robot_name}/global_map',
-            10
+            MAP_QOS
         )
         self.ekf_pose_pub = self.create_publisher(
             PoseStamped,
             f'/{self.robot_name}/ekf_pose',
-            10
+            POSE_QOS
         )
         self.ekf_path_pub = self.create_publisher(
             Path,
             f'/{self.robot_name}/ekf_path',
-            10
+            PATH_QOS
         )
 
         self.feature_markers_pub = self.create_publisher(
             MarkerArray,
             f'/{self.robot_name}/scan_features',
-            10
+            VISUALIZATION_QOS
         )
 
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -144,16 +148,21 @@ class LocalSubmapGenerator(Node):
 
         self.create_timer(1.0, self._publish_global_map_callback)
 
-        self.last_odom_pose = None  
-        self.latest_odom_pose = None  
-        self.latest_odom_timestamp = None  
+        self.last_odom_pose = None
+        self.latest_odom_pose = None
+        self.latest_odom_timestamp = None
+        self.latest_odom_msg = None
 
-        self.ground_truth_pose = None
-        self.csv_file_path = os.path.join(self.save_dir, 'ekf_vs_groundtruth.csv')
-        self.csv_file = open(self.csv_file_path, 'w', newline='')
-        self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(['timestamp', 'ekf_x', 'ekf_y', 'ekf_theta', 'gt_x', 'gt_y', 'gt_theta', 'pos_error', 'orient_error'])
-        self.get_logger().info(f'EKF vs Ground Truth data will be saved to: {self.csv_file_path}')
+        # Ground truth tracking for evaluation
+        csv_file_path = os.path.join(self.save_dir, 'ekf_vs_groundtruth.csv')
+        self.gt_tracker = GroundTruthTracker(csv_file_path, self.get_logger())
+
+        # Publish TF at a fixed rate to avoid gaps when callbacks are delayed
+        self.create_timer(0.1, self._publish_tf_callback)
+
+        self.get_logger().info(f'Local Submap Generator initialized for {self.robot_name}')
+        self.get_logger().info(f'  Save directory: {self.save_dir} | Device: {self.device}')
+        self.get_logger().info(f'  TF: map -> {self.robot_name}/odom (EKF) -> {self.robot_name}/base_footprint (Gazebo)')
 
     def _publish_global_map_callback(self):
         """Publish global map in map frame."""
@@ -167,36 +176,42 @@ class LocalSubmapGenerator(Node):
 
     def _publish_map_to_odom_tf(self):
         
-        if self.current_pose is None or self.latest_odom_pose is None or self.latest_odom_timestamp is None:
+        if self.current_pose is None:
             self.get_logger().warn(
-                f'Cannot publish map->odom TF: current_pose={self.current_pose is not None}, '
-                f'latest_odom_pose={self.latest_odom_pose is not None}',
-                throttle_duration_sec=5.0
+                'Cannot publish map->odom TF: EKF not initialized (current_pose is None)',
+                throttle_duration_sec=2.0
             )
             return
 
-       
+        if self.latest_odom_pose is None or self.latest_odom_timestamp is None:
+            self.get_logger().warn(
+                'Cannot publish map->odom TF: No odometry received yet',
+                throttle_duration_sec=2.0
+            )
+            return
+
+        # EKF state in map frame
         ekf_state = (
             self.current_pose['x'],
             self.current_pose['y'],
             self.current_pose['theta']
         )
 
-        
+        # Odometry state in odom frame
         odom_pose = (
             self.latest_odom_pose['x'],
             self.latest_odom_pose['y'],
             self.latest_odom_pose['theta']
         )
 
-        
+        # Compute map->odom transform correction
         x_correction, y_correction, theta_correction = compute_map_to_odom_transform(
             ekf_state, odom_pose
         )
 
-        
+        # Publish map->odom transform
         t = TransformStamped()
-        t.header.stamp = self.latest_odom_timestamp
+        t.header.stamp = self.get_clock().now().to_msg()  # Use current time for latest transform
         t.header.frame_id = 'map'  # Parent frame
         t.child_frame_id = f'{self.robot_name}/odom'  # Child frame
         t.transform.translation.x = x_correction
@@ -211,24 +226,12 @@ class LocalSubmapGenerator(Node):
 
         self.tf_broadcaster.sendTransform(t)
 
-    def _publish_odom_to_base_footprint_tf(self, odom_msg):
-        
-        t = TransformStamped()
-        t.header.stamp = odom_msg.header.stamp
-        t.header.frame_id = f'{self.robot_name}/odom'
-        t.child_frame_id = f'{self.robot_name}/base_footprint'
-
-        # Copy pose directly from odometry message
-        t.transform.translation.x = odom_msg.pose.pose.position.x
-        t.transform.translation.y = odom_msg.pose.pose.position.y
-        t.transform.translation.z = odom_msg.pose.pose.position.z
-
-        t.transform.rotation.x = odom_msg.pose.pose.orientation.x
-        t.transform.rotation.y = odom_msg.pose.pose.orientation.y
-        t.transform.rotation.z = odom_msg.pose.pose.orientation.z
-        t.transform.rotation.w = odom_msg.pose.pose.orientation.w
-
-        self.tf_broadcaster.sendTransform(t)
+    def _publish_tf_callback(self):
+        """Publish TF frames from the latest available state."""
+        if self.current_pose is None:
+            return
+        # Only publish map->odom transform (odom->base_footprint comes from Gazebo DiffDrive)
+        self._publish_map_to_odom_tf()
 
     def _publish_ekf_pose(self):
        
@@ -266,7 +269,7 @@ class LocalSubmapGenerator(Node):
         self.ekf_path_pub.publish(self.ekf_path)
 
     def odom_callback(self, msg):
-        
+        """Process odometry messages for EKF prediction and state updates."""
         # Extract current odometry pose (in odom frame)
         x_odom = msg.pose.pose.position.x
         y_odom = msg.pose.pose.position.y
@@ -292,6 +295,7 @@ class LocalSubmapGenerator(Node):
             'qw': qw
         }
         self.latest_odom_timestamp = msg.header.stamp
+        self.latest_odom_msg = msg
 
         # Initialize EKF on first odometry reading
         if not self.ekf_initialized:
@@ -301,7 +305,8 @@ class LocalSubmapGenerator(Node):
             self.last_odom_pose = current_odom_pose
 
             self.get_logger().info(
-                f'EKF initialized at pose: ({x_odom:.3f}, {y_odom:.3f}, {np.degrees(theta_odom):.2f}°)'
+                f'EKF SLAM initialized at ({x_odom:.3f}, {y_odom:.3f}, {np.degrees(theta_odom):.1f}°) '
+                f'in {msg.header.frame_id}'
             )
 
             # Initialize current pose from EKF
@@ -363,78 +368,24 @@ class LocalSubmapGenerator(Node):
             if self.submap_start_pose is None:
                 self.submap_start_pose = self.current_pose.copy()
 
-        # Publish odom → base_footprint transform (from odometry)
-        self._publish_odom_to_base_footprint_tf(msg)
-
-        # Publish map → odom transform and EKF pose
-        self._publish_map_to_odom_tf()
+        # Publish EKF pose (map->odom is published by timer callback)
         self._publish_ekf_pose()
 
     def ground_truth_callback(self, msg):
         """Store ground truth pose for comparison with EKF"""
-        x_gt = msg.pose.position.x
-        y_gt = msg.pose.position.y
+        current_time = self.get_clock().now().nanoseconds
 
-        qx = msg.pose.orientation.x
-        qy = msg.pose.orientation.y
-        qz = msg.pose.orientation.z
-        qw = msg.pose.orientation.w
-        theta_gt = quaternion_to_yaw(qx, qy, qz, qw)
+        # Update ground truth tracker
+        self.gt_tracker.update_ground_truth(msg, current_time)
 
-        self.ground_truth_pose = {
-            'x': x_gt,
-            'y': y_gt,
-            'theta': theta_gt,
-            'timestamp': self.get_clock().now().nanoseconds
-        }
-
-        # Log to CSV if EKF is initialized
-        self._log_ekf_vs_groundtruth()
-
-    def _log_ekf_vs_groundtruth(self):
-        """Log EKF and ground truth data to CSV file"""
-        if not self.ekf_initialized or self.ground_truth_pose is None or self.current_pose is None:
-            return
-
-        # Calculate errors
-        pos_error = np.sqrt(
-            (self.current_pose['x'] - self.ground_truth_pose['x'])**2 +
-            (self.current_pose['y'] - self.ground_truth_pose['y'])**2
-        )
-
-        angle_diff = self.current_pose['theta'] - self.ground_truth_pose['theta']
-        orient_error = abs(np.arctan2(np.sin(angle_diff), np.cos(angle_diff)))
-
-        # Write to CSV
-        timestamp_sec = self.get_clock().now().nanoseconds / 1e9
-        self.csv_writer.writerow([
-            timestamp_sec,
-            self.current_pose['x'],
-            self.current_pose['y'],
-            self.current_pose['theta'],
-            self.ground_truth_pose['x'],
-            self.ground_truth_pose['y'],
-            self.ground_truth_pose['theta'],
-            pos_error,
-            orient_error
-        ])
-        self.csv_file.flush()  # Ensure data is written immediately
+        # Log comparison if EKF is initialized
+        if self.current_pose is not None:
+            self.gt_tracker.log_comparison(self.current_pose, self.ekf_initialized, current_time)
 
     def _apply_pose_correction(self, dx: float, dy: float, dtheta: float,
                                measurement_type: str, base_pose=None,
                                measurement_covariance: np.ndarray = None):
-        """
-        Apply pose correction to EKF and update current pose.
-
-        This is used for ICP corrections.
-
-        Args:
-            dx: X correction in meters
-            dy: Y correction in meters
-            dtheta: Theta correction in radians
-            measurement_type: Type of measurement ('icp')
-            base_pose: Base pose dict to apply correction to (defaults to self.current_pose)
-        """
+        
         if base_pose is None:
             base_pose = self.current_pose
 
@@ -461,6 +412,7 @@ class LocalSubmapGenerator(Node):
         # Update current pose
         self.current_pose['x'] = state['x']
         self.current_pose['y'] = state['y']
+        self.current_pose['z'] = 0.0
         self.current_pose['theta'] = state['theta']
         self.current_pose['qx'] = qx
         self.current_pose['qy'] = qy
@@ -470,22 +422,11 @@ class LocalSubmapGenerator(Node):
         return state
 
     def _process_scan_features(self, scan_msg):
-        """
-        Landmark-based SLAM using statistical data association.
-
-        Workflow:
-        1. Extract features with covariances (scipy-based)
-        2. Associate to existing landmarks (Mahalanobis distance)
-        3. Update EKF for matched landmarks
-        4. Prune old landmarks (sliding window)
-        """
+       
         if not self.ekf_initialized:
             return
 
-        # Extract features with proper covariances
-        # Features returned with 'type', 'covariance', and parameterization:
-        # - Walls: 'rho', 'alpha' (Hessian Normal Form)
-        # - Corners: 'position' [x, y] (Cartesian)
+       
         observed_features = self.feature_extractor.extract_features(scan_msg)
 
         if len(observed_features) == 0:
@@ -518,10 +459,10 @@ class LocalSubmapGenerator(Node):
                 )
 
             elif feature['type'] == 'corner':
-                # Corner in Cartesian (x, y) in robot frame
+               
                 z_x, z_y = feature['position']
 
-                # Update EKF with this landmark observation
+               
                 self.ekf.update_landmark_observation(
                     landmark_id=landmark_id,
                     z_x=z_x,
@@ -537,7 +478,12 @@ class LocalSubmapGenerator(Node):
         self._sync_pose_from_ekf()
 
         # Visualize features in RViz
-        self._publish_feature_markers(observed_features, scan_msg.header.stamp)
+        publish_feature_markers(
+            observed_features,
+            scan_msg.header.stamp,
+            self.feature_markers_pub,
+            self.robot_name
+        )
 
         # Log statistics
         num_landmarks = len(self.ekf.landmarks)
@@ -560,95 +506,12 @@ class LocalSubmapGenerator(Node):
         with self.data_lock:
             self.current_pose['x'] = state['x']
             self.current_pose['y'] = state['y']
+            self.current_pose['z'] = 0.0
             self.current_pose['theta'] = state['theta']
             self.current_pose['qx'] = qx
             self.current_pose['qy'] = qy
             self.current_pose['qz'] = qz
             self.current_pose['qw'] = qw
-
-    def _publish_feature_markers(self, features, scan_timestamp):
-        """
-        Publish visualization markers for extracted features.
-
-        Corners: Red spheres
-        Walls: Blue cylinders
-
-        Args:
-            features: List of extracted features
-            scan_timestamp: Timestamp from scan message for TF sync
-        """
-        marker_array = MarkerArray()
-
-        for i, feature in enumerate(features):
-            marker = Marker()
-            marker.header.frame_id = f'{self.robot_name}/base_scan'  # Features in robot frame
-            marker.header.stamp = scan_timestamp  # Use scan timestamp for TF sync
-            marker.ns = 'scan_features'
-            marker.id = i
-            marker.action = Marker.ADD
-            marker.lifetime.sec = 0
-            marker.lifetime.nanosec = 200000000  # 0.2 seconds
-
-            if feature['type'] == 'corner':
-                # Corners: Red spheres at Cartesian position
-                marker.type = Marker.SPHERE
-                marker.scale.x = 0.15
-                marker.scale.y = 0.15
-                marker.scale.z = 0.15
-                marker.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.8)  # Red
-
-                # Position from Cartesian coordinates
-                marker.pose.position.x = float(feature['position'][0])
-                marker.pose.position.y = float(feature['position'][1])
-                marker.pose.position.z = 0.0
-
-            elif feature['type'] == 'wall':
-                # Walls: Blue cylinders at closest point on wall
-                marker.type = Marker.CYLINDER
-                marker.scale.x = 0.08  # Diameter
-                marker.scale.y = 0.08
-                marker.scale.z = 0.2   # Height
-                marker.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.6)  # Blue
-
-                # Wall in Hessian form: ρ = x*cos(α) + y*sin(α)
-                # Closest point on wall to origin: (ρ*cos(α), ρ*sin(α))
-                rho = feature['rho']
-                alpha = feature['alpha']
-
-                marker.pose.position.x = float(rho * np.cos(alpha))
-                marker.pose.position.y = float(rho * np.sin(alpha))
-                marker.pose.position.z = 0.0
-
-                # Orient cylinder along wall direction (perpendicular to normal)
-                marker.pose.orientation.z = np.sin(alpha / 2.0)
-                marker.pose.orientation.w = np.cos(alpha / 2.0)
-
-            marker_array.markers.append(marker)
-
-            # Add text label showing feature info
-            text_marker = Marker()
-            text_marker.header = marker.header
-            text_marker.ns = 'feature_labels'
-            text_marker.id = i + 1000  # Offset to avoid ID collision
-            text_marker.type = Marker.TEXT_VIEW_FACING
-            text_marker.action = Marker.ADD
-            text_marker.pose.position.x = marker.pose.position.x
-            text_marker.pose.position.y = marker.pose.position.y
-            text_marker.pose.position.z = 0.3  # Above the feature
-            text_marker.scale.z = 0.1  # Text size
-            text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)  # White
-
-            # Different labels for walls vs corners
-            if feature['type'] == 'wall':
-                text_marker.text = f"WALL\n{feature['strength']:.2f}m"
-            else:
-                text_marker.text = f"CORNER\n{feature['strength']:.0f}°"
-
-            text_marker.lifetime = marker.lifetime
-
-            marker_array.markers.append(text_marker)
-
-        self.feature_markers_pub.publish(marker_array)
 
     def scan_callback(self, msg):
 
@@ -760,7 +623,6 @@ class LocalSubmapGenerator(Node):
             scan_count = self.scans_in_current_submap
             end_pose = self.current_pose.copy()
 
-
             # Extract features from submap and add new landmarks to EKF
             submap_features = self.feature_extractor.extract_features_from_points(points)
             if len(submap_features) > 0:
@@ -867,10 +729,9 @@ class LocalSubmapGenerator(Node):
             self.stitcher.save_global_map(map_file)
             self.get_logger().info(f'Final map saved: {map_file}')
 
-        # Close CSV file
-        if hasattr(self, 'csv_file') and self.csv_file:
-            self.csv_file.close()
-            self.get_logger().info(f'EKF vs Ground Truth data saved to: {self.csv_file_path}')
+        # Close ground truth tracker
+        if hasattr(self, 'gt_tracker'):
+            self.gt_tracker.close()
 
 
 def main(args=None):
