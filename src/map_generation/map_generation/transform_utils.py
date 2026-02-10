@@ -12,30 +12,12 @@ from scipy.spatial.transform import Rotation
 
 
 def normalize_angle(theta):
-    """
-    Normalize angle to [-π, π] range.
-
-    Args:
-        theta: Angle in radians
-
-    Returns:
-        Normalized angle in [-π, π]
-    """
+    
     return np.arctan2(np.sin(theta), np.cos(theta))
 
 
 def pose_to_transform_matrix(x, y, theta):
-    """
-    Convert 2D pose to 3x3 homogeneous transformation matrix.
-
-    Args:
-        x: X position (meters)
-        y: Y position (meters)
-        theta: Orientation (radians)
-
-    Returns:
-        3x3 numpy array representing the transformation
-    """
+  
     c = np.cos(theta)
     s = np.sin(theta)
 
@@ -49,15 +31,7 @@ def pose_to_transform_matrix(x, y, theta):
 
 
 def transform_matrix_to_pose(T):
-    """
-    Extract 2D pose from 3x3 homogeneous transformation matrix.
-
-    Args:
-        T: 3x3 transformation matrix
-
-    Returns:
-        Tuple (x, y, theta)
-    """
+    
     x = T[0, 2]
     y = T[1, 2]
     theta = np.arctan2(T[1, 0], T[0, 0])
@@ -66,26 +40,7 @@ def transform_matrix_to_pose(T):
 
 
 def compute_map_to_odom_transform(ekf_state, odom_pose):
-    """
-    Compute the map → odom transformation.
-
-    This transform represents the drift correction needed to align
-    the odometry frame with the globally-consistent map frame.
-
-    Mathematical relationship:
-        T_map_to_base = T_map_to_odom * T_odom_to_base
-
-    Therefore:
-        T_map_to_odom = T_map_to_base * inv(T_odom_to_base)
-
-    Args:
-        ekf_state: Robot pose in map frame (x_map, y_map, theta_map)
-        odom_pose: Robot pose in odom frame (x_odom, y_odom, theta_odom)
-
-    Returns:
-        Tuple (x_correction, y_correction, theta_correction) representing
-        the map → odom transform
-    """
+    
     # Extract poses
     x_map, y_map, theta_map = ekf_state
     x_odom, y_odom, theta_odom = odom_pose
@@ -118,28 +73,21 @@ def compute_relative_motion_2d(pose_current, pose_previous):
     dx_robot = dx_world * np.cos(theta0) + dy_world * np.sin(theta0)
     dy_robot = -dx_world * np.sin(theta0) + dy_world * np.cos(theta0)
 
-    # Compute distance traveled
+   
     delta_d = np.sqrt(dx_robot**2 + dy_robot**2)
 
-    # Preserve sign: forward motion is positive, backward is negative
     if dx_robot < 0:
         delta_d = -delta_d
 
     return (delta_d, delta_theta)
 
 
-# =============================================================================
-# ROS2 Message Conversions
-# =============================================================================
-
 def numpy_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud2:
     
-    # Create header
     header = Header()
     header.frame_id = frame_id
     header.stamp = stamp
 
-    # Define point cloud fields (x, y, z as FLOAT32)
     fields = [
         PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
         PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
@@ -149,7 +97,6 @@ def numpy_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud
     points_flat = points.astype(np.float32).flatten()
     cloud_data = points_flat.tobytes()
 
-    # Build PointCloud2 message
     msg = PointCloud2()
     msg.header = header
     msg.height = 1 
@@ -164,20 +111,8 @@ def numpy_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud
     return msg
 
 
-# =============================================================================
-# Quaternion Conversions (using scipy.spatial.transform.Rotation)
-# =============================================================================
-
 def quaternion_to_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
-    """
-    Extract yaw angle from quaternion.
-
-    Args:
-        qx, qy, qz, qw: Quaternion components (scalar-last convention)
-
-    Returns:
-        Yaw angle in radians
-    """
+   
     rotation = Rotation.from_quat([qx, qy, qz, qw])
     # Extract Euler angles in ZYX convention (yaw, pitch, roll)
     euler = rotation.as_euler('zyx', degrees=False)
@@ -185,29 +120,13 @@ def quaternion_to_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
 
 
 def yaw_to_quaternion(yaw: float) -> tuple:
-    """
-    Convert yaw angle to quaternion (pure z-axis rotation).
-
-    Args:
-        yaw: Yaw angle in radians
-
-    Returns:
-        Tuple (qx, qy, qz, qw) in scalar-last convention
-    """
+    
     rotation = Rotation.from_euler('z', yaw, degrees=False)
     quat = rotation.as_quat()  # Returns [x, y, z, w]
     return (quat[0], quat[1], quat[2], quat[3])
 
 
 def quaternion_to_rotation_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
-    """
-    Convert quaternion to 3x3 rotation matrix.
-
-    Args:
-        qx, qy, qz, qw: Quaternion components (scalar-last convention)
-
-    Returns:
-        3x3 rotation matrix as numpy array
-    """
+   
     rotation = Rotation.from_quat([qx, qy, qz, qw])
     return rotation.as_matrix()

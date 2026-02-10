@@ -52,8 +52,7 @@ class ConvexFrontierDetector:
         try:
             hull = ConvexHull(points_2d)
             hull_polygon = Polygon(points_2d[hull.vertices])
-        except Exception as e:
-            print(f"[HULL] Failed to compute convex hull: {e}")
+        except Exception:
             return []
 
         offset_polygon = self._offset_polygon_inward(hull_polygon, self.boundary_offset)

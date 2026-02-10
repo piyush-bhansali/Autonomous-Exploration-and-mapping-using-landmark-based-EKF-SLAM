@@ -130,9 +130,8 @@ class SimpleNavigationNode(Node):
 
         with self.map_lock:
             self.map_points = points
-            self.map_header = msg.header  # Store header for timestamp/frame sync
+            self.map_header = msg.header  
 
-            # Build/cache KDTree for sharing between frontier detector and RRT*
             map_hash = hash(self.map_points.tobytes())
             if self._obstacle_kdtree_hash != map_hash:
                 points_2d = self.map_points[:, :2]
@@ -147,7 +146,6 @@ class SimpleNavigationNode(Node):
                 obstacle_kdtree=self._obstacle_kdtree
             )
 
-            # Reset counter if frontiers are found, increment if none
             if len(self.all_frontiers) > 0:
                 self.no_frontiers_count = 0
             else:
@@ -158,17 +156,9 @@ class SimpleNavigationNode(Node):
             self.get_logger().info(f'Map received ({len(points)} points) - starting exploration')
 
     def _update_robot_pose_from_tf(self):
-        """
-        Update robot position and orientation from TF tree.
-
-        Looks up the transform from map to base_footprint to get the
-        EKF-corrected robot position in the map frame.
-
-        Returns:
-            bool: True if TF lookup successful, False otherwise
-        """
+       
         try:
-            # Lookup latest transform from map to base_footprint
+            
             now = rclpy.time.Time()
             transform = self.tf_buffer.lookup_transform(
                 'map',                              # Target frame (global)
@@ -177,13 +167,11 @@ class SimpleNavigationNode(Node):
                 timeout=Duration(seconds=0.1)        # Wait up to 100ms
             )
 
-            # Extract position (x, y) in map frame
             self.robot_pos = np.array([
                 transform.transform.translation.x,
                 transform.transform.translation.y
             ])
 
-            # Extract orientation (yaw) in map frame
             quat = transform.transform.rotation
             self.robot_yaw = quaternion_to_yaw(
                 quat.x, quat.y, quat.z, quat.w
@@ -192,7 +180,7 @@ class SimpleNavigationNode(Node):
             return True
 
         except (LookupException, ExtrapolationException, ConnectivityException) as e:
-            # TF lookup failed - log warning (throttled to avoid spam)
+            
             self.get_logger().warn(
                 f'TF lookup failed (map → {self.robot_name}/base_footprint): {e}',
                 throttle_duration_sec=5.0
@@ -200,20 +188,18 @@ class SimpleNavigationNode(Node):
             return False
 
     def scan_callback(self, msg: LaserScan):
-        """Store laser scan data for reactive obstacle avoidance."""
+        
         with self.scan_lock:
             self.scan_data = msg
 
     def control_loop(self):
-        """Main control loop running at 10 Hz - executes state machine."""
-        # Update robot pose from TF (EKF-corrected position in map frame)
+        
         if not self._update_robot_pose_from_tf():
-            # TF lookup failed - skip this control cycle
+            
             return
 
         self._publish_all_visualizations()
 
-        # State machine
         if self.state == State.WAIT_FOR_MAP:
             self._handle_wait_for_map()
 
@@ -235,12 +221,11 @@ class SimpleNavigationNode(Node):
         self.cmd_pub.publish(cmd)
 
     def _handle_detect_frontiers(self):
-        """Select best frontier from already-detected frontiers."""
-        # Frontiers are already detected in map_callback (event-driven)
+        
         frontiers = self._get_frontiers()
 
         if len(frontiers) == 0:
-            # Require 3 consecutive map updates with no frontiers before declaring complete
+            
             if self.no_frontiers_count >= 3:
                 self.get_logger().warn(f'[STATE: DETECT_FRONTIERS] No frontiers found for {self.no_frontiers_count} consecutive map updates - exploration complete')
                 self.state = State.DONE
@@ -263,28 +248,20 @@ class SimpleNavigationNode(Node):
 
         best_frontier = distant_frontiers[0]
         self.current_goal = best_frontier.position
-        dist_to_selected = np.linalg.norm(self.current_goal - self.robot_pos)
-
-        self.get_logger().info(
-            f'[STATE: DETECT_FRONTIERS] Selected frontier [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}] '
-            f'({len(distant_frontiers)}/{len(frontiers)} valid, dist={dist_to_selected:.2f}m, score={best_frontier.score:.3f})'
-        )
-
+        
         self.state = State.PLAN_PATH
 
     def _handle_plan_path(self):
-        """Plan path to current goal"""
+        
         if self.current_goal is None:
             self.get_logger().error('[STATE: PLAN_PATH] No current goal set!')
             self.state = State.DETECT_FRONTIERS
             return
 
-        # Simplified: Use only global map for planning (no scan integration)
-        # Lidar is used only for emergency stop during execution
         path_planner = RRTStar(
             self.map_points,
             robot_radius=self.robot_radius,
-            obstacle_kdtree=self._obstacle_kdtree  # Reuse cached KDTree from map_callback
+            obstacle_kdtree=self._obstacle_kdtree 
         )
 
         path = path_planner.plan(self.robot_pos, self.current_goal, logger=self.get_logger())
@@ -313,19 +290,15 @@ class SimpleNavigationNode(Node):
         if self.stuck_detection_enabled and self._is_stuck():
             self.get_logger().warn('[STATE: EXECUTE_PATH] Robot is STUCK! Aborting current path and replanning...')
 
-            # Stop the robot
             cmd = Twist()
             self.cmd_pub.publish(cmd)
 
-            # Clear current path and goal
             self.current_path = None
             self.current_goal = None
 
-            # Transition back to frontier detection
             self.state = State.DETECT_FRONTIERS
             return
 
-        # PATH DEVIATION CHECK: Replan if robot deviated too far from path
         is_deviated, deviation_distance = nav_utils.check_path_deviation(
             self.robot_pos,
             self.current_path,
@@ -338,64 +311,50 @@ class SimpleNavigationNode(Node):
                 f'(threshold: {self.path_deviation_threshold:.2f}m). Replanning...'
             )
 
-            # Stop the robot briefly
             cmd = Twist()
             self.cmd_pub.publish(cmd)
 
-            # Keep current goal but clear path to force replanning
             self.current_path = None
             self.current_waypoint_index = 0
 
-            # Transition to PLAN_PATH to create new path to same goal
             self.state = State.PLAN_PATH
             return
 
-        # Check if path complete
         if self.current_waypoint_index >= len(self.current_path):
             self.get_logger().info(f'[STATE: EXECUTE_PATH] ✓ Path complete! Reached frontier at [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}]')
 
             cmd = Twist()
             self.cmd_pub.publish(cmd)
 
-            # Clear current path and goal
             self.current_path = None
             self.current_goal = None
 
-            # Transition to detect new frontiers
             self.state = State.DETECT_FRONTIERS
             return
 
-        frontiers = self._get_frontiers()  # Get event-driven frontiers (updated in map_callback)
+        frontiers = self._get_frontiers() 
 
         if len(frontiers) > 0:
-            # DYNAMIC REPLANNING: Check if best frontier has changed
-            best_frontier = frontiers[0]  # Frontiers already sorted by score
-
-            # Check if it's different from current goal
+            
+            best_frontier = frontiers[0]  
+            
             goal_distance = np.linalg.norm(best_frontier.position - self.current_goal)
 
-            if goal_distance > 0.5:  # Different frontier (not current goal)
-                # Goal changed - replan to new best frontier
+            if goal_distance > 0.5: 
                 dist_to_old_goal = np.linalg.norm(self.current_goal - self.robot_pos)
                 dist_to_new_goal = np.linalg.norm(best_frontier.position - self.robot_pos)
 
                 self.get_logger().warn(f'[STATE: EXECUTE_PATH] Goal changed - replanning!')
-                self.get_logger().warn(f'  Old goal: [{self.current_goal[0]:.2f}, {self.current_goal[1]:.2f}] (dist={dist_to_old_goal:.2f}m)')
-                self.get_logger().warn(f'  New goal: [{best_frontier.position[0]:.2f}, {best_frontier.position[1]:.2f}] (dist={dist_to_new_goal:.2f}m, score={best_frontier.score:.3f})')
                 self.get_logger().warn(f'  Total frontiers: {len(frontiers)}')
 
-                # Stop the robot
                 cmd = Twist()
                 self.cmd_pub.publish(cmd)
 
-                # Clear current path
                 self.current_path = None
                 self.current_waypoint_index = 0
 
-                # Set new goal
                 self.current_goal = best_frontier.position.copy()
 
-                # Transition to PLAN_PATH
                 self.state = State.PLAN_PATH
                 return
 
@@ -468,7 +427,7 @@ class SimpleNavigationNode(Node):
         self.cmd_pub.publish(cmd)
 
     def _handle_done(self):
-        """Exploration complete"""
+       
         cmd = Twist()
         self.cmd_pub.publish(cmd)
         self.get_logger().info('Exploration complete', once=True)
@@ -478,7 +437,7 @@ class SimpleNavigationNode(Node):
         return self.all_frontiers
 
     def _is_stuck(self) -> bool:
-        """Check if robot is stuck (not making progress)."""
+        
         current_time = self.get_clock().now()
 
         # Global timeout check
@@ -522,21 +481,17 @@ class SimpleNavigationNode(Node):
         return False
 
     def _publish_all_visualizations(self):
-        """Publish ALL visualizations continuously for debugging"""
-        # 1. Publish frontier markers
+        
         self._publish_frontier_markers()
 
-        # 2. Publish planned path
         self._publish_path()
 
-        # 3. Publish hull boundary
         self._publish_hull_boundary()
 
     def _publish_frontier_markers(self):
-        """Publish large sphere markers for all frontiers"""
+        
         marker_array = MarkerArray()
 
-        # Clear old markers first
         clear_marker = Marker()
         clear_marker.action = Marker.DELETEALL
         marker_array.markers.append(clear_marker)
@@ -545,8 +500,6 @@ class SimpleNavigationNode(Node):
             self.frontier_markers_pub.publish(marker_array)
             return
 
-        # Use map header for frame and timestamp synchronization
-        # If map_header not available yet, use current time with odom frame (fallback)
         if self.map_header is not None:
             header_frame = self.map_header.frame_id
             header_stamp = self.map_header.stamp
@@ -554,7 +507,6 @@ class SimpleNavigationNode(Node):
             header_frame = f'{self.robot_name}/odom'
             header_stamp = self.get_clock().now().to_msg()
 
-        # Publish each frontier as a large sphere
         for i, frontier in enumerate(self.all_frontiers[:20]):  # Show top 20
             marker = Marker()
             marker.header.frame_id = header_frame
@@ -564,40 +516,36 @@ class SimpleNavigationNode(Node):
             marker.type = Marker.SPHERE
             marker.action = Marker.ADD
 
-            # Position
             marker.pose.position.x = float(frontier.position[0])
             marker.pose.position.y = float(frontier.position[1])
             marker.pose.position.z = 0.5  # Elevated for visibility
             marker.pose.orientation.w = 1.0
 
-            # Size - LARGE spheres (0.5m diameter)
             marker.scale.x = 0.5
             marker.scale.y = 0.5
             marker.scale.z = 0.5
 
-            # Color based on rank (best = red, others = yellow/orange)
             if i == 0:
-                # BEST frontier - BRIGHT RED
+                
                 marker.color.r = 1.0
                 marker.color.g = 0.0
                 marker.color.b = 0.0
                 marker.color.a = 1.0
             elif i < 5:
-                # Top 5 - Orange
+                
                 marker.color.r = 1.0
                 marker.color.g = 0.5
                 marker.color.b = 0.0
                 marker.color.a = 0.8
             else:
-                # Others - Yellow
+                
                 marker.color.r = 1.0
                 marker.color.g = 1.0
                 marker.color.b = 0.0
                 marker.color.a = 0.6
 
-            marker.lifetime.sec = 0  # Persist until deleted
+            marker.lifetime.sec = 0  
 
-            # Add score as text above sphere
             text_marker = Marker()
             text_marker.header = marker.header
             text_marker.ns = 'frontier_scores'
@@ -606,8 +554,8 @@ class SimpleNavigationNode(Node):
             text_marker.action = Marker.ADD
             text_marker.pose.position.x = marker.pose.position.x
             text_marker.pose.position.y = marker.pose.position.y
-            text_marker.pose.position.z = 1.0  # Above sphere
-            text_marker.scale.z = 0.3  # Text height
+            text_marker.pose.position.z = 1.0  
+            text_marker.scale.z = 0.3  
             text_marker.color.r = 1.0
             text_marker.color.g = 1.0
             text_marker.color.b = 1.0
@@ -640,7 +588,7 @@ class SimpleNavigationNode(Node):
         self.path_pub.publish(path_msg)
 
     def _publish_hull_boundary(self):
-        """Publish concave hull boundary visualization"""
+        
         hull_data = self.frontier_detector.get_hull_visualization_data()
 
         if not hull_data['has_data']:
@@ -652,7 +600,6 @@ class SimpleNavigationNode(Node):
         clear_marker.action = Marker.DELETEALL
         marker_array.markers.append(clear_marker)
 
-        # Use map header for frame and timestamp synchronization
         if self.map_header is not None:
             header_frame = self.map_header.frame_id
             header_stamp = self.map_header.stamp
@@ -668,7 +615,7 @@ class SimpleNavigationNode(Node):
             offset_marker.id = 1
             offset_marker.type = Marker.LINE_STRIP
             offset_marker.action = Marker.ADD
-            offset_marker.scale.x = 0.07  # Slightly thicker
+            offset_marker.scale.x = 0.07 
             offset_marker.color.r = 0.0
             offset_marker.color.g = 0.5
             offset_marker.color.b = 1.0
@@ -679,7 +626,7 @@ class SimpleNavigationNode(Node):
                 p = Point()
                 p.x = float(point[0])
                 p.y = float(point[1])
-                p.z = 0.15  # Slightly higher than hull
+                p.z = 0.0
                 offset_marker.points.append(p)
 
             marker_array.markers.append(offset_marker)

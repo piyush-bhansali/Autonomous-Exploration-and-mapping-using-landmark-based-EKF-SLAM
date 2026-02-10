@@ -44,22 +44,20 @@ class RRTStar:
             self.x_min, self.y_min = self.obstacles_2d.min(axis=0)
             self.x_max, self.y_max = self.obstacles_2d.max(axis=0)
 
-        self.x_min -= 5
-        self.x_max += 5
-        self.y_min -= 5
-        self.y_max += 5
+        self.x_min -= 10
+        self.x_max += 10
+        self.y_min -= 10
+        self.y_max += 10
 
     def plan(self,
             start: np.ndarray,
             goal: np.ndarray,
             logger=None) -> Optional[List[np.ndarray]]:
 
-        # Two-tier collision checking for start position
         start_collision = self._is_collision(start)
         start_collision_relaxed = self._is_collision_relaxed(start)
         goal_collision = self._is_collision(goal)
 
-        # Recovery mode: If start fails strict check but passes relaxed check
         recovery_mode = start_collision and not start_collision_relaxed
 
         if recovery_mode:
@@ -67,9 +65,6 @@ class RRTStar:
                 logger.warn(f'  RRT* RECOVERY MODE: Start position [{start[0]:.2f}, {start[1]:.2f}] is close to obstacles')
                 logger.warn(f'    Using relaxed safety margin ({self.relaxed_safety_margin}m) for start position')
 
-        # Reject planning if:
-        # 1. Start fails even relaxed check (truly in collision)
-        # 2. Goal fails strict check (always strict for goals)
         if start_collision_relaxed or goal_collision:
             if logger:
                 if start_collision_relaxed:
@@ -83,7 +78,6 @@ class RRTStar:
         node_kdtree = None
         kdtree_built_at = 0
 
-        # RRT* main loop
         for _ in range(self.max_iterations):
 
             if np.random.random() < self.goal_bias:
@@ -171,11 +165,9 @@ class RRTStar:
                         
                         path = self._extract_path(new_node)
 
-                    # Smooth path
                     path = self._smooth_path(path)
                     return path
 
-        # No path found after max iterations
         if logger:
             logger.error(f'  RRT* FAILURE: Max iterations ({self.max_iterations}) reached without finding path')
             logger.error(f'    Nodes explored: {len(nodes)}')
@@ -229,7 +221,6 @@ class RRTStar:
 
             return best_node
         else:
-            # Linear search for small trees
             return min(nodes, key=lambda n: np.linalg.norm(n.position - point))
 
     def _find_near_neighbors(self, nodes: List[RRTNode], point: np.ndarray, kdtree, kdtree_built_at: int, rewire_radius: float) -> List[RRTNode]:
@@ -293,7 +284,7 @@ class RRTStar:
         return True
 
     def _extract_path(self, goal_node: RRTNode) -> List[np.ndarray]:
-        """Extract path from tree by following parent pointers"""
+        
         path = []
         node = goal_node
 

@@ -92,14 +92,7 @@ class SubmapStitcher:
                                 source: o3d.t.geometry.PointCloud,
                                 target: o3d.t.geometry.PointCloud,
                                 transform: np.ndarray) -> Optional[np.ndarray]:
-        """
-        Compute Hessian-based covariance for ICP alignment.
-
-        Returns 3x3 covariance matrix for (x, y, theta) based on:
-        P = σ² * A^(-1)
-
-        where A is the Hessian (information matrix) from point correspondences.
-        """
+       
         try:
             # Convert tensors to numpy arrays for KDTree
             source_points = source.point.positions.cpu().numpy()[:, :2]  # 2D (x, y)
@@ -134,32 +127,25 @@ class SubmapStitcher:
             src_inliers = source_points[inlier_mask]
             tgt_inliers = target_points[indices[inlier_mask]]
 
-            # Compute Hessian A = sum(J^T @ J)
             A = np.zeros((3, 3))
 
             for p_s, p_t in zip(src_inliers, tgt_inliers):
-                # Jacobian of predicted point wrt pose (x, y, theta)
+               
                 dp_dtheta = dR_dtheta @ p_s
 
-                # Jacobian: residual = target - predicted
-                # ∂r/∂x = -1, ∂r/∂y = -1, ∂r/∂θ = -dp_dtheta
                 J = np.array([
                     [-1.0, 0.0, -dp_dtheta[0]],
                     [0.0, -1.0, -dp_dtheta[1]]
                 ])
 
-                # Accumulate Hessian (Information Matrix)
                 A += J.T @ J
 
-            # Use fixed LiDAR noise instead of estimating from residuals
-            # This avoids the "optimism" problem where more points → smaller σ²
             sigma2 = self.lidar_noise_sigma ** 2
 
-            # Covariance: P = σ² * A^(-1)
             try:
                 A_inv = np.linalg.inv(A)
             except np.linalg.LinAlgError:
-                # Use pseudo-inverse if singular (e.g., in featureless corridors)
+               
                 A_inv = np.linalg.pinv(A)
 
             covariance = sigma2 * A_inv

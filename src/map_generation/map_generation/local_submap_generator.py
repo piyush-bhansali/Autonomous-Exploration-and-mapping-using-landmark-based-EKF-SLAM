@@ -427,8 +427,7 @@ class LocalSubmapGenerator(Node):
             observed_features,
             self.ekf,
             max_mahalanobis_dist=5.99,
-            max_euclidean_dist=5.0,  # Increased to match LiDAR range
-            debug=False  # Disable debug logs after fixing
+            max_euclidean_dist=5.0  # Increased to match LiDAR range
         )
 
        

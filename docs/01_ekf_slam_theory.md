@@ -5,6 +5,12 @@
 2. [Problem Formulation](#2-problem-formulation)
 3. [EKF Prediction Step](#3-ekf-prediction-step)
 4. [EKF Update Step](#4-ekf-update-step)
+   - 4.1-4.8: Landmark-Based Updates
+   - 4.9: Hybrid Update Strategy
+   - 4.10: ICP-Based Pose Measurement Update
+   - 4.11: Hessian-Based Measurement Uncertainty for ICP
+   - 4.12: Implementation of Hessian-Based ICP Covariance
+   - 4.13: Unified Hessian-Based Uncertainty Framework
 5. [Landmark Initialization](#5-landmark-initialization)
 6. [Landmark Observation Models](#6-landmark-observation-models)
 7. [Covariance Management](#7-covariance-management)
@@ -318,37 +324,6 @@ $$
 **For this thesis:**
 - Operating regime: Small to moderate motion ($\delta_d \approx 0.05$-$0.3$ m per update)
 - **Motion-scaled model is appropriate** and follows standard robotics practice
-
-### 3.5.4 Parameter Selection Guidelines
-
-**Typical values** for different robot types:
-
-| Robot Type | $\sigma_d$ | $\sigma_\theta$ | $\sigma_{\min,d}$ | $\sigma_{\min,\theta}$ |
-|------------|-----------|---------------|-----------------|---------------------|
-| Differential drive (TurtleBot) | 0.05 | 0.1 | 0.001 m | 0.01 rad |
-| Car-like (Ackermann) | 0.02 | 0.05 | 0.001 m | 0.005 rad |
-| Omnidirectional | 0.08 | 0.15 | 0.002 m | 0.02 rad |
-
-**Empirical tuning procedure:**
-
-1. **Initial estimate** from robot specifications
-2. **Collect ground truth data** (motion capture, laser tracker)
-3. **Compute empirical odometry error** over multiple trials
-4. **Fit parameters** to match observed error distribution
-5. **Validate consistency** using NEES testing (see Section 9.5)
-
-**Consistency validation** (Bailey et al., 2006):
-
-If process noise is **correctly tuned**, the filter should be **consistent**:
-
-$$
-\epsilon_k = (\mathbf{x}_k - \hat{\mathbf{x}}_k)^T \mathbf{P}_k^{-1} (\mathbf{x}_k - \hat{\mathbf{x}}_k) \sim \chi^2(3)
-$$
-
-**Over-tuned** (Q too large): Conservative but computationally expensive
-**Under-tuned** (Q too small): **Inconsistent filter** → divergence risk
-
-**Best practice**: Start conservative, reduce Q if NEES indicates overestimation.
 
 ### 3.6 Covariance Prediction
 
@@ -1729,6 +1704,48 @@ P = (P + P.T) / 2.0
 15. **Siegwart, R., Nourbakhsh, I. R., & Scaramuzza, D. (2011).** *Introduction to Autonomous Mobile Robots* (2nd ed.). MIT Press.
     - Chapter 5: Mobile Robot Localization
     - Section 5.2: Odometry error modeling
+
+### ICP and Hessian-Based Covariance
+
+16. **Besl, P. J., & McKay, N. D. (1992).** "A Method for Registration of 3-D Shapes." *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 14(2), 239-256.
+    - Original ICP algorithm for point cloud registration
+    - Closest point iteration for rigid body transformation
+    - Foundational work for all subsequent ICP variants
+
+17. **Censi, A. (2007).** "An Accurate Closed-Form Estimate of ICP's Covariance." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 3167-3172.
+    - **Hessian-based covariance estimation for ICP** (directly used in this thesis)
+    - Closed-form solution using Fisher Information Matrix: $\mathbf{R} = \sigma^2 \mathbf{A}^{-1}$
+    - Mathematical foundation for geometry-dependent uncertainty
+
+18. **Censi, A. (2008).** "An ICP Variant Using a Point-to-Line Metric." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 19-25.
+    - Point-to-line ICP for 2D laser scans
+    - Improved convergence for structured environments
+    - Extended covariance formulation for different ICP variants
+
+19. **Grisetti, G., Stachniss, C., & Burgard, W. (2007).** "Improved Techniques for Grid Mapping with Rao-Blackwellized Particle Filters." *IEEE Transactions on Robotics*, 23(1), 34-46.
+    - Scan matching with covariance estimation
+    - Integration with particle filter SLAM
+    - Practical implementation for mobile robots
+
+20. **Prakhya, S. M., Liu, B., & Lin, W. (2015).** "A Closed-Form Estimate of 3D ICP Covariance." *Proceedings of 14th IAPR International Conference on Machine Vision Applications (MVA)*, pp. 526-529.
+    - Extension of Censi's work to 3D
+    - Computational efficiency improvements
+    - Validation on real datasets
+
+### Hybrid SLAM Approaches
+
+21. **Konolige, K., & Chou, K. (1999).** "Markov Localization using Correlation." *Proceedings of International Joint Conference on Artificial Intelligence (IJCAI)*, pp. 1154-1159.
+    - Combining scan matching with feature-based localization
+    - Early hybrid approach for mobile robots
+
+22. **Hähnel, D., Burgard, W., Fox, D., & Thrun, S. (2003).** "An Efficient FastSLAM Algorithm for Generating Maps of Large-Scale Cyclic Environments from Raw Laser Range Measurements." *Proceedings of IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)*, pp. 206-211.
+    - Combining scan matching with landmark detection
+    - Hybrid dense-sparse mapping strategy
+
+23. **Barfoot, T. D., & Furgale, P. T. (2014).** "Associating Uncertainty with Three-Dimensional Poses for use in Estimation Problems." *IEEE Transactions on Robotics*, 30(3), 679-693.
+    - Lie group representation for pose uncertainty
+    - Covariance propagation for SE(3) transformations
+    - Theoretical foundations for registration uncertainty
 
 ---
 

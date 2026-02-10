@@ -6,7 +6,7 @@ from sensor_msgs.msg import LaserScan, PointCloud2
 
 
 def calculate_path_length(path: list) -> float:
-    """Calculate total Euclidean path length"""
+    
     total = 0.0
     for i in range(len(path) - 1):
         total += np.linalg.norm(path[i+1] - path[i])
@@ -64,17 +64,7 @@ def transform_points_to_global(points: np.ndarray, robot_pos: np.ndarray, robot_
 
 
 def parse_pointcloud2(msg: PointCloud2) -> np.ndarray:
-    """
-    Parse PointCloud2 message to numpy array (optimized with numpy).
-
-    Args:
-        msg: PointCloud2 message
-
-    Returns:
-        Nx3 numpy array with [x, y, z] coordinates
-    """
-    # Use numpy structured array for fast parsing
-    # Assuming point_step is 12 (3 floats of 4 bytes each)
+   
     dtype = np.dtype([
         ('x', np.float32),
         ('y', np.float32),
@@ -170,7 +160,7 @@ def check_if_stuck(
     stuck_check_window: float,
     stuck_distance_threshold: float
 ) -> tuple:
-    """Check if robot is stuck by comparing position over time"""
+    
     if last_check_position is None:
         return False, 0.0
 

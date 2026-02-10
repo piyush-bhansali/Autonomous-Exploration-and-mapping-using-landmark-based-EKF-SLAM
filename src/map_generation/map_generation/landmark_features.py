@@ -19,12 +19,11 @@ class LandmarkFeatureExtractor:
         self.fit_threshold = line_fit_threshold
         self.min_length = min_line_length
         self.corner_angle = np.radians(corner_angle_threshold)
-        # LiDAR noise from TurtleBot3 LDS-01 specs (±10mm accuracy)
+        
         self.lidar_sigma = lidar_noise_sigma  # σ = 0.01m → σ² = 0.0001
 
     def extract_features(self, scan_msg: LaserScan) -> List[Dict]:
         
-        # Convert scan to points
         points = self._scan_to_cartesian(scan_msg)
 
         return self.extract_features_from_points(points)
@@ -36,22 +35,15 @@ class LandmarkFeatureExtractor:
 
         pts_2d = points[:, :2] if points.shape[1] >= 2 else points
 
-        # For laser scans, points are already ordered sequentially
-        # Don't re-sort them - this preserves the scan order and gap information
-
-        # Extract line segments with gap detection
         lines = self._extract_lines(pts_2d)
 
-        # Detect corners from line intersections (not just adjacent lines)
         corners = self._detect_corners_from_lines(lines)
 
         features = []
 
-        # Add wall features (Hessian form)
         for line in lines:
             rho, alpha = self._convert_line_to_hessian(line['points'])
 
-            # Compute covariance based on line quality
             cov = self._compute_wall_covariance(line)
 
             features.append({
@@ -59,7 +51,7 @@ class LandmarkFeatureExtractor:
                 'rho': rho,
                 'alpha': alpha,
                 'covariance': cov,
-                'strength': line['length'],  # For filtering
+                'strength': line['length'], 
                 'num_points': line['num_points']
             })
 
@@ -97,10 +89,7 @@ class LandmarkFeatureExtractor:
         return np.column_stack([x, y])
 
     def _split_on_gaps(self, points: np.ndarray, max_gap: float = 0.2) -> List[Tuple[np.ndarray, int]]:
-        """
-        Split point cloud into continuous segments based on inter-point distance.
-        Returns list of (segment_points, original_start_index) tuples.
-        """
+        
         if len(points) < 2:
             return [(points, 0)]
 
@@ -248,19 +237,16 @@ class LandmarkFeatureExtractor:
         return rho, alpha
 
     def _detect_corners_from_lines(self, lines: List[Dict]) -> List[Dict]:
-        """
-        Detect corners by finding line intersections.
-        Checks all line pairs within spatial proximity, not just adjacent ones.
-        """
+        
         corners = []
         if len(lines) < 2:
             return corners
 
-        # Maximum distance between line endpoints to consider for corner detection
+      
         max_proximity = 1.0  # meters
         neighbor_span = 6
 
-        # Check all pairs of lines (not just adjacent)
+       
         for i in range(len(lines)):
             for j in range(i + 1, len(lines)):
                 line_a = lines[i]
@@ -269,16 +255,13 @@ class LandmarkFeatureExtractor:
                 dir_a = line_a['direction']
                 dir_b = line_b['direction']
 
-                # Check angle between lines (without abs to distinguish direction)
+               
                 dot = np.clip(np.dot(dir_a, dir_b), -1.0, 1.0)
-                angle = np.arccos(np.abs(dot))  # Angle between 0 and π/2
+                angle = np.arccos(np.abs(dot))  
 
-                # Require significant angle change (not parallel)
                 if angle < self.corner_angle:
                     continue
 
-                # Check spatial proximity: are the line endpoints close?
-                # Get all endpoint combinations
                 end_a = line_a['points'][-1]
                 start_a = line_a['points'][0]
                 end_b = line_b['points'][-1]
@@ -351,15 +334,7 @@ class LandmarkFeatureExtractor:
         return corners
 
     def _compute_wall_covariance(self, line: Dict) -> np.ndarray:
-        """
-        Compute Hessian-based covariance for wall observation.
-
-        Uses fixed LiDAR noise (σ² = 0.0001) to avoid the "optimism problem"
-        where more points artificially reduce uncertainty.
-
-        Returns:
-            2x2 covariance matrix for (rho, alpha)
-        """
+       
         points = line['points']
         if len(points) < 2:
             return np.eye(2) * 0.1
@@ -369,16 +344,6 @@ class LandmarkFeatureExtractor:
         cos_a = np.cos(alpha)
         sin_a = np.sin(alpha)
 
-        # For wall in Hessian form: rho = x*cos(alpha) + y*sin(alpha)
-        # Residual for point i: r_i = (x_i*cos(alpha) + y_i*sin(alpha)) - rho
-        x = points[:, 0]
-        y = points[:, 1]
-
-        # Jacobian of residual wrt [rho, alpha]
-        # ∂r/∂rho = -1
-        # ∂r/∂alpha = -x*sin(alpha) + y*cos(alpha)
-
-        # Compute Hessian (Information Matrix): A = Σ(J^T @ J)
         A = np.zeros((2, 2))
 
         for px, py in points:
@@ -388,11 +353,8 @@ class LandmarkFeatureExtractor:
 
             J = np.array([[dr_d_rho, dr_d_alpha]])
 
-            # Accumulate Hessian
             A += J.T @ J
 
-        # Use FIXED LiDAR noise from sensor specifications
-        # TurtleBot3 LDS-01: ±10mm → σ = 0.01m → σ² = 0.0001
         sigma2 = self.lidar_sigma ** 2
 
         try:
@@ -401,85 +363,44 @@ class LandmarkFeatureExtractor:
             # Singular matrix (degenerate case) - use pseudo-inverse
             A_inv = np.linalg.pinv(A)
 
-        # Covariance: P = σ² * A^(-1)
-        # Geometry captured by A^(-1), sensor noise by σ²
+        
         return sigma2 * A_inv
 
     def _compute_corner_covariance(self, corner: Dict) -> np.ndarray:
-        """
-        Compute Hessian-based covariance for corner observation.
 
-        Corner position is estimated from neighboring points. Using Hessian
-        formulation with fixed LiDAR noise ensures mathematical consistency
-        with wall and ICP measurements.
-
-        Returns:
-            2x2 covariance matrix for (x, y) position
-        """
         neighbors = corner.get('neighbors', None)
         if neighbors is None or len(neighbors) < 3:
-            # Fallback: isotropic uncertainty based on sensor noise
+            
             sigma2 = self.lidar_sigma ** 2
-            return np.eye(2) * sigma2 * 10  # Conservative estimate
+            return np.eye(2) * sigma2 * 10  
 
         corner_pos = corner['position']
         n_points = len(neighbors)
 
-        # For corner position estimation from point cloud:
-        # Each point p_i provides constraint: p_i ≈ corner_pos + noise
-        # Residual: r_i = p_i - corner_pos (2D vector)
-        # Jacobian wrt corner_pos: ∂r_i/∂corner_pos = -I_2x2
+        pca = PCA(n_components=2)
+        pca.fit(neighbors)
 
-        # Compute Hessian (Information Matrix): A = Σ(J^T @ J)
-        # Since J = -I for each point, J^T @ J = I
-        # Therefore: A = Σ_i I = N * I
+        
+        evs = np.maximum(pca.explained_variance_, 1e-6)
+        info_eigenvalues = 1.0 / evs 
 
-        A = n_points * np.eye(2)
+        
+        effective_n = min(n_points, 30)
+        info_eigenvalues *= effective_n
 
-        # Additionally, incorporate geometric structure from PCA
-        # Points may be more scattered in one direction than another
-        centroid, direction, eigenvalues = self._pca_direction(neighbors)
+        V = pca.components_.T  
+        Lambda_inv = np.diag(info_eigenvalues)
+        A = V @ Lambda_inv @ V.T
 
-        if len(eigenvalues) >= 2:
-            # Build covariance from PCA eigenvalues
-            # Eigenvectors show principal directions of scatter
-            pca = PCA(n_components=2)
-            pca.fit(neighbors)
-
-            # Eigenvalues represent variance along principal axes
-            # Smaller eigenvalue → more constrained direction → higher information
-            # Information is inverse of variance
-
-            # Build information matrix from eigenstructure
-            # Λ_inv = diag(1/λ_1, 1/λ_2) where λ_i are eigenvalues
-            # A_pca = V @ Λ_inv @ V^T where V are eigenvectors
-
-            evs = np.maximum(eigenvalues, 1e-6)  # Prevent division by zero
-            info_eigenvalues = 1.0 / evs  # Information = 1/variance
-
-            # Scale by number of points (more points → more information)
-            info_eigenvalues *= n_points
-
-            V = pca.components_.T  # Eigenvectors as columns
-            Lambda_inv = np.diag(info_eigenvalues)
-
-            # Geometric information matrix
-            A = V @ Lambda_inv @ V.T
-        else:
-            # Fallback: isotropic
-            A = n_points * np.eye(2)
-
-        # Use FIXED LiDAR noise from sensor specifications
-        # TurtleBot3 LDS-01: ±10mm → σ = 0.01m → σ² = 0.0001
         sigma2 = self.lidar_sigma ** 2
 
         try:
-            A_inv = np.linalg.inv(A)
+           
+            A_reg = A + np.eye(2) * 1e-9
+            A_inv = np.linalg.inv(A_reg)
         except np.linalg.LinAlgError:
-            # Singular matrix - use pseudo-inverse
-            A_inv = np.linalg.pinv(A)
+           
+            return np.eye(2) * sigma2 * 10
 
-        # Covariance: P = σ² * A^(-1)
-        # More points or less scatter → larger A → smaller P (more certain)
-        # Fixed σ² prevents optimism with dense point clouds
+       
         return sigma2 * A_inv
