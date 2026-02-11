@@ -4,7 +4,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from sensor_msgs.msg import LaserScan
 
-from map_generation.ekf_slam import LandmarkEKFSLAM
+from map_generation.ekf_update_feature import LandmarkEKFSLAM
 from map_generation.landmark_features import LandmarkFeatureExtractor
 from map_generation.data_association import associate_landmarks
 from map_generation.feature_map import FeatureMap

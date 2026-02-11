@@ -29,6 +29,8 @@ setup(
         'console_scripts': [
           'local_map = map_generation.local_map:main',
           'local_submap_generator = map_generation.local_submap_generator:main',
+          'local_submap_generator_icp = map_generation.local_submap_generator_icp:main',
+          'local_submap_generator_feature = map_generation.local_submap_generator_feature:main',
           'test_robot_controller = map_generation.test_robot_controller:main',
         ],
     },

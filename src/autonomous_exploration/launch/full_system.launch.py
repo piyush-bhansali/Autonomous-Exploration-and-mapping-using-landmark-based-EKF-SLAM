@@ -9,7 +9,7 @@ from launch.actions import (
     LogInfo
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -225,21 +225,41 @@ def generate_launch_description():
             actions=[spawn_robot, robot_state_publisher, robot_bridge]
         )
 
-        # Mapping: Local submap generator
-        submap_generator = Node(
+        # Mapping: Local submap generator (mode-specific executables)
+        submap_generator_icp = Node(
             package='map_generation',
-            executable='local_submap_generator',
+            executable='local_submap_generator_icp',
             name=f'{robot_name}_submap_generator',
             output='screen',
             parameters=[{
                 'use_sim_time': True,
                 'robot_name': robot_name,
-                'save_directory': './submaps',
-                'mapping_mode': mapping_mode
-            }]
+                'save_directory': './submaps'
+            }],
+            condition=launch.conditions.IfCondition(
+                PythonExpression(["'", mapping_mode, "' == 'icp'"])
+            )
         )
 
-        submap_generator_delayed = TimerAction(period=mapping_delay, actions=[submap_generator])
+        submap_generator_feature = Node(
+            package='map_generation',
+            executable='local_submap_generator_feature',
+            name=f'{robot_name}_submap_generator',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'robot_name': robot_name,
+                'save_directory': './submaps'
+            }],
+            condition=launch.conditions.IfCondition(
+                PythonExpression(["'", mapping_mode, "' == 'feature'"])
+            )
+        )
+
+        submap_generator_delayed = TimerAction(
+            period=mapping_delay,
+            actions=[submap_generator_icp, submap_generator_feature]
+        )
 
         # Navigation: Frontier exploration
         navigation_node = Node(

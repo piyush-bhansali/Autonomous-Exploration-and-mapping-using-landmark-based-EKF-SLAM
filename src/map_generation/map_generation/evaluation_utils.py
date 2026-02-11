@@ -59,7 +59,7 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
     Higher information = more precise state estimate.
 
     Args:
-        ekf_slam: LandmarkEKFSLAM instance
+        ekf_slam: EKF instance (ICPPoseEKF or LandmarkEKFSLAM)
         ekf_initialized: Whether EKF has been initialized
         current_time_ns: Current time in nanoseconds
 
@@ -68,7 +68,7 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
             - confidence: Normalized confidence score [0, 1]
             - information: Trace of information matrix
             - robot_uncertainty: Trace of pose covariance
-            - num_landmarks: Number of landmarks in EKF state
+            - num_landmarks: Number of landmarks in EKF state (0 for ICP mode)
             - timestamp: Current time in nanoseconds
     """
     if not ekf_initialized:
@@ -102,10 +102,13 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
         information = 0.0
         confidence = 0.0
 
+    # Get number of landmarks (0 for ICP mode, N for feature mode)
+    num_landmarks = len(ekf_slam.landmarks) if hasattr(ekf_slam, 'landmarks') else 0
+
     return {
         'confidence': float(confidence),
         'information': float(information),
         'robot_uncertainty': float(robot_uncertainty),
-        'num_landmarks': len(ekf_slam.landmarks),
+        'num_landmarks': int(num_landmarks),
         'timestamp': current_time_ns
     }
