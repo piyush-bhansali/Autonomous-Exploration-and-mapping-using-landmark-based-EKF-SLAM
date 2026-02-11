@@ -57,10 +57,17 @@ def generate_launch_description():
         description='Launch RViz visualization'
     )
 
+    mapping_mode_arg = DeclareLaunchArgument(
+        'mapping_mode',
+        default_value='icp',
+        description='Mapping mode: icp (scan-to-submap ICP) or feature (landmark-based)'
+    )
+
     # Configuration
     world_name = LaunchConfiguration('world')
     enable_navigation = LaunchConfiguration('enable_navigation')
     use_rviz = LaunchConfiguration('use_rviz')
+    mapping_mode = LaunchConfiguration('mapping_mode')
 
     # File paths
     world_file = PathJoinSubstitution([
@@ -227,7 +234,8 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'robot_name': robot_name,
-                'save_directory': './submaps'
+                'save_directory': './submaps',
+                'mapping_mode': mapping_mode
             }]
         )
 
@@ -278,6 +286,7 @@ def generate_launch_description():
         world_arg,
         enable_navigation_arg,
         use_rviz_arg,
+        mapping_mode_arg,
 
         # System startup
         LogInfo(msg='========================================'),
@@ -285,6 +294,7 @@ def generate_launch_description():
         LogInfo(msg='========================================'),
         LogInfo(msg=['World: ', world_name]),
         LogInfo(msg=f'Robots: {NUM_ROBOTS}'),
+        LogInfo(msg=['Mapping Mode: ', mapping_mode]),
         LogInfo(msg='========================================'),
 
         # Core system

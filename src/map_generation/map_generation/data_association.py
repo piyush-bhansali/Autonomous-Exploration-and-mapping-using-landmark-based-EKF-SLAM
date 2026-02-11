@@ -8,15 +8,20 @@ def associate_landmarks(
     observed_features: List[Dict],
     ekf_slam,
     max_mahalanobis_dist: float = 5.99,  # Chi-squared 2-DOF, 95% confidence
-    max_euclidean_dist: float = 1.0
-) -> Tuple[List[Tuple[int, int]], List[int]]:
+    max_euclidean_dist: float = 1.0,
+    return_extension_info: bool = False
+) -> Tuple[List[Tuple[int, int]], List[int], Dict]:
 
     matched = []
     unmatched = []
+    extension_info = {}  # Will contain wall extension data if return_extension_info=True
 
     if len(ekf_slam.landmarks) == 0:
         # No landmarks yet - all observations are new
-        return matched, list(range(len(observed_features)))
+        if return_extension_info:
+            return matched, list(range(len(observed_features))), extension_info
+        else:
+            return matched, list(range(len(observed_features)))
 
     # Robot pose
     x_r, y_r, theta_r = ekf_slam.state[0:3]
@@ -145,7 +150,40 @@ def associate_landmarks(
 
         if best_landmark_id is not None:
             matched.append((feat_idx, best_landmark_id))
+
+            # Check for wall extension if requested
+            if return_extension_info and feature['type'] == 'wall':
+                # Transform observed endpoints from robot frame to map frame
+                obs_start = feature.get('start_point', None)
+                obs_end = feature.get('end_point', None)
+
+                if obs_start is not None and obs_end is not None:
+                    # Rotation matrix robot -> map
+                    c = np.cos(theta_r)
+                    s = np.sin(theta_r)
+                    R = np.array([[c, -s], [s, c]])
+
+                    # Transform to map frame
+                    start_map = R @ obs_start + np.array([x_r, y_r])
+                    end_map = R @ obs_end + np.array([x_r, y_r])
+
+                    # Transform points to map frame
+                    obs_points = feature.get('points', np.array([]))
+                    if len(obs_points) > 0:
+                        points_map = (R @ obs_points.T).T + np.array([x_r, y_r])
+                    else:
+                        points_map = np.array([])
+
+                    extension_info[feat_idx] = {
+                        'landmark_id': best_landmark_id,
+                        'new_start': start_map,
+                        'new_end': end_map,
+                        'new_points': points_map
+                    }
         else:
             unmatched.append(feat_idx)
 
-    return matched, unmatched
+    if return_extension_info:
+        return matched, unmatched, extension_info
+    else:
+        return matched, unmatched

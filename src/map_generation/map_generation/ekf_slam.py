@@ -275,9 +275,10 @@ class LandmarkEKFSLAM:
             innovation = np.array([z_x - z_pred_x, z_y - z_pred_y])
 
             # Observation model: h(x) = R(-θ_r) * (lm - robot_pos)
-            # where R(-θ_r) = [[cos(θ_r), sin(θ_r)], [-sin(θ_r), cos(θ_r)]]
+            # where R(-θ_r) = [[cos(-θ_r), -sin(-θ_r)], [sin(-θ_r), cos(-θ_r)]]
+            #               = [[cos(θ_r), sin(θ_r)], [-sin(θ_r), cos(θ_r)]]
             #
-            # ∂h/∂robot_pose - using actual angle θ_r (not -θ_r) for clarity
+            # Jacobian ∂h/∂robot_pose
             c = np.cos(theta_r)
             s = np.sin(theta_r)
 
@@ -289,7 +290,7 @@ class LandmarkEKFSLAM:
             H[1, 1] = -c
             H[1, 2] = -c * dx - s * dy
 
-            # ∂h/∂landmark - using rotation matrix R(-θ_r)
+            # Jacobian ∂h/∂landmark (using R(-θ_r) from line 268-269)
             H[0, idx] = cos_theta
             H[0, idx+1] = -sin_theta
 

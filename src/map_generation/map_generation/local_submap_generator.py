@@ -16,6 +16,7 @@ from map_generation.submap_stitcher import SubmapStitcher
 from map_generation.ekf_slam import LandmarkEKFSLAM
 from map_generation.landmark_features import LandmarkFeatureExtractor
 from map_generation.data_association import associate_landmarks
+from map_generation.feature_map import FeatureMap
 from map_generation.mapping_utils import (
     scan_to_map_icp,
     compute_relative_pose,
@@ -54,8 +55,15 @@ class LocalSubmapGenerator(Node):
 
         self.declare_parameter('robot_name', 'tb3_1')
         self.declare_parameter('save_directory', './submaps')
+        self.declare_parameter('mapping_mode', 'icp')  # 'icp' or 'feature'
         self.robot_name = self.get_parameter('robot_name').value
         self.save_dir = self.get_parameter('save_directory').value
+        self.mapping_mode = self.get_parameter('mapping_mode').value
+
+        # Validate mapping mode
+        if self.mapping_mode not in ['icp', 'feature']:
+            self.get_logger().error(f"Invalid mapping_mode: {self.mapping_mode}. Using 'icp'.")
+            self.mapping_mode = 'icp'
 
         self.scans_per_submap = 50
         self.voxel_size = 0.05
@@ -71,15 +79,22 @@ class LocalSubmapGenerator(Node):
         self.ekf_initialized = False
 
         self.feature_extractor = LandmarkFeatureExtractor(
-            min_points_per_line=10,
-            line_fit_threshold=0.05,
-            min_line_length=0.5,
-            corner_angle_threshold=45.0
+            min_points_per_line=5,
+            line_fit_threshold=0.03,
+            min_line_length=0.3,
+            corner_angle_threshold=50.0,
+            max_gap=0.2
         )
 
         self.stitcher = SubmapStitcher(
             voxel_size=self.voxel_size
         )
+
+        # Feature mode: initialize FeatureMap
+        if self.mapping_mode == 'feature':
+            self.feature_map = FeatureMap()
+        else:
+            self.feature_map = None
 
         if o3c.cuda.is_available():
             self.device = o3c.Device("CUDA:0")
@@ -167,6 +182,7 @@ class LocalSubmapGenerator(Node):
         self.create_timer(0.1, self._publish_tf_callback)
 
         self.get_logger().info(f'Local Submap Generator initialized for {self.robot_name}')
+        self.get_logger().info(f'  Mapping mode: {self.mapping_mode.upper()}')
         self.get_logger().info(f'  Save directory: {self.save_dir} | Device: {self.device}')
         self.get_logger().info(f'  TF: map -> {self.robot_name}/odom (EKF) -> {self.robot_name}/base_footprint (Gazebo)')
 
@@ -411,107 +427,6 @@ class LocalSubmapGenerator(Node):
 
         return state
 
-    def _process_scan_features(self, scan_msg):
-       
-        if not self.ekf_initialized:
-            return
-
-       
-        observed_features = self.feature_extractor.extract_features(scan_msg)
-
-        if len(observed_features) == 0:
-            return
-
-
-        matched, unmatched = associate_landmarks(
-            observed_features,
-            self.ekf,
-            max_mahalanobis_dist=5.99,
-            max_euclidean_dist=5.0  # Increased to match LiDAR range
-        )
-
-       
-        for feat_idx, landmark_id in matched:
-            feature = observed_features[feat_idx]
-
-           
-            if feature['type'] == 'wall':
-               
-                z_rho = feature['rho']
-                z_alpha = feature['alpha']
-
-                self.ekf.update_landmark_observation(
-                    landmark_id=landmark_id,
-                    z_x=z_rho,
-                    z_y=z_alpha,
-                    scan_number=self.ekf.current_scan_number,
-                    measurement_covariance=feature['covariance']
-                )
-
-            elif feature['type'] == 'corner':
-               
-                z_x, z_y = feature['position']
-
-               
-                self.ekf.update_landmark_observation(
-                    landmark_id=landmark_id,
-                    z_x=z_x,
-                    z_y=z_y,
-                    scan_number=self.ekf.current_scan_number,
-                    measurement_covariance=feature['covariance']
-                )
-
-        # Add new landmarks for unmatched features
-        for feat_idx in unmatched:
-            feature = observed_features[feat_idx]
-
-            if feature['type'] == 'wall':
-                # Wall in Hessian form
-                z_rho = feature['rho']
-                z_alpha = feature['alpha']
-
-                self.ekf.add_landmark(
-                    z_x=z_rho,
-                    z_y=z_alpha,
-                    feature=feature,
-                    scan_number=self.ekf.current_scan_number
-                )
-
-            elif feature['type'] == 'corner':
-                # Corner in Cartesian coordinates
-                z_x, z_y = feature['position']
-
-                self.ekf.add_landmark(
-                    z_x=z_x,
-                    z_y=z_y,
-                    feature=feature,
-                    scan_number=self.ekf.current_scan_number
-                )
-
-        # Prune landmarks that haven't been seen recently
-        self.ekf.prune_landmarks(self.ekf.current_scan_number)
-
-        self._sync_pose_from_ekf()
-
-        publish_feature_markers(
-            observed_features,
-            scan_msg.header.stamp,
-            self.feature_markers_pub,
-            self.robot_name
-        )
-
-        num_landmarks = len(self.ekf.landmarks)
-        num_corners = sum(1 for f in observed_features if f['type'] == 'corner')
-        num_walls = sum(1 for f in observed_features if f['type'] == 'wall')
-
-        self.get_logger().info(
-            f"Landmark SLAM: {len(observed_features)} features "
-            f"({num_corners} corners, {num_walls} walls), "
-            f"{len(matched)} matched, {len(unmatched)} unmatched, "
-            f"{num_landmarks} total landmarks",
-            throttle_duration_sec=1.0
-        )
-
     def _sync_pose_from_ekf(self):
         """Synchronize current_pose from EKF state."""
         state = self.ekf.get_state()
@@ -533,33 +448,39 @@ class LocalSubmapGenerator(Node):
             self.get_logger().warn('Waiting for odometry before processing scans...', throttle_duration_sec=5.0)
             return
 
-        self._process_scan_features(msg)
+        # Dispatch to appropriate processing method based on mapping mode
+        if self.mapping_mode == 'icp':
+            self._process_scan_icp_mode(msg)
+        elif self.mapping_mode == 'feature':
+            self._process_scan_feature_mode(msg)
 
+    def _process_scan_icp_mode(self, msg):
+        """Process scan in ICP mode: scan-to-submap ICP, accumulate raw points."""
+
+        # Initialize submap start pose if needed
         if self.submap_start_pose is None:
             self.submap_start_pose = self.current_pose.copy()
 
         relative_pose = compute_relative_pose(self.current_pose, self.submap_start_pose)
-
         points_local = transform_scan_to_relative_frame(msg, relative_pose)
 
         if len(points_local) == 0:
             return
 
+        # Scan-to-submap ICP for pose correction
         if len(self.current_submap_points) >= 5:
             with self.data_lock:
-                
                 accumulated_local = np.vstack(self.current_submap_points)
 
                 points_local_corrected, pose_correction = scan_to_map_icp(
-                    points_local,           
-                    accumulated_local,      
+                    points_local,
+                    accumulated_local,
                     self.device,
                     self.voxel_size,
                     self.get_logger()
                 )
 
                 if pose_correction is not None:
-                   
                     R_local_to_world = quaternion_to_rotation_matrix(
                         self.submap_start_pose['qx'], self.submap_start_pose['qy'],
                         self.submap_start_pose['qz'], self.submap_start_pose['qw']
@@ -572,7 +493,6 @@ class LocalSubmapGenerator(Node):
                     correction_angle = np.abs(pose_correction['dtheta'])
 
                     if correction_distance < 0.5 and correction_angle < np.radians(45):
-
                         self._apply_pose_correction(
                             dx=correction_world[0],
                             dy=correction_world[1],
@@ -583,7 +503,6 @@ class LocalSubmapGenerator(Node):
                         )
 
                         self._publish_ekf_pose()
-
                         points_local = points_local_corrected
                     else:
                         self.get_logger().warn(
@@ -592,12 +511,182 @@ class LocalSubmapGenerator(Node):
                             throttle_duration_sec=5.0
                         )
 
+        # Accumulate raw points
         with self.data_lock:
             self.current_submap_points.append(points_local)
             self.scans_in_current_submap += 1
 
         if self.should_create_submap():
             self.create_submap()
+
+    def _process_scan_feature_mode(self, msg):
+        """Process scan in Feature mode: extract features, EKF update, extend walls."""
+
+        if not self.ekf_initialized:
+            return
+
+        # Extract features from scan (in robot frame)
+        observed_features = self.feature_extractor.extract_features(msg)
+
+        if len(observed_features) == 0:
+            return
+
+        # Data association with wall extension info
+        matched, unmatched, extension_info = associate_landmarks(
+            observed_features,
+            self.ekf,
+            max_mahalanobis_dist=5.99,
+            max_euclidean_dist=5.0,
+            return_extension_info=True
+        )
+
+        # Process matched features: EKF update + wall extension
+        for feat_idx, landmark_id in matched:
+            feature = observed_features[feat_idx]
+
+            # EKF update
+            if feature['type'] == 'wall':
+                z_rho = feature['rho']
+                z_alpha = feature['alpha']
+
+                self.ekf.update_landmark_observation(
+                    landmark_id=landmark_id,
+                    z_x=z_rho,
+                    z_y=z_alpha,
+                    scan_number=self.ekf.current_scan_number,
+                    measurement_covariance=feature['covariance']
+                )
+
+            elif feature['type'] == 'corner':
+                z_x, z_y = feature['position']
+
+                self.ekf.update_landmark_observation(
+                    landmark_id=landmark_id,
+                    z_x=z_x,
+                    z_y=z_y,
+                    scan_number=self.ekf.current_scan_number,
+                    measurement_covariance=feature['covariance']
+                )
+
+            # Wall extension: update FeatureMap endpoints if wall matched
+            if feat_idx in extension_info:
+                ext = extension_info[feat_idx]
+                self.feature_map.update_wall_endpoints(
+                    landmark_id=ext['landmark_id'],
+                    new_start=ext['new_start'],
+                    new_end=ext['new_end'],
+                    new_points=ext['new_points']
+                )
+
+        # Add new landmarks for unmatched features
+        for feat_idx in unmatched:
+            feature = observed_features[feat_idx]
+
+            if feature['type'] == 'wall':
+                # Add to EKF
+                z_rho = feature['rho']
+                z_alpha = feature['alpha']
+
+                landmark_id = self.ekf.add_landmark(
+                    z_x=z_rho,
+                    z_y=z_alpha,
+                    feature=feature,
+                    scan_number=self.ekf.current_scan_number
+                )
+
+                # Transform wall parameters from robot frame to map frame
+                x_r, y_r, theta_r = self.ekf.state[0:3]
+
+                # Robot-frame Hessian to map-frame Hessian
+                rho_map = z_rho + (x_r * np.cos(z_alpha) + y_r * np.sin(z_alpha))
+                alpha_map = z_alpha + theta_r
+                alpha_map = np.arctan2(np.sin(alpha_map), np.cos(alpha_map))
+
+                # Ensure rho is positive
+                if rho_map < 0:
+                    rho_map = -rho_map
+                    alpha_map = alpha_map + np.pi
+                    alpha_map = np.arctan2(np.sin(alpha_map), np.cos(alpha_map))
+
+                # Transform endpoints from robot frame to map frame
+                c = np.cos(theta_r)
+                s = np.sin(theta_r)
+                R = np.array([[c, -s], [s, c]])
+
+                start_map = R @ feature['start_point'] + np.array([x_r, y_r])
+                end_map = R @ feature['end_point'] + np.array([x_r, y_r])
+
+                # Transform points from robot frame to map frame
+                points_map = (R @ feature['points'].T).T + np.array([x_r, y_r])
+
+                # Add to FeatureMap
+                self.feature_map.add_wall(
+                    rho=rho_map,
+                    alpha=alpha_map,
+                    start_point=start_map,
+                    end_point=end_map,
+                    points=points_map
+                )
+
+            elif feature['type'] == 'corner':
+                # Add to EKF
+                z_x, z_y = feature['position']
+
+                landmark_id = self.ekf.add_landmark(
+                    z_x=z_x,
+                    z_y=z_y,
+                    feature=feature,
+                    scan_number=self.ekf.current_scan_number
+                )
+
+                # Transform corner from robot frame to map frame
+                x_r, y_r, theta_r = self.ekf.state[0:3]
+                c = np.cos(theta_r)
+                s = np.sin(theta_r)
+                R = np.array([[c, -s], [s, c]])
+
+                corner_map = R @ np.array([z_x, z_y]) + np.array([x_r, y_r])
+
+                # Add to FeatureMap
+                self.feature_map.add_corner(position=corner_map)
+
+        # Prune landmarks that haven't been seen recently
+        self.ekf.prune_landmarks(self.ekf.current_scan_number)
+
+        self._sync_pose_from_ekf()
+
+        # Publish feature markers for visualization
+        publish_feature_markers(
+            observed_features,
+            msg.header.stamp,
+            self.feature_markers_pub,
+            self.robot_name
+        )
+
+        num_landmarks = len(self.ekf.landmarks)
+        num_corners = sum(1 for f in observed_features if f['type'] == 'corner')
+        num_walls = sum(1 for f in observed_features if f['type'] == 'wall')
+        num_walls_stored, num_corners_stored = self.feature_map.get_feature_count()
+
+        self.get_logger().info(
+            f"Feature SLAM: {len(observed_features)} features "
+            f"({num_corners} corners, {num_walls} walls), "
+            f"{len(matched)} matched, {len(unmatched)} unmatched, "
+            f"{num_landmarks} EKF landmarks, "
+            f"FeatureMap: {num_walls_stored} walls, {num_corners_stored} corners",
+            throttle_duration_sec=1.0
+        )
+
+        # Initialize submap tracking
+        if self.submap_start_pose is None:
+            self.submap_start_pose = self.current_pose.copy()
+
+        # Increment scan counter
+        with self.data_lock:
+            self.scans_in_current_submap += 1
+
+        if self.should_create_submap():
+            self.create_submap_from_features()
 
     def should_create_submap(self):
         
@@ -712,6 +801,126 @@ class LocalSubmapGenerator(Node):
                 )
 
             self.current_submap_points = []
+            self.scans_in_current_submap = 0
+            self.submap_start_pose = end_pose
+
+    def create_submap_from_features(self):
+        """Create submap from FeatureMap by interpolating points along features."""
+
+        # Generate point cloud from features (5cm spacing)
+        points_map_frame = self.feature_map.generate_point_cloud(spacing=0.05)
+
+        if len(points_map_frame) == 0:
+            self.get_logger().warn('Cannot create submap: no features stored in FeatureMap')
+            with self.data_lock:
+                self.scans_in_current_submap = 0
+            self.submap_start_pose = self.current_pose.copy()
+            return
+
+        if len(points_map_frame) < 50:
+            self.get_logger().warn(
+                f'FeatureMap has too few points ({len(points_map_frame)}), skipping submap creation'
+            )
+            with self.data_lock:
+                self.scans_in_current_submap = 0
+            self.submap_start_pose = self.current_pose.copy()
+            return
+
+        with self.data_lock:
+            scan_count = self.scans_in_current_submap
+            end_pose = self.current_pose.copy()
+
+            # Compute submap confidence from current EKF state
+            confidence_metrics = compute_ekf_confidence(
+                self.ekf,
+                self.ekf_initialized,
+                self.get_clock().now().nanoseconds
+            )
+
+            # Log confidence metrics for thesis analysis
+            self.confidence_tracker.log_confidence(self.submap_id, confidence_metrics)
+
+            # Transform points from map frame to submap local frame
+            # Submap local frame is defined by submap_start_pose
+            R_world_to_local = quaternion_to_rotation_matrix(
+                self.submap_start_pose['qx'], self.submap_start_pose['qy'],
+                self.submap_start_pose['qz'], self.submap_start_pose['qw']
+            ).T  # Transpose for inverse rotation
+
+            t_world = np.array([
+                self.submap_start_pose['x'],
+                self.submap_start_pose['y'],
+                self.submap_start_pose.get('z', 0.0)
+            ])
+
+            # Transform: p_local = R_world_to_local @ (p_map - t_world)
+            points_local = (R_world_to_local @ (points_map_frame - t_world).T).T
+
+            # Publish current submap for visualization (in map frame)
+            submap_msg = numpy_to_pointcloud2(
+                points_map_frame,
+                'map',
+                self.get_clock().now().to_msg()
+            )
+            self.current_submap_pub.publish(submap_msg)
+
+            # Create transformation matrix for stitcher (local to world)
+            R_local_to_world = R_world_to_local.T
+            T_local_to_world = np.eye(4)
+            T_local_to_world[0:3, 0:3] = R_local_to_world
+            T_local_to_world[0:3, 3] = t_world
+
+            # Integrate into global map
+            success, pose_correction = self.stitcher.integrate_submap_to_global_map(
+                points=points_local,
+                submap_id=self.submap_id,
+                start_pose=self.submap_start_pose,
+                end_pose=end_pose,
+                scan_count=scan_count,
+                transformation_matrix=T_local_to_world
+            )
+
+            if success:
+                # Apply pose correction if provided
+                if pose_correction is not None:
+                    if pose_correction.get('type') == 'submap_icp':
+                        self._apply_pose_correction(
+                            dx=pose_correction['dx'],
+                            dy=pose_correction['dy'],
+                            dtheta=pose_correction['dtheta'],
+                            measurement_type='icp',
+                            measurement_covariance=pose_correction.get('covariance')
+                        )
+
+                    self._publish_ekf_pose()
+
+                global_points = self.stitcher.get_global_map_points()
+                global_size = len(global_points) if global_points is not None else 0
+
+                num_walls, num_corners = self.feature_map.get_feature_count()
+                self.get_logger().info(
+                    f'Submap {self.submap_id} created from FeatureMap: '
+                    f'{num_walls} walls, {num_corners} corners → '
+                    f'{len(points_map_frame)} interpolated points → '
+                    f'Global map: {global_size} points'
+                )
+
+                self.submap_id += 1
+
+                # Save global map periodically
+                if self.submap_id % 5 == 0:
+                    map_file = os.path.join(self.save_dir, 'global_map.pcd')
+                    self.stitcher.save_global_map(map_file)
+
+                # Publish updated global map
+                publish_global_map(
+                    global_points,
+                    self.global_map_pub,
+                    self.get_clock(),
+                    frame_id='map'
+                )
+
+            # Reset scan counter but KEEP features (they persist across submaps)
             self.scans_in_current_submap = 0
             self.submap_start_pose = end_pose
 
