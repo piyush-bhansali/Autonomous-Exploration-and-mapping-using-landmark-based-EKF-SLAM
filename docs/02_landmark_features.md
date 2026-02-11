@@ -1,5 +1,7 @@
 # Landmark Feature Extraction: Theory and Implementation
 
+> **Note:** This document provides detailed mathematical derivations for feature extraction used in **Feature-based SLAM mode**. For complete system context, see `methodology_feature_mapping.md`.
+
 ## Table of Contents
 1. [Introduction](#1-introduction)
 2. [LiDAR Scan Processing](#2-lidar-scan-processing)

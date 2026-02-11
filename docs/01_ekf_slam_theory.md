@@ -1,5 +1,23 @@
 # Extended Kalman Filter SLAM: Mathematical Theory
 
+> **⚠️ LEGACY DOCUMENTATION NOTICE**
+> This document contains detailed mathematical derivations for EKF-SLAM components. It was originally written for a hybrid ICP-landmark SLAM system. The thesis has since been refocused as a **comparative study between ICP-based and Feature-based SLAM** (see updated documentation).
+>
+> **Primary Documentation (Updated for Comparative Study):**
+> - `methodology_icp_mapping.md` — Complete ICP-based SLAM methodology
+> - `methodology_feature_mapping.md` — Complete feature-based SLAM methodology
+> - `literature_review.md` — Academic background for comparative study
+> - `00_system_overview.md` — System architecture overview
+>
+> **Status of this document:**
+> - Sections 1-4.8: EKF-SLAM theory (applies to **Feature mode**)
+> - Sections 4.9-4.13: Hybrid ICP+landmark updates (**not used in current comparative study**)
+> - Sections 5-10: General EKF theory (supplementary reference)
+>
+> For the current system architecture, refer to the primary documentation listed above.
+
+---
+
 ## Table of Contents
 1. [Introduction](#1-introduction)
 2. [Problem Formulation](#2-problem-formulation)

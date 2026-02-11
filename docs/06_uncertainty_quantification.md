@@ -1,5 +1,7 @@
 # Uncertainty Quantification and Map Confidence
 
+> **Note:** This document describes uncertainty quantification theory applicable to **both ICP-based and Feature-based mapping modes**. For complete system context, see `methodology_icp_mapping.md` and `methodology_feature_mapping.md`.
+
 ## Table of Contents
 1. [Introduction](#1-introduction)
 2. [Information Theory Foundations](#2-information-theory-foundations)

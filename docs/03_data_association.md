@@ -1,5 +1,7 @@
 # Data Association: Theory and Statistical Gating
 
+> **Note:** This document provides detailed mathematical derivations for data association used in **Feature-based SLAM mode**. For complete system context, see `methodology_feature_mapping.md`.
+
 ## Table of Contents
 1. [Introduction](#1-introduction)
 2. [The Association Problem](#2-the-association-problem)

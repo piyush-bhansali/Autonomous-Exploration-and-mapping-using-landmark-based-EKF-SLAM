@@ -356,28 +356,3 @@ class FeatureSLAMManager:
     def is_initialized(self) -> bool:
         """Check if EKF is initialized."""
         return self.ekf_initialized
-
-    def get_covariance(self) -> np.ndarray:
-        """Get robot pose covariance from EKF."""
-        if not self.ekf_initialized:
-            return np.eye(3) * 1e6
-
-        return self.ekf.P[0:3, 0:3]
-
-    def get_statistics(self) -> Dict:
-        """
-        Get SLAM statistics.
-
-        Returns:
-            Dictionary with current state information
-        """
-        num_walls, num_corners = self.feature_map.get_feature_count()
-
-        return {
-            'initialized': self.ekf_initialized,
-            'total_scans_processed': self.total_scans_processed,
-            'num_landmarks': len(self.ekf.landmarks),
-            'num_walls': num_walls,
-            'num_corners': num_corners,
-            'ekf_state_size': len(self.ekf.state)
-        }

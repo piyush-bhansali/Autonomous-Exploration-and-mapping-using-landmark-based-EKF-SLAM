@@ -19,8 +19,7 @@ from map_generation.mapping_utils import (
     compute_relative_pose,
     transform_scan_to_relative_frame,
     publish_global_map,
-    publish_feature_markers,
-    quaternion_to_rotation_matrix
+    publish_feature_markers
 )
 from map_generation.transform_utils import (
     compute_map_to_odom_transform,
@@ -28,7 +27,8 @@ from map_generation.transform_utils import (
     normalize_angle,
     quaternion_to_yaw,
     yaw_to_quaternion,
-    numpy_to_pointcloud2
+    numpy_to_pointcloud2,
+    quaternion_to_rotation_matrix
 )
 from map_generation.evaluation_utils import (
     ConfidenceTracker,

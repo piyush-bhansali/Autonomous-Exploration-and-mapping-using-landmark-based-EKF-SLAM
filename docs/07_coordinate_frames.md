@@ -1,5 +1,7 @@
 # Coordinate Frames and Transform Management
 
+> **Note:** This document describes coordinate frame conventions applicable to **both ICP-based and Feature-based mapping modes**. For complete system context, see `methodology_icp_mapping.md` and `methodology_feature_mapping.md`.
+
 ## Table of Contents
 1. [Introduction](#1-introduction)
 2. [ROS REP-105 Standard](#2-ros-rep-105-standard)
@@ -427,12 +429,18 @@ Follow the right-hand coordinate system:
 All seven documentation files have been created:
 
 1. **`00_system_overview.md`** — System architecture and design rationale
-2. **`01_ekf_slam_theory.md`** — Complete EKF-SLAM mathematical derivation
-3. **`02_landmark_features.md`** — Feature extraction and Hessian normal form
-4. **`03_data_association.md`** — Mahalanobis distance and statistical gating
-5. **`04_icp_alignment.md`** — ICP algorithm and covariance estimation
-6. **`05_submap_management.md`** — Submap creation and global map stitching
-7. **`06_uncertainty_quantification.md`** — Information theory and confidence metrics
-8. **`07_coordinate_frames.md`** — TF management and frame conventions
+2. **`01_ekf_slam_theory.md`** — Complete EKF-SLAM mathematical derivation (legacy reference)
+3. **`02_landmark_features.md`** — Feature extraction and Hessian normal form (Feature mode)
+4. **`03_data_association.md`** — Mahalanobis distance and statistical gating (Feature mode)
+5. **`04_icp_alignment.md`** — ICP algorithm and covariance estimation (ICP mode)
+6. **`05_submap_management.md`** — Submap creation and global map stitching (both modes)
+7. **`06_uncertainty_quantification.md`** — Information theory and confidence metrics (both modes)
+8. **`07_coordinate_frames.md`** — TF management and frame conventions (both modes)
 
-These documents provide comprehensive mathematical and theoretical foundations for your thesis, covering every major component of the hybrid SLAM system.
+**Primary Documentation (Updated for Comparative Study):**
+- `methodology_icp_mapping.md` — Complete ICP-based SLAM methodology
+- `methodology_feature_mapping.md` — Complete feature-based SLAM methodology
+- `literature_review.md` — Academic background for comparative study
+- `00_system_overview.md` — System architecture overview
+
+These detailed technical documents provide supplementary mathematical and theoretical foundations for the thesis comparative study between ICP-based and feature-based SLAM approaches.

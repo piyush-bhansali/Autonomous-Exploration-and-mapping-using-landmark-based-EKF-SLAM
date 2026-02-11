@@ -1,208 +1,104 @@
-# Hybrid ICP-Landmark SLAM System: Overview
+# Comparative Study: ICP-Based vs Feature-Based SLAM
 
 ## Abstract
 
-This document provides a comprehensive overview of the hybrid SLAM (Simultaneous Localization and Mapping) system implemented for autonomous mobile robots. The system combines **landmark-based EKF-SLAM** with **ICP (Iterative Closest Point)** scan matching to achieve robust localization and uncertainty-aware mapping. This hybrid approach leverages the complementary strengths of both paradigms: sparse, feature-based representation for long-term consistency and dense point cloud matching for short-term accuracy.
+This document provides a comprehensive overview of a **comparative study** between two SLAM (Simultaneous Localization and Mapping) approaches for autonomous mobile robots: **ICP-based mapping** and **Feature-based EKF-SLAM**. Both systems are evaluated under identical frontier-based autonomous exploration conditions to provide a rigorous, controlled comparison of their performance, accuracy, and uncertainty characteristics.
 
-## 1. System Architecture
+The study aims to quantify the trade-offs between dense scan-matching methods (ICP) and sparse landmark-based methods (EKF-SLAM with geometric features) in structured indoor environments.
 
-### 1.1 High-Level Design
+## 1. Thesis Objective
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Local Submap Generator                       │
-│                                                                   │
-│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐  │
-│  │   LiDAR      │────>│   Feature     │────>│     Data      │  │
-│  │   Scans      │      │  Extraction   │      │ Association   │  │
-│  └──────────────┘      └──────────────┘      └──────────────┘  │
-│         │                                              │          │
-│         │                                              ↓          │
-│         │                                   ┌──────────────────┐ │
-│         │                                   │   EKF-SLAM       │ │
-│         │                                   │   State Update   │ │
-│         │                                   └──────────────────┘ │
-│         ↓                                              │          │
-│  ┌──────────────┐                                     │          │
-│  │     ICP      │                                     │          │
-│  │  Scan-to-Map │                                     │          │
-│  │   Matching   │                                     │          │
-│  └──────────────┘                                     │          │
-│         │                                              │          │
-│         └──────────────────┬───────────────────────────┘          │
-│                            ↓                                       │
-│                  ┌──────────────────┐                            │
-│                  │  Robot Pose      │                            │
-│                  │  Estimation      │                            │
-│                  └──────────────────┘                            │
-│                            │                                       │
-│                            ↓                                       │
-│                  ┌──────────────────┐                            │
-│                  │  Submap          │                            │
-│                  │  Creation        │                            │
-│                  └──────────────────┘                            │
-│                            │                                       │
-│                            ↓                                       │
-│                  ┌──────────────────┐                            │
-│                  │  Submap          │────> Global Map            │
-│                  │  Stitching       │                            │
-│                  └──────────────────┘                            │
-└─────────────────────────────────────────────────────────────────┘
-```
+### 1.1 Research Question
 
-### 1.2 Core Components
+**How do ICP-based and feature-based SLAM approaches compare in terms of:**
+- Localization accuracy
+- Map quality and completeness
+- Computational efficiency
+- Uncertainty quantification
+- Robustness to different environment structures
 
-| Component | Purpose | Implementation File |
-|-----------|---------|-------------------|
-| **EKF-SLAM** | Probabilistic state estimation with landmarks | `ekf_slam.py` |
-| **Feature Extraction** | Extract walls and corners from LiDAR scans | `landmark_features.py` |
-| **Data Association** | Match observations to existing landmarks | `data_association.py` |
-| **ICP Matching** | Dense point cloud alignment | `mapping_utils.py` |
-| **Submap Stitching** | Global map construction | `submap_stitcher.py` |
-| **Uncertainty Tracking** | Confidence quantification | `evaluation_utils.py` |
+### 1.2 Methodology
 
-## 2. Mathematical Framework
+Both approaches are implemented within the same ROS 2 framework and evaluated using:
+- **Identical exploration strategy**: Frontier-based autonomous navigation
+- **Same sensor configuration**: 2D LiDAR (360-degree laser scanner)
+- **Same test environments**: Structured indoor spaces (simulated and real-world)
+- **Consistent evaluation metrics**: Pose error, map accuracy, computation time, uncertainty metrics
 
-### 2.1 State Representation
+## 2. System Modes
 
-The system maintains a joint state vector containing the robot pose and all landmark positions:
+The implemented system supports two distinct operational modes:
 
-$$
-\mathbf{x} = \begin{bmatrix}
-\mathbf{x}_r \\
-\mathbf{x}_{l_1} \\
-\mathbf{x}_{l_2} \\
-\vdots \\
-\mathbf{x}_{l_N}
-\end{bmatrix}
-$$
+### 2.1 Mode 1: ICP-Based Mapping
 
-Where:
-- $\mathbf{x}_r = [x, y, \theta]^T$ is the robot pose (position and orientation)
-- $\mathbf{x}_{l_i}$ is the $i$-th landmark representation
-  - For walls: $\mathbf{x}_{l_i} = [\rho_i, \alpha_i]^T$ (Hessian normal form)
-  - For corners: $\mathbf{x}_{l_i} = [x_i, y_i]^T$ (Cartesian coordinates)
+**Approach:** Dense scan matching with odometry-based prediction
 
-### 2.2 Covariance Matrix
+**Core Components:**
+- Odometry-based motion prediction with EKF (pose-only, no landmarks)
+- Scan-to-submap ICP alignment
+- Hessian-based uncertainty quantification (Censi 2007)
+- Submap accumulation and global map stitching
+- Point cloud representation
 
-The system maintains a full covariance matrix $\mathbf{P}$ that captures both:
-1. **Uncertainty** in robot pose and landmark positions (diagonal blocks)
-2. **Correlation** between robot and landmarks (off-diagonal blocks)
+**See:** `docs/methodology_icp_mapping.md` for complete details
 
-$$
-\mathbf{P} = \begin{bmatrix}
-\mathbf{P}_{rr} & \mathbf{P}_{rl_1} & \mathbf{P}_{rl_2} & \cdots \\
-\mathbf{P}_{l_1r} & \mathbf{P}_{l_1l_1} & \mathbf{P}_{l_1l_2} & \cdots \\
-\mathbf{P}_{l_2r} & \mathbf{P}_{l_2l_1} & \mathbf{P}_{l_2l_2} & \cdots \\
-\vdots & \vdots & \vdots & \ddots
-\end{bmatrix}
-$$
+### 2.2 Mode 2: Feature-Based Mapping
 
-This full covariance tracking is what enables **uncertainty-aware mapping** — we can query the confidence of any part of the map at any time.
+**Approach:** Sparse landmark tracking with EKF-SLAM
 
-## 3. Dual Correction Strategy
+**Core Components:**
+- Feature extraction (walls and corners)
+- Data association with Mahalanobis distance gating
+- Full EKF-SLAM (joint robot-landmark state)
+- Fisher Information Matrix uncertainty quantification
+- Feature map representation with geometric primitives
 
-### 3.1 Landmark-Based Correction
+**See:** `docs/methodology_feature_mapping.md` for complete details
 
-**Frequency:** Every scan (10 Hz)
-**Purpose:** Long-term consistency, loop closure
-**Method:** EKF update with landmark observations
+## 3. Common Framework
 
-When landmarks are re-observed:
-1. Predict observation from current state
-2. Compute innovation (measurement - prediction)
-3. Update state and covariance using Kalman gain
+### 3.1 Shared Components
 
-### 3.2 ICP-Based Correction
+Both approaches share:
 
-**Frequency:** Every scan (when sufficient points accumulated)
-**Purpose:** Short-term accuracy, drift correction
-**Method:** Point cloud registration
+| Component | Purpose | Implementation |
+|-----------|---------|----------------|
+| **Frontier Explorer** | Autonomous navigation | `autonomous_exploration` package |
+| **Transform Management** | Coordinate frame handling | `transform_utils.py` |
+| **Point Cloud Processing** | Scan conversion and filtering | `mapping_utils.py` |
+| **Data Logging** | CSV output for evaluation | `evaluation_utils.py` |
+| **Ground Truth Interface** | Simulation pose subscription | `local_submap_generator.py` |
 
-When scan-to-map ICP succeeds:
-1. Align current scan to accumulated submap
-2. Compute pose correction
-3. Apply as measurement to EKF
+### 3.2 ROS 2 Integration
 
-### 3.3 Complementary Benefits
+**Main Node:** `LocalSubmapGenerator`
 
-| Aspect | Landmark-Based | ICP-Based |
-|--------|---------------|-----------|
-| **Representation** | Sparse (efficient) | Dense (complete) |
-| **Robustness** | Feature-dependent | Works in all environments |
-| **Long-term** | Excellent (explicit correspondences) | Drift accumulation |
-| **Short-term** | Noisy (discrete observations) | High accuracy |
-| **Uncertainty** | Explicit covariance | Estimated from residuals |
-
-## 4. Information Flow
-
-### 4.1 Per-Scan Processing
-
-```
-1. Odometry Update (PREDICT)
-   ├─> Update robot pose estimate
-   ├─> Propagate covariance
-   └─> Process noise injection
-
-2. Feature Extraction
-   ├─> Convert LiDAR scan to Cartesian points
-   ├─> Split-and-merge line segmentation
-   ├─> Corner detection from line intersections
-   └─> Compute feature covariances
-
-3. Data Association
-   ├─> Spatial gating (distance threshold)
-   ├─> Mahalanobis distance gating (statistical)
-   ├─> Nearest neighbor assignment
-   └─> Separate matched/unmatched features
-
-4. EKF Update (CORRECT)
-   ├─> For matched landmarks:
-   │   ├─> Compute observation Jacobian
-   │   ├─> Calculate Kalman gain
-   │   └─> Update state and covariance
-   └─> For unmatched landmarks:
-       ├─> Initialize new landmark
-       └─> Augment state and covariance
-
-5. ICP Alignment (OPTIONAL)
-   ├─> Accumulate scan points in local frame
-   ├─> Align to submap using ICP
-   ├─> Compute pose correction
-   └─> Apply as EKF measurement
-
-6. Landmark Pruning
-   └─> Remove landmarks not seen for N scans
+**Operating Mode Selection:**
+```python
+# Set in launch file or via parameter
+self.declare_parameter('mode', 'feature')  # or 'icp'
 ```
 
-### 4.2 Per-Submap Processing
+**Common Subscriptions:**
+- `/tb3_1/scan` (LaserScan) — LiDAR measurements
+- `/tb3_1/odom` (Odometry) — Wheel encoder estimates
+- `/tb3_1/ground_truth_pose` (PoseStamped) — Simulation ground truth
 
-After collecting 50 scans:
+**Common Publications:**
+- `/tb3_1/ekf_pose` (PoseStamped) — Corrected robot pose
+- `/tb3_1/ekf_path` (Path) — Trajectory history
+- `/tb3_1/global_map` (PointCloud2) — Global map
 
-```
-1. Compute Submap Confidence
-   ├─> Extract robot pose covariance
-   ├─> Compute information matrix
-   ├─> Calculate confidence score
-   └─> Log to CSV for analysis
+**Mode-Specific Publications:**
+- **Feature mode:** `/tb3_1/scan_features` (MarkerArray) — Detected landmarks
+- **ICP mode:** `/tb3_1/local_submap` (PointCloud2) — Current submap
 
-2. Transform to Global Frame
-   ├─> Use submap start pose
-   └─> Transform all points to map frame
+**TF Broadcast:**
+- `map → tb3_1/odom` — Corrected transform (both modes)
 
-3. Submap Stitching
-   ├─> Align to global map (ICP)
-   ├─> Apply pose correction (if needed)
-   └─> Integrate points into global map
+## 4. Coordinate Frames
 
-4. Reset for Next Submap
-   ├─> Clear local point buffer
-   └─> Set new submap start pose
-```
-
-## 5. Coordinate Frames
-
-The system maintains three coordinate frames following ROS REP-105 standard:
+Both systems use the standard ROS REP-105 coordinate frame convention:
 
 ```
 map (Fixed World Frame)
@@ -212,204 +108,383 @@ map (Fixed World Frame)
       └─> base_footprint (Robot Frame)
 ```
 
-### 5.1 Frame Definitions
+### 4.1 Frame Definitions
 
 **`map` Frame:**
-- Origin: Fixed, defined at system initialization
-- Purpose: Global, consistent reference frame
-- Updated by: EKF-SLAM (corrects drift)
+- Fixed global reference frame
+- Origin defined at system initialization
+- Corrected by SLAM (EKF state estimate)
 
 **`odom` Frame:**
-- Origin: Matches `map` at initialization
-- Purpose: Locally consistent, smooth odometry
-- Updated by: Wheel encoders / visual odometry (drifts over time)
+- Locally consistent odometry frame
+- Drifts over time due to wheel slip
+- Updated by Gazebo odometry
 
 **`base_footprint` Frame:**
-- Origin: Robot center
-- Purpose: Sensor measurements reference
-- Updated by: Gazebo simulation (ground truth) or real robot
+- Robot-centered frame
+- LiDAR measurements expressed here initially
 
-### 5.2 Transform Chain
+### 4.2 Transform Chain
 
-The EKF publishes the `map → odom` transform to correct accumulated odometry drift:
+The EKF publishes `map → odom` transform:
 
 $$
 ^{map}\mathbf{T}_{base} = \, ^{map}\mathbf{T}_{odom} \times \, ^{odom}\mathbf{T}_{base}
 $$
 
-Where:
-- $^{map}\mathbf{T}_{base}$ is the corrected robot pose (from EKF)
-- $^{odom}\mathbf{T}_{base}$ is the odometry estimate (from encoders)
-- $^{map}\mathbf{T}_{odom}$ is the correction transform (computed and published)
+## 5. Comparative Analysis Framework
 
-## 6. Uncertainty Quantification
+### 5.1 Evaluation Metrics
 
-### 6.1 Information-Theoretic Confidence
+| Metric | Description | Computation |
+|--------|-------------|-------------|
+| **Absolute Trajectory Error (ATE)** | Pose error vs ground truth | RMSE of position and orientation |
+| **Map Accuracy** | Point cloud alignment error | Cloud-to-cloud distance |
+| **Computation Time** | Processing latency per scan | Wall-clock timing |
+| **Uncertainty Calibration** | Predicted vs actual error | Chi-squared test, NEES |
+| **Landmark Count** | Map sparsity (feature mode) | Number of landmarks in state |
+| **Memory Usage** | State vector size | Bytes allocated |
 
-For each submap, we compute a confidence score based on the **information matrix**:
+### 5.2 Data Collection
 
-$$
-\mathbf{I} = \mathbf{P}^{-1}
-$$
-
-Where $\mathbf{P}$ is the robot pose covariance. The information matrix represents how much information the system has about its state:
-- High information → low uncertainty → high confidence
-- Low information → high uncertainty → low confidence
-
-### 6.2 Confidence Metric
-
-The normalized confidence score is:
-
-$$
-\text{confidence} = 1 - \exp\left(-\frac{\text{tr}(\mathbf{I})}{10}\right)
-$$
-
-This metric is logged for every submap, providing:
-- Temporal analysis: How confidence evolves
-- Spatial analysis: Which map regions are reliable
-- System validation: Quantitative quality measure
-
-## 7. Key Design Decisions
-
-### 7.1 Landmark Representation
-
-**Walls: Hessian Normal Form**
-- Parameters: $(\rho, \alpha)$ where $\rho$ is distance from origin, $\alpha$ is normal angle
-- Advantages: Orientation-normalized, 2D state per wall
-- Limitation: Treats walls as infinite lines (requires spatial gating)
-
-**Corners: Cartesian Coordinates**
-- Parameters: $(x, y)$ in map frame
-- Advantages: Intuitive, direct position representation
-- Natural for point features
-
-### 7.2 Hybrid Architecture Rationale
-
-**Why not pure ICP?**
-- No explicit landmark tracking → no loop closure
-- No uncertainty correlation between robot and map
-- Memory intensive for large environments
-
-**Why not pure landmark SLAM?**
-- Feature-poor environments problematic
-- Discrete observations → noisy between detections
-- Requires good feature extraction
-
-**Why hybrid?**
-- ICP provides dense, accurate short-term corrections
-- Landmarks provide sparse, consistent long-term structure
-- Full covariance enables uncertainty-aware decisions
-
-### 7.3 Submap Strategy
-
-**Why submaps?**
-- Bounded computational cost per ICP iteration
-- Natural checkpointing for confidence evaluation
-- Enables hierarchical mapping
-
-**Submap size: 50 scans**
-- Trade-off between locality and coverage
-- Sufficient for ICP convergence
-- Manageable memory footprint
-
-## 8. Implementation Details
-
-### 8.1 ROS 2 Integration
-
-**Node:** `LocalSubmapGenerator`
-**Key Subscriptions:**
-- `/tb3_1/scan` (LaserScan) — LiDAR measurements
-- `/tb3_1/odom` (Odometry) — Wheel encoder estimates
-- `/tb3_1/ground_truth_pose` (PoseStamped) — Simulation ground truth
-
-**Key Publications:**
-- `/tb3_1/ekf_pose` (PoseStamped) — Corrected robot pose
-- `/tb3_1/ekf_path` (Path) — Trajectory history
-- `/tb3_1/global_map` (PointCloud2) — Stitched global map
-- `/tb3_1/scan_features` (MarkerArray) — Detected landmarks
-
-**TF Broadcast:**
-- `map → tb3_1/odom` — EKF correction transform
-
-### 8.2 Data Logging
-
-For thesis analysis, the system logs:
+**Logged Data (Both Modes):**
 
 | File | Content | Purpose |
 |------|---------|---------|
 | `ekf_vs_groundtruth.csv` | Pose errors over time | Accuracy evaluation |
-| `submap_confidence.csv` | Confidence metrics per submap | Uncertainty analysis |
-| `global_map.pcd` | Final point cloud map | Visualization |
+| `submap_confidence.csv` | Uncertainty metrics per submap | Uncertainty analysis |
+| `global_map.pcd` | Final point cloud map | Visual comparison |
+| `computation_time.csv` | Per-scan processing time | Efficiency evaluation |
 
-## 9. Performance Characteristics
+**Feature Mode Additional Data:**
+- `landmark_count.csv` — Number of landmarks over time
+- `feature_matches.csv` — Data association statistics
 
-### 9.1 Computational Complexity
+## 6. Architecture Comparison
 
-**Per Scan:**
-- Feature extraction: $O(n)$ where $n$ = number of scan points
-- Data association: $O(m \cdot k)$ where $m$ = features, $k$ = landmarks
-- EKF update: $O(d^3)$ where $d$ = state dimension
-- ICP (when triggered): $O(n \cdot \log n)$
+### 6.1 ICP-Based Architecture
 
-**Per Submap:**
-- Submap ICP: $O(N \cdot \log M)$ where $N$ = submap points, $M$ = global map points
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  ICP-Based SLAM Pipeline                     │
+│                                                               │
+│  ┌──────────────┐      ┌──────────────┐                     │
+│  │   LiDAR      │────>│  Scan-to-Map  │                     │
+│  │   Scans      │      │     ICP       │                     │
+│  └──────────────┘      └──────────────┘                     │
+│         │                      │                              │
+│         │                      ↓                              │
+│         │           ┌──────────────────┐                     │
+│         │           │  Pose-Only EKF   │                     │
+│         │           │  (No Landmarks)  │                     │
+│         │           └──────────────────┘                     │
+│         ↓                      │                              │
+│  ┌──────────────┐             │                              │
+│  │   Submap     │             │                              │
+│  │ Accumulation │<────────────┘                              │
+│  └──────────────┘                                            │
+│         │                                                     │
+│         ↓                                                     │
+│  ┌──────────────┐                                            │
+│  │   Global     │                                            │
+│  │   Stitching  │────> Dense Point Cloud Map                │
+│  └──────────────┘                                            │
+└─────────────────────────────────────────────────────────────┘
+```
 
-### 9.2 Memory Requirements
+**Key Classes:**
+- `LandmarkEKFSLAM` (used for pose-only estimation)
+- `scan_to_map_icp()` in `mapping_utils.py`
+- Submap stitching logic in `local_submap_generator.py`
 
-- State vector: $d \times 1$ where $d = 3 + 2k$ (robot + landmarks)
-- Covariance: $d \times d$ (grows quadratically with landmarks)
-- Submap buffer: $\sim$50 scans $\times$ 360 points $\sim$ 18k points
-- Global map: Cumulative, voxel-filtered (manageable)
+### 6.2 Feature-Based Architecture
 
-## 10. Extensions and Future Work
+```
+┌─────────────────────────────────────────────────────────────┐
+│                Feature-Based SLAM Pipeline                   │
+│                                                               │
+│  ┌──────────────┐      ┌──────────────┐                     │
+│  │   LiDAR      │────>│   Feature     │                     │
+│  │   Scans      │      │  Extraction   │                     │
+│  └──────────────┘      └──────────────┘                     │
+│                               │                               │
+│                               ↓                               │
+│                    ┌──────────────────┐                      │
+│                    │      Data        │                      │
+│                    │   Association    │                      │
+│                    └──────────────────┘                      │
+│                               │                               │
+│                               ↓                               │
+│                    ┌──────────────────┐                      │
+│                    │   Full EKF-SLAM  │                      │
+│                    │ (Robot+Landmarks)│                      │
+│                    └──────────────────┘                      │
+│                               │                               │
+│                               ↓                               │
+│                    ┌──────────────────┐                      │
+│                    │   Feature Map    │                      │
+│                    │   Management     │                      │
+│                    └──────────────────┘                      │
+│                               │                               │
+│                               ↓                               │
+│                    ┌──────────────────┐                      │
+│                    │  Point Cloud     │────> Sparse Map      │
+│                    │  Generation      │                      │
+│                    └──────────────────┘                      │
+└─────────────────────────────────────────────────────────────┘
+```
 
-### 10.1 Potential Improvements
+**Key Classes:**
+- `FeatureSLAMManager` (encapsulates all feature SLAM logic)
+- `LandmarkFeatureExtractor` in `landmark_features.py`
+- `associate_landmarks()` in `data_association.py`
+- `FeatureMap` in `feature_map.py`
 
-1. **Loop Closure Detection**
-   - Currently relies on continuous landmark tracking
-   - Could add place recognition for large-scale loops
+## 7. Performance Characteristics
 
-2. **Endpoint Representation for Walls**
-   - Replace Hessian form with $[x_1, y_1, x_2, y_2]$
-   - Eliminates infinite line ambiguity
-   - Full endpoint uncertainty in covariance
+### 7.1 ICP-Based Approach
 
-3. **Multi-Robot Extension**
-   - Share landmark observations
-   - Distributed map merging using confidence weights
+| Aspect | Characteristic | Notes |
+|--------|---------------|-------|
+| **Representation** | Dense point cloud | Complete environment coverage |
+| **Computational Complexity** | O(N log M) per scan | N = scan points, M = map points |
+| **Memory** | Grows with map size | Mitigated by voxel filtering |
+| **Accuracy** | High in short-term | Drift accumulation without loop closure |
+| **Uncertainty** | From Hessian (Censi) | Reflects ICP alignment quality |
+| **Robustness** | Works in all environments | No feature dependency |
+| **Map Quality** | Dense, visually complete | Good for visualization |
 
-4. **Active SLAM**
-   - Use confidence metric to drive exploration
-   - Navigate toward uncertain regions
+### 7.2 Feature-Based Approach
 
-### 10.2 Thesis Contributions
+| Aspect | Characteristic | Notes |
+|--------|---------------|-------|
+| **Representation** | Sparse landmarks | Walls (ρ, α) + Corners (x, y) |
+| **Computational Complexity** | O(N + L²) per scan | N = features, L = landmarks |
+| **Memory** | Grows quadratically | O(L²) covariance matrix |
+| **Accuracy** | Consistent long-term | Explicit data association prevents drift |
+| **Uncertainty** | Full covariance | Robot-landmark correlations tracked |
+| **Robustness** | Requires features | Struggles in feature-poor environments |
+| **Map Quality** | Geometric abstraction | Compact, semantic representation |
 
-This implementation provides:
-- ✅ Full robot-map covariance tracking
-- ✅ Quantitative confidence metric per submap
-- ✅ Hybrid approach combining dense and sparse methods
-- ✅ Comprehensive evaluation data (ground truth comparison)
-- ✅ Reproducible, documented codebase
+## 8. Exploration Strategy
 
-## 11. References
+### 8.1 Frontier-Based Exploration
 
-1. Durrant-Whyte, H., & Bailey, T. (2006). "Simultaneous Localization and Mapping: Part I." *IEEE Robotics & Automation Magazine*.
+Both SLAM modes use the same frontier-based autonomous navigation:
 
+**Algorithm:**
+1. Detect frontiers (boundaries between known free space and unknown space)
+2. Rank frontiers by information gain and distance
+3. Select best frontier as navigation goal
+4. Use ROS 2 Nav2 for path planning and execution
+5. Repeat until no frontiers remain
+
+**Implementation:**
+- `autonomous_exploration` ROS 2 package
+- Occupancy grid generation from laser scans
+- Frontier detection with morphological operations
+- Nav2 integration for global/local planning
+
+### 8.2 Controlled Comparison
+
+**Why Same Exploration?**
+- Ensures both methods observe the same environment regions
+- Eliminates exploration bias from results
+- Allows fair comparison of SLAM performance independent of path choice
+
+**Logging:**
+- Exploration paths recorded with timestamps
+- Frontier selection logged for reproducibility
+- Ground truth trajectory stored for error analysis
+
+## 9. Thesis Structure
+
+### 9.1 Documentation Organization
+
+| Document | Purpose |
+|----------|---------|
+| **00_system_overview.md** (this file) | High-level comparative study overview |
+| **literature_review.md** | Academic background and related work |
+| **methodology_icp_mapping.md** | Complete ICP-based approach documentation |
+| **methodology_feature_mapping.md** | Complete feature-based approach documentation |
+| **01_ekf_slam_theory.md** | Mathematical derivations for EKF-SLAM |
+| **02_landmark_features.md** | Feature extraction algorithms |
+| **03_data_association.md** | Data association theory |
+| **04_icp_alignment.md** | ICP algorithm details |
+| **05_submap_management.md** | Submap creation and stitching |
+| **06_uncertainty_quantification.md** | Uncertainty metrics and theory |
+| **07_coordinate_frames.md** | Transform conventions |
+
+### 9.2 Experimental Workflow
+
+```
+1. Setup
+   ├─> Configure simulation environment (Gazebo)
+   ├─> Launch exploration system
+   └─> Select SLAM mode (ICP or Feature)
+
+2. Data Collection (Mode 1: ICP)
+   ├─> Run autonomous exploration
+   ├─> Log pose errors, map, timing
+   └─> Save final global map
+
+3. Data Collection (Mode 2: Feature)
+   ├─> Run same exploration scenario
+   ├─> Log pose errors, landmarks, timing
+   └─> Save final feature map + point cloud
+
+4. Analysis
+   ├─> Compute ATE for both modes
+   ├─> Compare map quality (cloud-to-cloud)
+   ├─> Analyze uncertainty calibration
+   ├─> Compare computational efficiency
+   └─> Statistical significance testing
+
+5. Visualization
+   ├─> Plot trajectory errors
+   ├─> Render final maps
+   ├─> Generate comparison figures
+   └─> Create thesis figures
+```
+
+## 10. Key Differences Summary
+
+### 10.1 State Representation
+
+**ICP-Based:**
+$$
+\mathbf{x} = [x, y, \theta]^T \quad \text{(robot pose only)}
+$$
+
+**Feature-Based:**
+$$
+\mathbf{x} = \begin{bmatrix}
+x_r, y_r, \theta_r \\
+\rho_1, \alpha_1 \\
+\vdots \\
+x_{c_1}, y_{c_1} \\
+\vdots
+\end{bmatrix} \quad \text{(robot + landmarks)}
+$$
+
+### 10.2 Measurement Update
+
+**ICP-Based:**
+- Measurement: Pose correction from scan-to-submap ICP
+- Observation model: Direct pose measurement
+- Update frequency: Every scan (when ICP converges)
+
+**Feature-Based:**
+- Measurement: Landmark observations (ρ, α) or (x, y)
+- Observation model: Geometric projection from robot to landmark
+- Update frequency: Every landmark re-observation
+
+### 10.3 Uncertainty Source
+
+**ICP-Based:**
+- Hessian of ICP residuals (Censi 2007)
+- Reflects point cloud alignment quality
+- Independent per scan
+
+**Feature-Based:**
+- Fisher Information Matrix from feature geometry
+- Propagated through EKF covariance
+- Correlated across landmarks
+
+## 11. Expected Outcomes
+
+### 11.1 Hypotheses
+
+**H1: Accuracy**
+- ICP-based: Higher short-term accuracy, potential long-term drift
+- Feature-based: Consistent accuracy with proper data association
+
+**H2: Computational Efficiency**
+- ICP-based: Higher per-scan computation (dense matching)
+- Feature-based: Lower per-scan, but grows with landmark count
+
+**H3: Map Quality**
+- ICP-based: Denser, more complete visual maps
+- Feature-based: Sparser, geometrically interpretable maps
+
+**H4: Uncertainty Calibration**
+- Both approaches: Compare predicted uncertainty to actual error
+- Feature-based: Expected better calibration (full covariance)
+
+### 11.2 Contributions
+
+This comparative study provides:
+- ✅ Rigorous controlled comparison under identical exploration
+- ✅ Quantitative evaluation across multiple metrics
+- ✅ Open-source implementation with reproducible results
+- ✅ Comprehensive documentation of both approaches
+- ✅ Uncertainty-aware mapping with quantitative confidence
+
+## 12. Implementation Status
+
+### 12.1 Completed Features
+
+**Both Modes:**
+- ✅ ROS 2 integration with TF2
+- ✅ Ground truth comparison logging
+- ✅ Frontier-based exploration interface
+- ✅ Point cloud visualization
+
+**ICP Mode:**
+- ✅ Scan-to-submap ICP with Open3D
+- ✅ Hessian-based covariance estimation
+- ✅ Submap accumulation and stitching
+- ✅ Pose-only EKF
+
+**Feature Mode:**
+- ✅ Wall and corner extraction
+- ✅ Data association with segment overlap validation
+- ✅ Full EKF-SLAM with Joseph form update
+- ✅ Feature map with wall extension
+- ✅ Fisher Information covariance
+- ✅ Landmark pruning
+
+### 12.2 Recent Improvements
+
+**Wall Matching Fix (February 2026):**
+- Added segment overlap validation to prevent merging non-overlapping collinear walls
+- 0.5m gap tolerance for localization errors
+- Improved data association robustness
+
+**Code Cleanup:**
+- Removed dead code (`get_covariance`, `get_statistics`)
+- Fixed redundant imports
+- Verified build success
+
+**Documentation Overhaul:**
+- Created comprehensive literature review
+- Separate methodology documents for both approaches
+- Updated system overview (this file) for comparative study framing
+
+## 13. References
+
+**SLAM Foundations:**
+1. Durrant-Whyte, H., & Bailey, T. (2006). "Simultaneous Localization and Mapping." *IEEE Robotics & Automation Magazine*.
 2. Thrun, S., Burgard, W., & Fox, D. (2005). *Probabilistic Robotics*. MIT Press.
 
-3. Besl, P. J., & McKay, N. D. (1992). "A Method for Registration of 3-D Shapes." *IEEE Transactions on Pattern Analysis and Machine Intelligence*.
+**ICP-Based Methods:**
+3. Besl, P. J., & McKay, N. D. (1992). "A Method for Registration of 3-D Shapes." *IEEE TPAMI*.
+4. Censi, A. (2007). "An Accurate Closed-Form Estimate of ICP's Covariance." *ICRA 2007*.
 
-4. Nguyen, V., Martinelli, A., Tomatis, N., & Siegwart, R. (2005). "A Comparison of Line Extraction Algorithms using 2D Laser Rangefinder for Indoor Mobile Robotics." *IROS 2005*.
+**Feature-Based Methods:**
+5. Dissanayake, G., et al. (2001). "A Solution to the Simultaneous Localization and Map Building (SLAM) Problem." *IEEE Trans. Robotics and Automation*.
+6. Nguyen, V., et al. (2005). "A Comparison of Line Extraction Algorithms using 2D Laser Rangefinder." *IROS 2005*.
 
-5. Barfoot, T. D. (2017). *State Estimation for Robotics*. Cambridge University Press.
+**Exploration:**
+7. Yamauchi, B. (1997). "A Frontier-Based Approach for Autonomous Exploration." *CIRA*.
+8. Burgard, W., et al. (2005). "Coordinated Multi-Robot Exploration." *IEEE Trans. Robotics*.
+
+**See:** `docs/literature_review.md` for complete bibliography (50+ references)
 
 ---
 
-**Next Documents:**
-- `01_ekf_slam_theory.md` — Complete EKF-SLAM mathematical derivation
-- `02_landmark_features.md` — Feature extraction algorithms and geometry
-- `03_data_association.md` — Mahalanobis distance and gating theory
-- `04_icp_alignment.md` — ICP algorithm and convergence analysis
-- `05_submap_management.md` — Submap creation and stitching
-- `06_uncertainty_quantification.md` — Information theory and confidence metrics
-- `07_coordinate_frames.md` — Transform management and frame conventions
+**Next Steps:**
+1. Review methodology documents: `methodology_icp_mapping.md` and `methodology_feature_mapping.md`
+2. Run experiments with both modes under identical exploration
+3. Analyze results using evaluation scripts
+4. Generate thesis figures and statistical comparisons

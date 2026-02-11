@@ -62,17 +62,21 @@ The libpointmatcher library compared ICP variants on real-world datasets:
 
 **Conclusion for 2D SLAM**: Point-to-point ICP with robust outlier rejection is sufficient for 2D LiDAR data, offering simplicity and real-time performance.
 
-### 1.1 Why ICP in Hybrid SLAM?
+### 1.1 Why ICP for SLAM?
 
-**Complementary to Landmark SLAM:**
+**Advantages for ICP-Based Mapping:**
 - **Dense matching:** Uses all scan points (not just features)
 - **Robust:** Works in feature-poor environments
 - **Accurate:** Sub-centimeter precision in good conditions
+- **Complete coverage:** No dependency on feature extraction quality
 
 **Limitations:**
 - **Local minima:** Requires good initialization
 - **Computational cost:** $O(n \log m)$ per iteration
 - **No explicit loop closure:** Short-term accuracy only
+- **Drift accumulation:** Without loop closure detection
+
+> **Note:** This document describes ICP algorithms used in **ICP-based mapping mode**. See `methodology_icp_mapping.md` for complete system context.
 
 ---
 

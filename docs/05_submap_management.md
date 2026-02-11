@@ -1,5 +1,7 @@
 # Submap Management and Global Map Construction
 
+> **Note:** This document describes submap management concepts applicable to **both ICP-based and Feature-based mapping modes**. For complete system context, see `methodology_icp_mapping.md` and `methodology_feature_mapping.md`.
+
 ## Table of Contents
 1. [Introduction](#1-introduction)
 2. [Submap Creation](#2-submap-creation)

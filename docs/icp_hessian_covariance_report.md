@@ -1,5 +1,7 @@
 # Detailed Report: Hessian-Based Uncertainty Calculation for ICP
 
+> **Note:** This detailed report provides supplementary mathematical derivations for ICP uncertainty quantification used in **ICP-based mapping mode**. For complete system context, see `methodology_icp_mapping.md`.
+
 ## Table of Contents
 1. [Introduction](#introduction)
 2. [Problem Statement](#problem-statement)

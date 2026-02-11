@@ -1,5 +1,7 @@
 # Detailed Report: Landmark-Based EKF-SLAM Update with Hessian-Based Covariance
 
+> **Note:** This detailed report provides supplementary mathematical derivations for landmark-based EKF-SLAM used in **Feature-based mapping mode**. For complete system context, see `methodology_feature_mapping.md`.
+
 ## Table of Contents
 1. [Overview](#overview)
 2. [EKF Update Framework](#ekf-update-framework)
