@@ -20,14 +20,12 @@ class LandmarkEKFSLAM(BaseEKF):
     """
 
     def __init__(self,
-                 max_landmark_range: float = 5.0,
                  landmark_timeout_scans: int = 50,
                  min_observations_for_init: int = 2):
         """
         Initialize landmark-based EKF-SLAM.
 
         Args:
-            max_landmark_range: Maximum range for valid landmark observations (meters)
             landmark_timeout_scans: Number of scans before pruning unseen landmarks
             min_observations_for_init: Minimum observations before landmark is established
         """
@@ -38,7 +36,6 @@ class LandmarkEKFSLAM(BaseEKF):
         self.next_landmark_id = 0
 
         # Parameters
-        self.max_landmark_range = max_landmark_range
         self.landmark_timeout_scans = landmark_timeout_scans
         self.min_observations_for_init = min_observations_for_init
 

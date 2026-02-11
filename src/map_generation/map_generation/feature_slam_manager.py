@@ -11,15 +11,9 @@ from map_generation.feature_map import FeatureMap
 
 
 class FeatureSLAMManager:
-    """
-    Manages feature-based SLAM operations.
-
-    Encapsulates EKF SLAM, feature extraction, data association,
-    and feature map management. Provides clean interface for ROS2 node.
-    """
+   
 
     def __init__(self,
-                 max_landmark_range: float = 5.0,
                  landmark_timeout_scans: int = 50,
                  min_observations_for_init: int = 2,
                  min_points_per_line: int = 5,
@@ -30,25 +24,9 @@ class FeatureSLAMManager:
                  max_mahalanobis_dist: float = 5.99,
                  max_euclidean_dist: float = 2.0,
                  wall_gap_tolerance: float = 0.5):
-        """
-        Initialize Feature SLAM manager.
-
-        Args:
-            max_landmark_range: Maximum range for landmark observations (meters)
-            landmark_timeout_scans: Number of scans before pruning unseen landmarks
-            min_observations_for_init: Minimum observations before landmark is established
-            min_points_per_line: Minimum points to form a line segment
-            line_fit_threshold: Maximum perpendicular distance for line validation (meters)
-            min_line_length: Minimum length of a line segment (meters)
-            corner_angle_threshold: Angle change to detect corners (degrees)
-            max_gap: Maximum distance between consecutive points (meters)
-            max_mahalanobis_dist: Maximum Mahalanobis distance for data association
-            max_euclidean_dist: Maximum Euclidean distance for data association (meters)
-            wall_gap_tolerance: Maximum gap between wall segments for matching (meters)
-        """
+       
         # Initialize EKF SLAM
         self.ekf = LandmarkEKFSLAM(
-            max_landmark_range=max_landmark_range,
             landmark_timeout_scans=landmark_timeout_scans,
             min_observations_for_init=min_observations_for_init
         )
@@ -80,37 +58,14 @@ class FeatureSLAMManager:
         self.ekf_initialized = True
 
     def predict_motion(self, delta_d: float, delta_theta: float):
-        """
-        Perform EKF prediction step with relative motion.
-
-        Args:
-            delta_d: Distance traveled (meters)
-            delta_theta: Rotation (radians)
-        """
+        
         if not self.ekf_initialized:
             return
 
         self.ekf.predict_with_relative_motion(delta_d, delta_theta)
 
     def process_scan(self, scan_msg: LaserScan) -> Dict:
-        """
-        Process laser scan: extract features, associate, and update EKF.
-
-        Args:
-            scan_msg: ROS LaserScan message
-
-        Returns:
-            Dictionary with processing statistics:
-                - 'num_features': Total features extracted
-                - 'num_walls': Wall features
-                - 'num_corners': Corner features
-                - 'num_matched': Matched features
-                - 'num_unmatched': New features
-                - 'num_landmarks': Total EKF landmarks
-                - 'num_walls_stored': Walls in feature map
-                - 'num_corners_stored': Corners in feature map
-                - 'observed_features': List of extracted features (for visualization)
-        """
+       
         if not self.ekf_initialized:
             return self._empty_stats()
 
@@ -163,7 +118,7 @@ class FeatureSLAMManager:
     def _process_matched_features(self, observed_features: List[Dict],
                                    matched: List[Tuple[int, int]],
                                    extension_info: Dict):
-        """Process matched features: update EKF and extend walls."""
+      
         for feat_idx, landmark_id in matched:
             feature = observed_features[feat_idx]
 
@@ -326,12 +281,7 @@ class FeatureSLAMManager:
         }
 
     def get_robot_pose(self) -> Optional[Dict]:
-        """
-        Get current robot pose from EKF.
-
-        Returns:
-            Dictionary with 'x', 'y', 'theta' or None if not initialized
-        """
+        
         if not self.ekf_initialized:
             return None
 
@@ -342,15 +292,7 @@ class FeatureSLAMManager:
         return self.feature_map
 
     def generate_point_cloud(self, spacing: float = 0.05) -> np.ndarray:
-        """
-        Generate point cloud from stored features.
-
-        Args:
-            spacing: Distance between interpolated points on walls (meters)
-
-        Returns:
-            (N x 3) point cloud array [x, y, z]
-        """
+       
         return self.feature_map.generate_point_cloud(spacing=spacing)
 
     def is_initialized(self) -> bool:

@@ -56,9 +56,8 @@ class LocalSubmapGeneratorFeature(Node):
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
 
-        # Initialize Feature SLAM Manager (used in both modes for EKF)
+        # Initialize Feature SLAM Manager
         self.slam_manager = FeatureSLAMManager(
-            max_landmark_range=5.0,
             landmark_timeout_scans=50,
             min_observations_for_init=2,
             min_points_per_line=5,
@@ -134,20 +133,14 @@ class LocalSubmapGeneratorFeature(Node):
         self.latest_odom_timestamp = None
         self.latest_odom_msg = None
 
-        # Submap confidence logging for thesis analysis
         confidence_csv_path = os.path.join(self.save_dir, 'submap_confidence.csv')
         self.confidence_tracker = ConfidenceTracker(confidence_csv_path)
 
-        # Publish TF at a fixed rate to avoid gaps when callbacks are delayed
         self.create_timer(0.1, self._publish_tf_callback)
 
-        self.get_logger().info(f'Local Submap Generator initialized for {self.robot_name}')
-        self.get_logger().info('  Mapping mode: FEATURE')
-        self.get_logger().info(f'  Save directory: {self.save_dir}')
-        self.get_logger().info(f'  TF: map -> {self.robot_name}/odom (EKF) -> {self.robot_name}/base_footprint (Gazebo)')
 
     def _publish_global_map_callback(self):
-        """Publish global map in map frame."""
+        
         global_points = self.stitcher.get_global_map_points()
         publish_global_map(
             global_points,
@@ -191,7 +184,6 @@ class LocalSubmapGeneratorFeature(Node):
             ekf_state, odom_pose
         )
 
-        # Publish map->odom transform
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()  
         t.header.frame_id = 'map'  
@@ -454,8 +446,7 @@ class LocalSubmapGeneratorFeature(Node):
         return False
 
     def create_submap_from_features(self):
-        """Create submap from FeatureMap by interpolating points along features."""
-
+       
         # Generate point cloud from features (5cm spacing)
         points_map_frame = self.slam_manager.generate_point_cloud(spacing=0.05)
 

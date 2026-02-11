@@ -183,7 +183,6 @@ def generate_launch_description():
             ]
         )
 
-        # Robot bridge (ROS-Gazebo communication)
         with open(bridge_robot_yaml, 'r') as f:
             template_content = f.read()
 
@@ -219,13 +218,11 @@ def generate_launch_description():
             remappings=[('/joint_states', f'/{robot_name}/joint_states')]
         )
 
-        # Wrap spawn components in TimerAction
         robot_spawn_delayed = TimerAction(
             period=spawn_delay,
             actions=[spawn_robot, robot_state_publisher, robot_bridge]
         )
 
-        # Mapping: Local submap generator (mode-specific executables)
         submap_generator_icp = Node(
             package='map_generation',
             executable='local_submap_generator_icp',
@@ -261,7 +258,6 @@ def generate_launch_description():
             actions=[submap_generator_icp, submap_generator_feature]
         )
 
-        # Navigation: Frontier exploration
         navigation_node = Node(
             package='navigation',
             executable='simple_navigation',
@@ -279,7 +275,6 @@ def generate_launch_description():
 
         navigation_delayed = TimerAction(period=nav_delay, actions=[navigation_node])
 
-        # RViz visualization
         rviz_node = Node(
             package='rviz2',
             executable='rviz2',
@@ -293,14 +288,12 @@ def generate_launch_description():
 
         rviz_delayed = TimerAction(period=rviz_delay, actions=[rviz_node])
 
-        # Return all delayed actions for this robot
         return [robot_spawn_delayed, submap_generator_delayed, navigation_delayed, rviz_delayed]
 
     # ========================================================================
     # 4. LAUNCH DESCRIPTION
     # ========================================================================
 
-    # Build the launch description
     launch_entities = [
         # Arguments
         world_arg,
