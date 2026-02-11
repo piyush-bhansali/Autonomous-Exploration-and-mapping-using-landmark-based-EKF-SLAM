@@ -4,11 +4,54 @@ import numpy as np
 from typing import List, Dict, Tuple
 
 
+def check_wall_segments_overlap_or_adjacent(start1: np.ndarray, end1: np.ndarray,
+                                             start2: np.ndarray, end2: np.ndarray,
+                                             wall_tangent: np.ndarray,
+                                             gap_tolerance: float = 0.5) -> bool:
+    """
+    Check if two wall segments overlap or are adjacent (within gap tolerance).
+
+    This prevents matching collinear walls that are separated by a gap.
+    Accounts for localization errors by allowing small gaps.
+
+    Args:
+        start1, end1: Endpoints of first wall segment [x, y]
+        start2, end2: Endpoints of second wall segment [x, y]
+        wall_tangent: Unit vector along the wall direction [-sin(alpha), cos(alpha)]
+        gap_tolerance: Maximum allowed gap between segments (meters, default 0.5m)
+
+    Returns:
+        True if segments overlap or gap <= gap_tolerance, False otherwise
+    """
+    # Project all points onto wall tangent direction
+    proj1_start = np.dot(start1, wall_tangent)
+    proj1_end = np.dot(end1, wall_tangent)
+    proj2_start = np.dot(start2, wall_tangent)
+    proj2_end = np.dot(end2, wall_tangent)
+
+    # Get ranges (ensure min < max)
+    range1_min = min(proj1_start, proj1_end)
+    range1_max = max(proj1_start, proj1_end)
+    range2_min = min(proj2_start, proj2_end)
+    range2_max = max(proj2_start, proj2_end)
+
+    # Check for overlap: ranges overlap if max(min) <= min(max)
+    if max(range1_min, range2_min) <= min(range1_max, range2_max):
+        return True  # Segments overlap
+
+    # Compute gap: distance between closest endpoints of non-overlapping segments
+    gap = max(range1_min, range2_min) - min(range1_max, range2_max)
+
+    return gap <= gap_tolerance
+
+
 def associate_landmarks(
     observed_features: List[Dict],
     ekf_slam,
+    feature_map=None,
     max_mahalanobis_dist: float = 5.99,  # Chi-squared 2-DOF, 95% confidence
     max_euclidean_dist: float = 1.0,
+    wall_gap_tolerance: float = 0.5,
     return_extension_info: bool = False
 ) -> Tuple[List[Tuple[int, int]], List[int], Dict]:
 
@@ -145,6 +188,39 @@ def associate_landmarks(
 
             # Chi-squared gating
             if mahal_dist_sq < max_mahalanobis_dist**2 and mahal_dist < best_mahalanobis:
+                # For walls, verify segment overlap before accepting match
+                if feature['type'] == 'wall' and feature_map is not None:
+                    # Get existing wall endpoints from FeatureMap
+                    existing_wall = feature_map.get_wall(landmark_id)
+
+                    if existing_wall is not None:
+                        # Compute wall tangent from alpha
+                        wall_tangent = np.array([-np.sin(lm_alpha), np.cos(lm_alpha)])
+
+                        # Transform observed endpoints to map frame
+                        obs_start = feature.get('start_point')
+                        obs_end = feature.get('end_point')
+
+                        if obs_start is not None and obs_end is not None:
+                            c = np.cos(theta_r)
+                            s = np.sin(theta_r)
+                            R = np.array([[c, -s], [s, c]])
+                            obs_start_map = R @ obs_start + np.array([x_r, y_r])
+                            obs_end_map = R @ obs_end + np.array([x_r, y_r])
+
+                            # Check if segments overlap or are adjacent
+                            if not check_wall_segments_overlap_or_adjacent(
+                                existing_wall['start_point'],
+                                existing_wall['end_point'],
+                                obs_start_map,
+                                obs_end_map,
+                                wall_tangent,
+                                wall_gap_tolerance
+                            ):
+                                # No overlap → skip this match candidate
+                                continue
+
+                # If we reach here, match is valid (or it's a corner)
                 best_mahalanobis = mahal_dist
                 best_landmark_id = landmark_id
 

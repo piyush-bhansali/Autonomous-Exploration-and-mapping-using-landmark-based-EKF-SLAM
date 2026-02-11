@@ -362,9 +362,11 @@ class LandmarkFeatureExtractor:
         A = np.zeros((2, 2))
 
         for px, py in points:
-            # Jacobian for this point (1x2)
-            dr_d_rho = -1.0
-            dr_d_alpha = -px * sin_a + py * cos_a
+            # Jacobian of constraint c = rho - (px*cos(alpha) + py*sin(alpha))
+            # ∂c/∂rho = 1.0
+            # ∂c/∂alpha = px*sin(alpha) - py*cos(alpha)
+            dr_d_rho = 1.0
+            dr_d_alpha = px * sin_a - py * cos_a
 
             J = np.array([[dr_d_rho, dr_d_alpha]])
 
@@ -395,27 +397,21 @@ class LandmarkFeatureExtractor:
         pca = PCA(n_components=2)
         pca.fit(neighbors)
 
-        
+        # Eigenvalues represent spread of neighboring points
+        # Large spread → high uncertainty (large covariance)
+        # Small spread → low uncertainty (small covariance)
         evs = np.maximum(pca.explained_variance_, 1e-6)
-        info_eigenvalues = 1.0 / evs 
 
-        
+        # More observations → lower uncertainty
         effective_n = min(n_points, 30)
-        info_eigenvalues *= effective_n
+        cov_eigenvalues = evs / effective_n
 
-        V = pca.components_.T  
-        Lambda_inv = np.diag(info_eigenvalues)
-        A = V @ Lambda_inv @ V.T
+        # Construct covariance matrix in PCA basis
+        V = pca.components_.T  # Eigenvectors as columns
+        Lambda = np.diag(cov_eigenvalues)
+        corner_cov = V @ Lambda @ V.T
 
         sigma2 = self.lidar_sigma ** 2
 
-        try:
-           
-            A_reg = A + np.eye(2) * 1e-9
-            A_inv = np.linalg.inv(A_reg)
-        except np.linalg.LinAlgError:
-           
-            return np.eye(2) * sigma2 * 10
-
-       
-        return sigma2 * A_inv
+        # Scale by measurement noise and add minimum uncertainty
+        return sigma2 * (corner_cov + np.eye(2) * 1e-6)

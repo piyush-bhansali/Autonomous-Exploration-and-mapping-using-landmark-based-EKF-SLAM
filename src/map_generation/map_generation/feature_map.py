@@ -16,27 +16,20 @@ class FeatureMap:
         """Initialize empty feature map."""
         self.walls = {}  # landmark_id -> wall_data
         self.corners = {}  # landmark_id -> corner_data
-        self.next_wall_id = 0
-        self.next_corner_id = 0
 
-    def add_wall(self, rho: float, alpha: float, start_point: np.ndarray,
-                 end_point: np.ndarray, points: np.ndarray) -> int:
+    def add_wall(self, landmark_id: int, rho: float, alpha: float, start_point: np.ndarray,
+                 end_point: np.ndarray, points: np.ndarray):
         """
-        Add a new wall feature.
+        Add a new wall feature with the given landmark ID.
 
         Args:
+            landmark_id: ID from EKF SLAM (must match EKF's landmark ID)
             rho: Distance parameter (Hessian form)
             alpha: Angle parameter (Hessian form)
             start_point: [x, y] start of wall segment
             end_point: [x, y] end of wall segment
             points: (N x 2) original scan points on wall
-
-        Returns:
-            landmark_id: ID of the new wall
         """
-        landmark_id = self.next_wall_id
-        self.next_wall_id += 1
-
         self.walls[landmark_id] = {
             'rho': rho,
             'alpha': alpha,
@@ -46,27 +39,18 @@ class FeatureMap:
             'observation_count': 1
         }
 
-        return landmark_id
-
-    def add_corner(self, position: np.ndarray) -> int:
+    def add_corner(self, landmark_id: int, position: np.ndarray):
         """
-        Add a new corner feature.
+        Add a new corner feature with the given landmark ID.
 
         Args:
+            landmark_id: ID from EKF SLAM (must match EKF's landmark ID)
             position: [x, y] corner position
-
-        Returns:
-            landmark_id: ID of the new corner
         """
-        landmark_id = self.next_corner_id
-        self.next_corner_id += 1
-
         self.corners[landmark_id] = {
             'position': np.array(position),
             'observation_count': 1
         }
-
-        return landmark_id
 
     def update_wall_endpoints(self, landmark_id: int, new_start: np.ndarray,
                                new_end: np.ndarray, new_points: np.ndarray):
@@ -210,6 +194,21 @@ class FeatureMap:
     def get_feature_count(self) -> Tuple[int, int]:
         """Get number of walls and corners."""
         return len(self.walls), len(self.corners)
+
+    def remove_landmark(self, landmark_id: int):
+        """
+        Remove a landmark from the feature map (called when EKF prunes it).
+
+        Args:
+            landmark_id: ID of landmark to remove
+        """
+        # Remove from walls if present
+        if landmark_id in self.walls:
+            del self.walls[landmark_id]
+
+        # Remove from corners if present
+        if landmark_id in self.corners:
+            del self.corners[landmark_id]
 
     def clear_features(self):
         """Clear all features (for reset or new submap if needed)."""

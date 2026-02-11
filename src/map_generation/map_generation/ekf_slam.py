@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import numpy as np
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 
 
 class LandmarkEKFSLAM:
@@ -375,14 +375,19 @@ class LandmarkEKFSLAM:
         # Condition covariance
         self.P = self._condition_covariance(self.P)
 
-    def prune_landmarks(self, current_scan_number: int):
-       
+    def prune_landmarks(self, current_scan_number: int) -> List[int]:
+        """
+        Prune landmarks that haven't been seen recently.
+
+        Returns:
+            List of pruned landmark IDs (for FeatureMap synchronization)
+        """
         to_remove = []
 
         for lm_id, lm_data in self.landmarks.items():
             scans_since_seen = current_scan_number - lm_data['last_seen']
 
-            
+
             if (scans_since_seen > self.landmark_timeout_scans or
                 (lm_data['observations'] < self.min_observations_for_init and
                  scans_since_seen > 10)):
@@ -393,6 +398,8 @@ class LandmarkEKFSLAM:
 
         for lm_id in to_remove:
             self._remove_landmark(lm_id)
+
+        return to_remove
 
     def _remove_landmark(self, landmark_id: int):
        

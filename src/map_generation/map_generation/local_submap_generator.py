@@ -13,10 +13,7 @@ from threading import Lock
 import open3d.core as o3c
 
 from map_generation.submap_stitcher import SubmapStitcher
-from map_generation.ekf_slam import LandmarkEKFSLAM
-from map_generation.landmark_features import LandmarkFeatureExtractor
-from map_generation.data_association import associate_landmarks
-from map_generation.feature_map import FeatureMap
+from map_generation.feature_slam_manager import FeatureSLAMManager
 from map_generation.mapping_utils import (
     scan_to_map_icp,
     compute_relative_pose,
@@ -34,7 +31,6 @@ from map_generation.transform_utils import (
     numpy_to_pointcloud2
 )
 from map_generation.evaluation_utils import (
-    GroundTruthTracker,
     ConfidenceTracker,
     compute_ekf_confidence
 )
@@ -71,30 +67,24 @@ class LocalSubmapGenerator(Node):
         self.save_dir = os.path.join(self.save_dir, self.robot_name)
         os.makedirs(self.save_dir, exist_ok=True)
 
-        self.ekf = LandmarkEKFSLAM(
+        # Initialize Feature SLAM Manager (used in both modes for EKF)
+        self.slam_manager = FeatureSLAMManager(
             max_landmark_range=5.0,
             landmark_timeout_scans=50,
-            min_observations_for_init=2
-        )
-        self.ekf_initialized = False
-
-        self.feature_extractor = LandmarkFeatureExtractor(
+            min_observations_for_init=2,
             min_points_per_line=5,
             line_fit_threshold=0.03,
             min_line_length=0.3,
             corner_angle_threshold=50.0,
-            max_gap=0.2
+            max_gap=0.2,
+            max_mahalanobis_dist=5.99,
+            max_euclidean_dist=2.0,
+            wall_gap_tolerance=0.5
         )
 
         self.stitcher = SubmapStitcher(
             voxel_size=self.voxel_size
         )
-
-        # Feature mode: initialize FeatureMap
-        if self.mapping_mode == 'feature':
-            self.feature_map = FeatureMap()
-        else:
-            self.feature_map = None
 
         if o3c.cuda.is_available():
             self.device = o3c.Device("CUDA:0")
@@ -115,13 +105,6 @@ class LocalSubmapGenerator(Node):
             f'/{self.robot_name}/odom',
             self.odom_callback,
             ODOM_QOS
-        )
-
-        self.ground_truth_sub = self.create_subscription(
-            PoseStamped,
-            f'/{self.robot_name}/ground_truth_pose',
-            self.ground_truth_callback,
-            POSE_QOS
         )
 
         self.current_submap_pub = self.create_publisher(
@@ -169,10 +152,6 @@ class LocalSubmapGenerator(Node):
         self.latest_odom_pose = None
         self.latest_odom_timestamp = None
         self.latest_odom_msg = None
-
-        # Ground truth tracking for evaluation
-        gt_csv_path = os.path.join(self.save_dir, 'ekf_vs_groundtruth.csv')
-        self.gt_tracker = GroundTruthTracker(gt_csv_path, self.get_logger())
 
         # Submap confidence logging for thesis analysis
         confidence_csv_path = os.path.join(self.save_dir, 'submap_confidence.csv')
@@ -315,10 +294,9 @@ class LocalSubmapGenerator(Node):
         self.latest_odom_timestamp = msg.header.stamp
         self.latest_odom_msg = msg
 
-        if not self.ekf_initialized:
-            
-            self.ekf.initialize(x_odom, y_odom, theta_odom)
-            self.ekf_initialized = True
+        if not self.slam_manager.is_initialized():
+
+            self.slam_manager.initialize_pose(x_odom, y_odom, theta_odom)
             self.last_odom_pose = current_odom_pose
 
             self.get_logger().info(
@@ -326,7 +304,7 @@ class LocalSubmapGenerator(Node):
                 f'in {msg.header.frame_id}'
             )
 
-            state = self.ekf.get_state()
+            state = self.slam_manager.get_robot_pose()
             qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
 
             with self.data_lock:
@@ -348,17 +326,17 @@ class LocalSubmapGenerator(Node):
             return
 
         if self.last_odom_pose is not None:
-            
+
             delta_d, delta_theta = compute_relative_motion_2d(
                 current_odom_pose,
                 self.last_odom_pose
             )
 
-            self.ekf.predict_with_relative_motion(delta_d, delta_theta)
+            self.slam_manager.predict_motion(delta_d, delta_theta)
 
         self.last_odom_pose = current_odom_pose
 
-        state = self.ekf.get_state()
+        state = self.slam_manager.get_robot_pose()
         x = state['x']
         y = state['y']
         theta = state['theta']
@@ -382,15 +360,6 @@ class LocalSubmapGenerator(Node):
 
         self._publish_ekf_pose()
 
-    def ground_truth_callback(self, msg):
-       
-        current_time = self.get_clock().now().nanoseconds
-
-        self.gt_tracker.update_ground_truth(msg, current_time)
-
-        if self.current_pose is not None:
-            self.gt_tracker.log_comparison(self.current_pose, self.ekf_initialized, current_time)
-
     def _apply_pose_correction(self, dx: float, dy: float, dtheta: float,
                                measurement_type: str, base_pose=None,
                                measurement_covariance: np.ndarray = None):
@@ -406,14 +375,13 @@ class LocalSubmapGenerator(Node):
         if measurement_covariance is None:
             measurement_covariance = np.diag([0.1, 0.1, 0.05]) ** 2
 
-        self.ekf.update(
+        self.slam_manager.ekf.update(
             corrected_x, corrected_y, corrected_theta,
             measurement_covariance=measurement_covariance,
             measurement_type=measurement_type
         )
 
-       
-        state = self.ekf.get_state()
+        state = self.slam_manager.get_robot_pose()
         qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
 
         self.current_pose['x'] = state['x']
@@ -429,7 +397,7 @@ class LocalSubmapGenerator(Node):
 
     def _sync_pose_from_ekf(self):
         """Synchronize current_pose from EKF state."""
-        state = self.ekf.get_state()
+        state = self.slam_manager.get_robot_pose()
         qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
 
         with self.data_lock:
@@ -520,160 +488,35 @@ class LocalSubmapGenerator(Node):
             self.create_submap()
 
     def _process_scan_feature_mode(self, msg):
-        """Process scan in Feature mode: extract features, EKF update, extend walls."""
+        """Process scan in Feature mode: delegate to FeatureSLAMManager."""
 
-        if not self.ekf_initialized:
+        if not self.slam_manager.is_initialized():
             return
 
-        # Extract features from scan (in robot frame)
-        observed_features = self.feature_extractor.extract_features(msg)
+        # Process scan through SLAM manager
+        stats = self.slam_manager.process_scan(msg)
 
-        if len(observed_features) == 0:
+        if stats['num_features'] == 0:
             return
 
-        # Data association with wall extension info
-        matched, unmatched, extension_info = associate_landmarks(
-            observed_features,
-            self.ekf,
-            max_mahalanobis_dist=5.99,
-            max_euclidean_dist=5.0,
-            return_extension_info=True
-        )
-
-        # Process matched features: EKF update + wall extension
-        for feat_idx, landmark_id in matched:
-            feature = observed_features[feat_idx]
-
-            # EKF update
-            if feature['type'] == 'wall':
-                z_rho = feature['rho']
-                z_alpha = feature['alpha']
-
-                self.ekf.update_landmark_observation(
-                    landmark_id=landmark_id,
-                    z_x=z_rho,
-                    z_y=z_alpha,
-                    scan_number=self.ekf.current_scan_number,
-                    measurement_covariance=feature['covariance']
-                )
-
-            elif feature['type'] == 'corner':
-                z_x, z_y = feature['position']
-
-                self.ekf.update_landmark_observation(
-                    landmark_id=landmark_id,
-                    z_x=z_x,
-                    z_y=z_y,
-                    scan_number=self.ekf.current_scan_number,
-                    measurement_covariance=feature['covariance']
-                )
-
-            # Wall extension: update FeatureMap endpoints if wall matched
-            if feat_idx in extension_info:
-                ext = extension_info[feat_idx]
-                self.feature_map.update_wall_endpoints(
-                    landmark_id=ext['landmark_id'],
-                    new_start=ext['new_start'],
-                    new_end=ext['new_end'],
-                    new_points=ext['new_points']
-                )
-
-        # Add new landmarks for unmatched features
-        for feat_idx in unmatched:
-            feature = observed_features[feat_idx]
-
-            if feature['type'] == 'wall':
-                # Add to EKF
-                z_rho = feature['rho']
-                z_alpha = feature['alpha']
-
-                landmark_id = self.ekf.add_landmark(
-                    z_x=z_rho,
-                    z_y=z_alpha,
-                    feature=feature,
-                    scan_number=self.ekf.current_scan_number
-                )
-
-                # Transform wall parameters from robot frame to map frame
-                x_r, y_r, theta_r = self.ekf.state[0:3]
-
-                # Robot-frame Hessian to map-frame Hessian
-                rho_map = z_rho + (x_r * np.cos(z_alpha) + y_r * np.sin(z_alpha))
-                alpha_map = z_alpha + theta_r
-                alpha_map = np.arctan2(np.sin(alpha_map), np.cos(alpha_map))
-
-                # Ensure rho is positive
-                if rho_map < 0:
-                    rho_map = -rho_map
-                    alpha_map = alpha_map + np.pi
-                    alpha_map = np.arctan2(np.sin(alpha_map), np.cos(alpha_map))
-
-                # Transform endpoints from robot frame to map frame
-                c = np.cos(theta_r)
-                s = np.sin(theta_r)
-                R = np.array([[c, -s], [s, c]])
-
-                start_map = R @ feature['start_point'] + np.array([x_r, y_r])
-                end_map = R @ feature['end_point'] + np.array([x_r, y_r])
-
-                # Transform points from robot frame to map frame
-                points_map = (R @ feature['points'].T).T + np.array([x_r, y_r])
-
-                # Add to FeatureMap
-                self.feature_map.add_wall(
-                    rho=rho_map,
-                    alpha=alpha_map,
-                    start_point=start_map,
-                    end_point=end_map,
-                    points=points_map
-                )
-
-            elif feature['type'] == 'corner':
-                # Add to EKF
-                z_x, z_y = feature['position']
-
-                landmark_id = self.ekf.add_landmark(
-                    z_x=z_x,
-                    z_y=z_y,
-                    feature=feature,
-                    scan_number=self.ekf.current_scan_number
-                )
-
-                # Transform corner from robot frame to map frame
-                x_r, y_r, theta_r = self.ekf.state[0:3]
-                c = np.cos(theta_r)
-                s = np.sin(theta_r)
-                R = np.array([[c, -s], [s, c]])
-
-                corner_map = R @ np.array([z_x, z_y]) + np.array([x_r, y_r])
-
-                # Add to FeatureMap
-                self.feature_map.add_corner(position=corner_map)
-
-        # Prune landmarks that haven't been seen recently
-        self.ekf.prune_landmarks(self.ekf.current_scan_number)
-
+        # Synchronize pose from EKF to current_pose
         self._sync_pose_from_ekf()
 
         # Publish feature markers for visualization
         publish_feature_markers(
-            observed_features,
+            stats['observed_features'],
             msg.header.stamp,
             self.feature_markers_pub,
             self.robot_name
         )
 
-        num_landmarks = len(self.ekf.landmarks)
-        num_corners = sum(1 for f in observed_features if f['type'] == 'corner')
-        num_walls = sum(1 for f in observed_features if f['type'] == 'wall')
-        num_walls_stored, num_corners_stored = self.feature_map.get_feature_count()
-
+        # Log statistics
         self.get_logger().info(
-            f"Feature SLAM: {len(observed_features)} features "
-            f"({num_corners} corners, {num_walls} walls), "
-            f"{len(matched)} matched, {len(unmatched)} unmatched, "
-            f"{num_landmarks} EKF landmarks, "
-            f"FeatureMap: {num_walls_stored} walls, {num_corners_stored} corners",
+            f"Feature SLAM: {stats['num_features']} features "
+            f"({stats['num_corners']} corners, {stats['num_walls']} walls), "
+            f"{stats['num_matched']} matched, {stats['num_unmatched']} unmatched, "
+            f"{stats['num_landmarks']} EKF landmarks, "
+            f"FeatureMap: {stats['num_walls_stored']} walls, {stats['num_corners_stored']} corners",
             throttle_duration_sec=1.0
         )
 
@@ -727,8 +570,8 @@ class LocalSubmapGenerator(Node):
 
             # Compute submap confidence from current EKF state
             confidence_metrics = compute_ekf_confidence(
-                self.ekf,
-                self.ekf_initialized,
+                self.slam_manager.ekf,
+                self.slam_manager.is_initialized(),
                 self.get_clock().now().nanoseconds
             )
 
@@ -808,7 +651,7 @@ class LocalSubmapGenerator(Node):
         """Create submap from FeatureMap by interpolating points along features."""
 
         # Generate point cloud from features (5cm spacing)
-        points_map_frame = self.feature_map.generate_point_cloud(spacing=0.05)
+        points_map_frame = self.slam_manager.generate_point_cloud(spacing=0.05)
 
         if len(points_map_frame) == 0:
             self.get_logger().warn('Cannot create submap: no features stored in FeatureMap')
@@ -832,8 +675,8 @@ class LocalSubmapGenerator(Node):
 
             # Compute submap confidence from current EKF state
             confidence_metrics = compute_ekf_confidence(
-                self.ekf,
-                self.ekf_initialized,
+                self.slam_manager.ekf,
+                self.slam_manager.is_initialized(),
                 self.get_clock().now().nanoseconds
             )
 
@@ -897,7 +740,7 @@ class LocalSubmapGenerator(Node):
                 global_points = self.stitcher.get_global_map_points()
                 global_size = len(global_points) if global_points is not None else 0
 
-                num_walls, num_corners = self.feature_map.get_feature_count()
+                num_walls, num_corners = self.slam_manager.get_feature_map().get_feature_count()
                 self.get_logger().info(
                     f'Submap {self.submap_id} created from FeatureMap: '
                     f'{num_walls} walls, {num_corners} corners → '
@@ -930,10 +773,6 @@ class LocalSubmapGenerator(Node):
             map_file = os.path.join(self.save_dir, 'global_map.pcd')
             self.stitcher.save_global_map(map_file)
             self.get_logger().info(f'Final map saved: {map_file}')
-
-        # Close ground truth tracker
-        if hasattr(self, 'gt_tracker'):
-            self.gt_tracker.close()
 
         # Close confidence tracker
         if hasattr(self, 'confidence_tracker'):
