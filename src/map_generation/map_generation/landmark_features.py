@@ -2,7 +2,7 @@
 
 import numpy as np
 from sensor_msgs.msg import LaserScan
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from sklearn.decomposition import PCA
 
 
@@ -11,27 +11,23 @@ class LandmarkFeatureExtractor:
 
     def __init__(self,
                  min_points_per_line: int = 5,
-                 line_fit_threshold: float = 0.03,
                  min_line_length: float = 0.3,
-                 corner_angle_threshold: float = 50.0,
                  max_gap: float = 0.2,
+                 split_residual_threshold: float = 0.03,
+                 merge_residual_threshold: float = 0.03,
+                 merge_angle_threshold_deg: float = 12.0,
+                 corner_angle_threshold: float = 50.0,
+                 corner_neighbor_range: int = 6,
                  lidar_noise_sigma: float = 0.01):
-        """
-        Simplified feature extractor using angle-based breakpoint detection.
-
-        Args:
-            min_points_per_line: Minimum points to form a line segment (default: 5)
-            line_fit_threshold: Max perpendicular distance for line validation (default: 0.03m)
-            min_line_length: Minimum length of a line segment (default: 0.3m)
-            corner_angle_threshold: Angle change to detect corners in degrees (default: 50°)
-            max_gap: Maximum distance between consecutive points (default: 0.2m)
-            lidar_noise_sigma: LiDAR measurement noise std dev (default: 0.01m)
-        """
+       
         self.min_points = min_points_per_line
-        self.fit_threshold = line_fit_threshold
         self.min_length = min_line_length
-        self.corner_angle = np.radians(corner_angle_threshold)
         self.max_gap = max_gap
+        self.split_threshold = split_residual_threshold
+        self.merge_threshold = merge_residual_threshold
+        self.merge_angle = np.radians(merge_angle_threshold_deg)
+        self.corner_angle = np.radians(corner_angle_threshold)
+        self.corner_neighbor_range = corner_neighbor_range
 
         self.lidar_sigma = lidar_noise_sigma  # σ = 0.01m → σ² = 0.0001
 
@@ -42,22 +38,19 @@ class LandmarkFeatureExtractor:
         return self.extract_features_from_points(points)
 
     def extract_features_from_points(self, points: np.ndarray) -> List[Dict]:
-        """
-        Extract wall and corner features using simplified angle-based detection.
-        """
         if len(points) < self.min_points:
             return []
 
-        pts_2d = points[:, :2] if points.shape[1] >= 2 else points
+        pts_2d = points[:, :2]
 
-        # New simplified approach: detect breakpoints then fit lines
         lines, corners = self._extract_lines_and_corners(pts_2d)
 
         features = []
 
         # Add wall features
         for line in lines:
-            rho, alpha = self._convert_line_to_hessian(line['points'])
+            rho = float(line['rho'])
+            alpha = float(line['alpha'])
             cov = self._compute_wall_covariance(line)
 
             features.append({
@@ -87,7 +80,6 @@ class LandmarkFeatureExtractor:
         return features
 
     def _scan_to_cartesian(self, scan_msg: LaserScan) -> np.ndarray:
-       
         ranges = np.array(scan_msg.ranges)
         num_points = len(ranges)
         angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, num_points)
@@ -107,218 +99,258 @@ class LandmarkFeatureExtractor:
         return np.column_stack([x, y])
 
     def _extract_lines_and_corners(self, points: np.ndarray) -> Tuple[List[Dict], List[Dict]]:
-        """
-        Simplified algorithm: detect breakpoints from angle changes, then fit lines.
-
-        Returns:
-            (lines, corners) - both as lists of dictionaries
-        """
         if len(points) < self.min_points:
             return [], []
 
-        # Step 1: Split on gaps (occlusions)
         continuous_segments = self._split_on_gaps(points)
 
         all_lines = []
         all_corners = []
 
-        # Step 2: For each continuous segment, detect angle-based breakpoints
-        for seg_points, seg_offset in continuous_segments:
+        for seg_points in continuous_segments:
             if len(seg_points) < self.min_points:
                 continue
 
-            # Find breakpoints based on angle changes
-            breakpoints = self._find_breakpoints(seg_points)
-
-            # Fit lines between breakpoints and extract corners
-            lines, corners = self._fit_lines_at_breakpoints(seg_points, breakpoints)
+            intervals = self._split_segment_recursive(seg_points, 0, len(seg_points) - 1)
+            lines = self._build_segments_from_intervals(seg_points, intervals)
+            lines = self._merge_adjacent_segments(lines)
+            corners = self._extract_corners_from_adjacent_lines(lines)
 
             all_lines.extend(lines)
             all_corners.extend(corners)
 
         return all_lines, all_corners
 
-    def _split_on_gaps(self, points: np.ndarray) -> List[Tuple[np.ndarray, int]]:
-        """Split point cloud into continuous segments based on distance gaps."""
+    def _split_on_gaps(self, points: np.ndarray) -> List[np.ndarray]:
         if len(points) < 2:
-            return [(points, 0)]
+            return [points]
 
-        # Compute distances between consecutive points
         dists = np.linalg.norm(points[1:] - points[:-1], axis=1)
-
-        # Find gap indices (where distance exceeds threshold)
         gap_indices = np.where(dists > self.max_gap)[0]
 
-        # Split into continuous segments
         segments = []
         start_idx = 0
 
         for gap_idx in gap_indices:
-            end_idx = gap_idx + 1  # Include the point before the gap
+            end_idx = gap_idx + 1
             if end_idx - start_idx >= self.min_points:
-                segments.append((points[start_idx:end_idx], start_idx))
+                segments.append(points[start_idx:end_idx])
             start_idx = end_idx
 
-        # Add final segment
         if len(points) - start_idx >= self.min_points:
-            segments.append((points[start_idx:], start_idx))
+            segments.append(points[start_idx:])
 
-        return segments if segments else [(points, 0)]
+        return segments if segments else [points]
 
-    def _find_breakpoints(self, points: np.ndarray) -> List[int]:
-        """
-        Detect breakpoints (corners) based on angle changes between consecutive points.
-        Uses a sliding window to reduce noise sensitivity.
-
-        Returns:
-            List of indices where sharp angle changes occur
-        """
-        if len(points) < 3:
+    def _split_segment_recursive(
+        self, points: np.ndarray, start_idx: int, end_idx: int
+    ) -> List[Tuple[int, int]]:
+        """Recursively split one ordered segment by max residual to an endpoint line."""
+        if end_idx - start_idx + 1 < self.min_points:
             return []
 
-        breakpoints = [0]  # Always start at beginning
+        segment_points = points[start_idx:end_idx + 1]
+        line_params = self._fit_line_endpoints(segment_points)
+        residuals = np.array([self._point_to_line_distance(p, line_params) for p in segment_points])
 
-        # Use a window to smooth out noise (look ahead/behind more points)
-        window = 3  # Look at 3 points back and 3 points forward
+        split_local_idx = int(np.argmax(residuals))
+        max_residual = float(residuals[split_local_idx])
+        split_idx = start_idx + split_local_idx
 
-        for i in range(window, len(points) - window):
-            # Vector from point (i-window) to i
-            v1 = points[i] - points[i - window]
-            # Vector from point i to (i+window)
-            v2 = points[i + window] - points[i]
+        if max_residual <= self.split_threshold:
+            return [(start_idx, end_idx)]
 
-            # Skip if vectors are too small (noisy/close points)
-            len_v1 = np.linalg.norm(v1)
-            len_v2 = np.linalg.norm(v2)
+        # Do not split at segment boundaries.
+        if split_idx <= start_idx or split_idx >= end_idx:
+            return [(start_idx, end_idx)]
 
-            if len_v1 < 0.05 or len_v2 < 0.05:
+        left_count = split_idx - start_idx + 1
+        right_count = end_idx - split_idx
+        if left_count < self.min_points or right_count < self.min_points:
+            return [(start_idx, end_idx)]
+
+        left_intervals = self._split_segment_recursive(points, start_idx, split_idx)
+        right_intervals = self._split_segment_recursive(points, split_idx + 1, end_idx)
+
+        if len(left_intervals) == 0 or len(right_intervals) == 0:
+            return [(start_idx, end_idx)]
+
+        return left_intervals + right_intervals
+
+    def _build_segments_from_intervals(
+        self, points: np.ndarray, intervals: List[Tuple[int, int]]
+    ) -> List[Dict]:
+        """Convert split intervals to line segment dictionaries."""
+        segments = []
+        for start_idx, end_idx in intervals:
+            if end_idx - start_idx + 1 < self.min_points:
                 continue
 
-            # Normalize
-            v1 = v1 / len_v1
-            v2 = v2 / len_v2
-
-            # Compute angle between vectors
-            dot = np.clip(np.dot(v1, v2), -1.0, 1.0)
-            angle = np.arccos(dot)
-
-            # If angle change exceeds threshold, mark as breakpoint (corner)
-            if angle > self.corner_angle:
-                # Avoid duplicates too close together
-                if not breakpoints or (i - breakpoints[-1]) > window:
-                    breakpoints.append(i)
-
-        breakpoints.append(len(points) - 1)  # Always end at last point
-
-        return breakpoints
-
-    def _fit_lines_at_breakpoints(self, points: np.ndarray, breakpoints: List[int]) -> Tuple[List[Dict], List[Dict]]:
-        """
-        Fit line segments between breakpoints and extract corner features.
-
-        Returns:
-            (lines, corners)
-        """
-        lines = []
-        corners = []
-
-        for i in range(len(breakpoints) - 1):
-            start_idx = breakpoints[i]
-            end_idx = breakpoints[i + 1]
-
-            # Extract points for this segment
             segment_points = points[start_idx:end_idx + 1]
+            line = self._make_line_dict(segment_points)
+            if line is not None:
+                segments.append(line)
 
-            if len(segment_points) < self.min_points:
+        return segments
+
+    def _merge_adjacent_segments(self, segments: List[Dict]) -> List[Dict]:
+        """Merge neighboring segments if geometry and fit criteria are satisfied."""
+        if len(segments) <= 1:
+            return segments
+
+        merged = [segments[0]]
+        for current in segments[1:]:
+            previous = merged[-1]
+            if self._should_merge_segments(previous, current):
+                merged_points = np.vstack([previous['points'], current['points']])
+                merged_line = self._make_line_dict(merged_points)
+                if merged_line is not None:
+                    merged[-1] = merged_line
+                else:
+                    merged.append(current)
+            else:
+                merged.append(current)
+
+        return merged
+
+    def _should_merge_segments(self, left: Dict, right: Dict) -> bool:
+        angle = self._acute_angle_between_directions(left['direction'], right['direction'])
+        if angle > self.merge_angle:
+            return False
+
+        endpoint_gap = np.linalg.norm(left['points'][-1] - right['points'][0])
+        if endpoint_gap > self.max_gap:
+            return False
+
+        merged_points = np.vstack([left['points'], right['points']])
+        merged_params = self._fit_line_endpoints(merged_points)
+        max_dist = max(self._point_to_line_distance(p, merged_params) for p in merged_points)
+        return max_dist <= self.merge_threshold
+
+    def _extract_corners_from_adjacent_lines(self, lines: List[Dict]) -> List[Dict]:
+        """Create corners from adjacent merged lines."""
+        corners = []
+        for i in range(len(lines) - 1):
+            left = lines[i]
+            right = lines[i + 1]
+
+            angle = self._acute_angle_between_directions(left['direction'], right['direction'])
+            if angle < self.corner_angle:
                 continue
 
-            # Fit line using PCA
-            line_params = self._fit_line_pca(segment_points)
+            corner_pos = self._compute_line_intersection(left, right)
+            if corner_pos is None:
+                corner_pos = 0.5 * (left['points'][-1] + right['points'][0])
 
-            # Validate line fit quality
-            max_dist = max([self._point_to_line_distance(p, line_params) for p in segment_points])
-            if max_dist > self.fit_threshold:
-                # Line doesn't fit well - skip or recursively split
-                continue
+            left_neighbors = left['points'][-self.corner_neighbor_range:]
+            right_neighbors = right['points'][:self.corner_neighbor_range]
+            neighbors = np.vstack([left_neighbors, right_neighbors])
 
-            # Check minimum length
-            length = np.linalg.norm(segment_points[-1] - segment_points[0])
-            if length < self.min_length:
-                continue
-
-            # Store line
-            lines.append({
-                'points': segment_points,
-                'length': length,
-                'num_points': len(segment_points),
-                'centroid': line_params['centroid'],
-                'direction': line_params['direction']
+            corners.append({
+                'position': corner_pos,
+                'sharpness': np.degrees(angle),
+                'neighbors': neighbors
             })
 
-            # Extract corner at breakpoint (except at start/end of scan)
-            if i > 0:  # Not the first segment
-                corner_idx = breakpoints[i]
-                corner_pos = points[corner_idx]
+        return corners
 
-                # Get neighboring points for covariance calculation
-                neighbor_range = 6
-                neighbor_start = max(0, corner_idx - neighbor_range)
-                neighbor_end = min(len(points), corner_idx + neighbor_range + 1)
-                neighbors = points[neighbor_start:neighbor_end]
+    def _make_line_dict(self, points: np.ndarray) -> Optional[Dict]:
+        """Build validated line dictionary from ordered points."""
+        if len(points) < self.min_points:
+            return None
 
-                # Compute sharpness (angle between adjacent segments)
-                if i < len(breakpoints) - 1:
-                    prev_dir = lines[-1]['direction'] if lines else np.array([1.0, 0.0])
-                    next_segment_points = points[breakpoints[i]:breakpoints[i+1]+1]
-                    if len(next_segment_points) >= 2:
-                        next_params = self._fit_line_pca(next_segment_points)
-                        next_dir = next_params['direction']
+        length = np.linalg.norm(points[-1] - points[0])
+        if length < self.min_length:
+            return None
 
-                        dot = np.clip(np.dot(prev_dir, next_dir), -1.0, 1.0)
-                        angle = np.arccos(np.abs(dot))
-                        sharpness = np.degrees(angle)
-                    else:
-                        sharpness = 45.0
-                else:
-                    sharpness = 45.0
+        line_params = self._fit_line_endpoints(points)
+        rho, alpha = self._convert_line_to_hessian(points)
+        return {
+            'points': points,
+            'length': length,
+            'num_points': len(points),
+            'centroid': line_params['centroid'],
+            'direction': line_params['direction'],
+            'rho': rho,
+            'alpha': alpha
+        }
 
-                corners.append({
-                    'position': corner_pos,
-                    'sharpness': sharpness,
-                    'neighbors': neighbors
-                })
+    def _compute_line_intersection(self, line_a: Dict, line_b: Dict) -> Optional[np.ndarray]:
+        """Compute intersection point between two lines (if not near-parallel)."""
+        if 'rho' in line_a and 'alpha' in line_a:
+            rho_a = float(line_a['rho'])
+            alpha_a = float(line_a['alpha'])
+        else:
+            rho_a, alpha_a = self._convert_line_to_hessian(line_a['points'])
 
-        return lines, corners
+        if 'rho' in line_b and 'alpha' in line_b:
+            rho_b = float(line_b['rho'])
+            alpha_b = float(line_b['alpha'])
+        else:
+            rho_b, alpha_b = self._convert_line_to_hessian(line_b['points'])
 
-    def _pca_direction(self, points: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        
+        A = np.array([
+            [np.cos(alpha_a), np.sin(alpha_a)],
+            [np.cos(alpha_b), np.sin(alpha_b)]
+        ])
+        b = np.array([rho_a, rho_b])
+
+        det = np.linalg.det(A)
+        if abs(det) < 1e-6:
+            return None
+
+        return np.linalg.solve(A, b)
+
+    def _acute_angle_between_directions(self, dir_a: np.ndarray, dir_b: np.ndarray) -> float:
+        """Return acute angle between two direction vectors in radians."""
+        dot = np.clip(np.dot(dir_a, dir_b), -1.0, 1.0)
+        return np.arccos(np.abs(dot))
+
+    def _fit_line_endpoints(self, points: np.ndarray) -> Dict:
+       
         if len(points) < 2:
-            return np.zeros(2), np.array([1.0, 0.0]), np.array([0.0, 0.0])
-
-        pca = PCA(n_components=2)
-        pca.fit(points)
-        centroid = pca.mean_
-        direction = pca.components_[0]
-        eigenvalues = pca.explained_variance_
-
-        return centroid, direction, eigenvalues
-
-    def _fit_line_pca(self, points: np.ndarray) -> Dict:
-        centroid, direction, eigenvalues = self._pca_direction(points)
+            return {
+                'centroid': np.zeros(2),
+                'direction': np.array([1.0, 0.0]),
+                'point_on_line': np.zeros(2)
+            }
+        start, centroid, direction, _ = self._endpoint_line_primitives(points)
 
         return {
             'centroid': centroid,
             'direction': direction,
-            'variance': float(eigenvalues[0]) if len(eigenvalues) > 0 else 0.0
+            'point_on_line': start
         }
 
-    def _point_to_line_distance(self, point: np.ndarray, line_params: Dict) -> float:
+    def _endpoint_line_primitives(
+        self, points: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
         
-        centroid = line_params['centroid']
+        start = points[0]
+        end = points[-1]
+        delta = end - start
+        norm = np.linalg.norm(delta)
+
+        if norm < 1e-9:
+            # Defensive fallback for degenerate intervals.
+            dists = np.linalg.norm(points - start, axis=1)
+            far_idx = int(np.argmax(dists))
+            delta = points[far_idx] - start
+            norm = np.linalg.norm(delta)
+            if norm < 1e-9:
+                centroid = 0.5 * (start + end)
+                return start, centroid, np.array([1.0, 0.0]), False
+
+        centroid = 0.5 * (start + end)
+        direction = delta / norm
+        return start, centroid, direction, True
+
+    def _point_to_line_distance(self, point: np.ndarray, line_params: Dict) -> float:
+        point_on_line = line_params.get('point_on_line', line_params['centroid'])
         direction = line_params['direction']
 
-        # Vector from centroid to point
-        v = point - centroid
+        # Vector from line anchor to point
+        v = point - point_on_line
 
         # Project onto line
         proj_length = np.dot(v, direction)
@@ -329,13 +361,17 @@ class LandmarkFeatureExtractor:
         return np.linalg.norm(perp)
 
     def _convert_line_to_hessian(self, points: np.ndarray) -> Tuple[float, float]:
-        centroid, direction, _ = self._pca_direction(points)
+        if len(points) < 2:
+            return 0.0, 0.0
+        _, line_point, direction, valid_direction = self._endpoint_line_primitives(points)
+        if not valid_direction:
+            return 0.0, 0.0
 
         # Normal to line (perpendicular, 90° rotation)
         normal = np.array([-direction[1], direction[0]])
 
         # Distance from origin to line along normal
-        rho = np.dot(centroid, normal)
+        rho = np.dot(line_point, normal)
 
         # Ensure rho is positive (flip normal if needed)
         if rho < 0:
@@ -354,7 +390,10 @@ class LandmarkFeatureExtractor:
         if len(points) < 2:
             return np.eye(2) * 0.1
 
-        rho, alpha = self._convert_line_to_hessian(points)
+        if 'alpha' in line:
+            alpha = float(line['alpha'])
+        else:
+            _, alpha = self._convert_line_to_hessian(points)
 
         cos_a = np.cos(alpha)
         sin_a = np.sin(alpha)
@@ -391,7 +430,6 @@ class LandmarkFeatureExtractor:
             sigma2 = self.lidar_sigma ** 2
             return np.eye(2) * sigma2 * 10  
 
-        corner_pos = corner['position']
         n_points = len(neighbors)
 
         pca = PCA(n_components=2)

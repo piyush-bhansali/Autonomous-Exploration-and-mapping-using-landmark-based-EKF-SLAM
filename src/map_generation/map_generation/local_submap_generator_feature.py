@@ -149,19 +149,26 @@ class LocalSubmapGeneratorFeature(Node):
             frame_id='map'
         )
 
+    def _publish_tf_callback(self):
+        
+        if self.current_pose is None:
+            return
+        
+        self._publish_map_to_odom_tf()
+
     def _publish_map_to_odom_tf(self):
         
         if self.current_pose is None:
             self.get_logger().warn(
                 'Cannot publish map->odom TF: EKF not initialized',
-                throttle_duration_sec=2.0
+                throttle_duration_sec=5.0
             )
             return
 
         if self.latest_odom_pose is None or self.latest_odom_timestamp is None:
             self.get_logger().warn(
                 'Cannot publish map->odom TF: No odometry received yet',
-                throttle_duration_sec=2.0
+                throttle_duration_sec=5.0
             )
             return
 
@@ -199,13 +206,6 @@ class LocalSubmapGeneratorFeature(Node):
         t.transform.rotation.w = qw
 
         self.tf_broadcaster.sendTransform(t)
-
-    def _publish_tf_callback(self):
-        
-        if self.current_pose is None:
-            return
-        
-        self._publish_map_to_odom_tf()
 
     def _publish_ekf_pose(self):
        
@@ -271,11 +271,6 @@ class LocalSubmapGeneratorFeature(Node):
 
             self.slam_manager.initialize_pose(x_odom, y_odom, theta_odom)
             self.last_odom_pose = current_odom_pose
-
-            self.get_logger().info(
-                f'EKF SLAM initialized at ({x_odom:.3f}, {y_odom:.3f}, {np.degrees(theta_odom):.1f}°) '
-                f'in {msg.header.frame_id}'
-            )
 
             state = self.slam_manager.get_robot_pose()
             qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
@@ -392,12 +387,10 @@ class LocalSubmapGeneratorFeature(Node):
         self._process_scan_feature_mode(msg)
 
     def _process_scan_feature_mode(self, msg):
-        """Process scan in Feature mode: delegate to FeatureSLAMManager."""
-
+       
         if not self.slam_manager.is_initialized():
             return
 
-        # Process scan through SLAM manager
         stats = self.slam_manager.process_scan(msg)
 
         if stats['num_features'] == 0:
