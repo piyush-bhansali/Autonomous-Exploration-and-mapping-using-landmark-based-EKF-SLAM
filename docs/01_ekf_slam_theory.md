@@ -3,8 +3,7 @@
 > **⚠️ LEGACY DOCUMENTATION NOTICE**
 > This document contains detailed mathematical derivations for EKF-SLAM components. It was originally written for a hybrid ICP-landmark SLAM system. The thesis has since been refocused as a **comparative study between ICP-based and Feature-based SLAM** (see updated documentation).
 >
-> **Primary Documentation (Updated for Comparative Study):**
-> - `methodology_icp_mapping.md` — Complete ICP-based SLAM methodology
+> **Primary Documentation:**
 > - `methodology_feature_mapping.md` — Complete feature-based SLAM methodology
 > - `literature_review.md` — Academic background for comparative study
 > - `00_system_overview.md` — System architecture overview
@@ -903,8 +902,8 @@ def compute_icp_covariance(source_points, target_points, transform, lidar_sigma=
 **Usage in EKF Update:**
 
 ```python
-# After ICP alignment
-points_corrected, pose_correction = scan_to_map_icp(scan, accumulated_map)
+# After submap ICP alignment/correction step
+pose_correction = get_submap_icp_correction(...)
 
 if pose_correction is not None:
     # Extract pose correction
@@ -1622,8 +1621,8 @@ For each timestep t:
 | **Data Association** | `data_association.py` | `associate_landmarks()` |
 | **Landmark Update** | `ekf_slam.py` | `update_landmark_observation()` |
 | **Landmark Initialization** | `ekf_slam.py` | `add_landmark()` |
-| **ICP Alignment** | `mapping_utils.py` | `scan_to_map_icp()` |
-| **ICP Covariance** | `mapping_utils.py` | (inline, lines 87-112) |
+| **Submap ICP Alignment** | `submap_stitcher.py` | `align_submap_with_icp()` |
+| **Submap ICP Covariance** | `submap_stitcher.py` | `_compute_icp_covariance()` |
 | **ICP Update** | `ekf_slam.py` | `update()` |
 | **Submap ICP** | `submap_stitcher.py` | `align_submap_with_icp()` |
 | **Submap Covariance** | `submap_stitcher.py` | `_compute_icp_covariance()` |

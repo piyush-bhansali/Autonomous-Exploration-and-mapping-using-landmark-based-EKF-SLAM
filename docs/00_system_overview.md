@@ -1,16 +1,14 @@
-# Comparative Study: ICP-Based vs Feature-Based SLAM
+# Feature-Based SLAM with ICP Submap Stitching
 
 ## Abstract
 
-This document provides a comprehensive overview of a **comparative study** between two SLAM (Simultaneous Localization and Mapping) approaches for autonomous mobile robots: **ICP-based mapping** and **Feature-based EKF-SLAM**. Both systems are evaluated under identical frontier-based autonomous exploration conditions to provide a rigorous, controlled comparison of their performance, accuracy, and uncertainty characteristics.
-
-The study aims to quantify the trade-offs between dense scan-matching methods (ICP) and sparse landmark-based methods (EKF-SLAM with geometric features) in structured indoor environments.
+This document provides a comprehensive overview of the production mapping stack used in this repository: **feature-based EKF-SLAM** with **ICP-based submap-to-global stitching**. It summarizes architecture, data flow, uncertainty handling, and evaluation metrics used in structured indoor environments.
 
 ## 1. Thesis Objective
 
 ### 1.1 Research Question
 
-**How do ICP-based and feature-based SLAM approaches compare in terms of:**
+**How does feature-based EKF-SLAM with ICP-assisted submap stitching perform in terms of:**
 - Localization accuracy
 - Map quality and completeness
 - Computational efficiency
@@ -25,24 +23,11 @@ Both approaches are implemented within the same ROS 2 framework and evaluated us
 - **Same test environments**: Structured indoor spaces (simulated and real-world)
 - **Consistent evaluation metrics**: Pose error, map accuracy, computation time, uncertainty metrics
 
-## 2. System Modes
+## 2. System Architecture
 
-The implemented system supports two distinct operational modes:
+The runtime system now uses a single mapping pipeline:
 
-### 2.1 Mode 1: ICP-Based Mapping
-
-**Approach:** Dense scan matching with odometry-based prediction
-
-**Core Components:**
-- Odometry-based motion prediction with EKF (pose-only, no landmarks)
-- Scan-to-submap ICP alignment
-- Hessian-based uncertainty quantification (Censi 2007)
-- Submap accumulation and global map stitching
-- Point cloud representation
-
-**See:** `docs/methodology_icp_mapping.md` for complete details
-
-### 2.2 Mode 2: Feature-Based Mapping
+### 2.1 Feature-Based Mapping (Runtime)
 
 **Approach:** Sparse landmark tracking with EKF-SLAM
 
@@ -53,13 +38,13 @@ The implemented system supports two distinct operational modes:
 - Fisher Information Matrix uncertainty quantification
 - Feature map representation with geometric primitives
 
-**See:** `docs/methodology_feature_mapping.md` for complete details
+**See:** `docs/methodology_feature_mapping.md` for complete details.
 
 ## 3. Common Framework
 
 ### 3.1 Shared Components
 
-Both approaches share:
+Core system components:
 
 | Component | Purpose | Implementation |
 |-----------|---------|----------------|
@@ -67,17 +52,14 @@ Both approaches share:
 | **Transform Management** | Coordinate frame handling | `transform_utils.py` |
 | **Point Cloud Processing** | Scan conversion and filtering | `mapping_utils.py` |
 | **Data Logging** | CSV output for evaluation | `evaluation_utils.py` |
-| **Ground Truth Interface** | Simulation pose subscription | `local_submap_generator.py` |
+| **Ground Truth Interface** | Simulation pose subscription | `local_submap_generator_feature.py` |
 
 ### 3.2 ROS 2 Integration
 
-**Main Node:** `LocalSubmapGenerator`
+**Main Node:** `LocalSubmapGeneratorFeature`
 
-**Operating Mode Selection:**
-```python
-# Set in launch file or via parameter
-self.declare_parameter('mode', 'feature')  # or 'icp'
-```
+**Runtime Selection:**
+- Feature mode is the only supported mapping runtime mode.
 
 **Common Subscriptions:**
 - `/tb3_1/scan` (LaserScan) — LiDAR measurements
@@ -89,12 +71,12 @@ self.declare_parameter('mode', 'feature')  # or 'icp'
 - `/tb3_1/ekf_path` (Path) — Trajectory history
 - `/tb3_1/global_map` (PointCloud2) — Global map
 
-**Mode-Specific Publications:**
-- **Feature mode:** `/tb3_1/scan_features` (MarkerArray) — Detected landmarks
-- **ICP mode:** `/tb3_1/local_submap` (PointCloud2) — Current submap
+**Additional Publications:**
+- `/tb3_1/scan_features` (MarkerArray) — Detected landmarks
+- `/tb3_1/current_submap` (PointCloud2) — Current submap
 
 **TF Broadcast:**
-- `map → tb3_1/odom` — Corrected transform (both modes)
+- `map → tb3_1/odom` — Corrected transform (feature pipeline)
 
 ## 4. Coordinate Frames
 
@@ -132,7 +114,7 @@ $$
 ^{map}\mathbf{T}_{base} = \, ^{map}\mathbf{T}_{odom} \times \, ^{odom}\mathbf{T}_{base}
 $$
 
-## 5. Comparative Analysis Framework
+## 5. Evaluation Framework
 
 ### 5.1 Evaluation Metrics
 
@@ -147,7 +129,7 @@ $$
 
 ### 5.2 Data Collection
 
-**Logged Data (Both Modes):**
+**Logged Data:**
 
 | File | Content | Purpose |
 |------|---------|---------|
@@ -156,48 +138,13 @@ $$
 | `global_map.pcd` | Final point cloud map | Visual comparison |
 | `computation_time.csv` | Per-scan processing time | Efficiency evaluation |
 
-**Feature Mode Additional Data:**
+**Feature Pipeline Additional Data:**
 - `landmark_count.csv` — Number of landmarks over time
 - `feature_matches.csv` — Data association statistics
 
-## 6. Architecture Comparison
+## 6. Mapping Architecture
 
-### 6.1 ICP-Based Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  ICP-Based SLAM Pipeline                     │
-│                                                               │
-│  ┌──────────────┐      ┌──────────────┐                     │
-│  │   LiDAR      │────>│  Scan-to-Map  │                     │
-│  │   Scans      │      │     ICP       │                     │
-│  └──────────────┘      └──────────────┘                     │
-│         │                      │                              │
-│         │                      ↓                              │
-│         │           ┌──────────────────┐                     │
-│         │           │  Pose-Only EKF   │                     │
-│         │           │  (No Landmarks)  │                     │
-│         │           └──────────────────┘                     │
-│         ↓                      │                              │
-│  ┌──────────────┐             │                              │
-│  │   Submap     │             │                              │
-│  │ Accumulation │<────────────┘                              │
-│  └──────────────┘                                            │
-│         │                                                     │
-│         ↓                                                     │
-│  ┌──────────────┐                                            │
-│  │   Global     │                                            │
-│  │   Stitching  │────> Dense Point Cloud Map                │
-│  └──────────────┘                                            │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Key Classes:**
-- `LandmarkEKFSLAM` (used for pose-only estimation)
-- `scan_to_map_icp()` in `mapping_utils.py`
-- Submap stitching logic in `local_submap_generator.py`
-
-### 6.2 Feature-Based Architecture
+### 6.1 Feature-Based Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -242,19 +189,7 @@ $$
 
 ## 7. Performance Characteristics
 
-### 7.1 ICP-Based Approach
-
-| Aspect | Characteristic | Notes |
-|--------|---------------|-------|
-| **Representation** | Dense point cloud | Complete environment coverage |
-| **Computational Complexity** | O(N log M) per scan | N = scan points, M = map points |
-| **Memory** | Grows with map size | Mitigated by voxel filtering |
-| **Accuracy** | High in short-term | Drift accumulation without loop closure |
-| **Uncertainty** | From Hessian (Censi) | Reflects ICP alignment quality |
-| **Robustness** | Works in all environments | No feature dependency |
-| **Map Quality** | Dense, visually complete | Good for visualization |
-
-### 7.2 Feature-Based Approach
+### 7.1 Feature-Based Approach
 
 | Aspect | Characteristic | Notes |
 |--------|---------------|-------|
@@ -270,7 +205,7 @@ $$
 
 ### 8.1 Frontier-Based Exploration
 
-Both SLAM modes use the same frontier-based autonomous navigation:
+The mapping pipeline uses the same frontier-based autonomous navigation stack:
 
 **Algorithm:**
 1. Detect frontiers (boundaries between known free space and unknown space)
@@ -303,14 +238,12 @@ Both SLAM modes use the same frontier-based autonomous navigation:
 
 | Document | Purpose |
 |----------|---------|
-| **00_system_overview.md** (this file) | High-level comparative study overview |
+| **00_system_overview.md** (this file) | High-level system overview |
 | **literature_review.md** | Academic background and related work |
-| **methodology_icp_mapping.md** | Complete ICP-based approach documentation |
 | **methodology_feature_mapping.md** | Complete feature-based approach documentation |
 | **01_ekf_slam_theory.md** | Mathematical derivations for EKF-SLAM |
 | **02_landmark_features.md** | Feature extraction algorithms |
 | **03_data_association.md** | Data association theory |
-| **04_icp_alignment.md** | ICP algorithm details |
 | **05_submap_management.md** | Submap creation and stitching |
 | **06_uncertainty_quantification.md** | Uncertainty metrics and theory |
 | **07_coordinate_frames.md** | Transform conventions |
@@ -321,42 +254,32 @@ Both SLAM modes use the same frontier-based autonomous navigation:
 1. Setup
    ├─> Configure simulation environment (Gazebo)
    ├─> Launch exploration system
-   └─> Select SLAM mode (ICP or Feature)
+   └─> Start feature-based mapping pipeline
 
-2. Data Collection (Mode 1: ICP)
-   ├─> Run autonomous exploration
-   ├─> Log pose errors, map, timing
-   └─> Save final global map
-
-3. Data Collection (Mode 2: Feature)
+2. Data Collection
    ├─> Run same exploration scenario
    ├─> Log pose errors, landmarks, timing
    └─> Save final feature map + point cloud
 
-4. Analysis
-   ├─> Compute ATE for both modes
+3. Analysis
+   ├─> Compute ATE
    ├─> Compare map quality (cloud-to-cloud)
    ├─> Analyze uncertainty calibration
    ├─> Compare computational efficiency
    └─> Statistical significance testing
 
-5. Visualization
+4. Visualization
    ├─> Plot trajectory errors
    ├─> Render final maps
-   ├─> Generate comparison figures
+   ├─> Generate performance figures
    └─> Create thesis figures
 ```
 
-## 10. Key Differences Summary
+## 10. Pipeline Summary
 
 ### 10.1 State Representation
 
-**ICP-Based:**
-$$
-\mathbf{x} = [x, y, \theta]^T \quad \text{(robot pose only)}
-$$
-
-**Feature-Based:**
+**Feature-Based EKF-SLAM:**
 $$
 \mathbf{x} = \begin{bmatrix}
 x_r, y_r, \theta_r \\
@@ -369,80 +292,64 @@ $$
 
 ### 10.2 Measurement Update
 
-**ICP-Based:**
-- Measurement: Pose correction from scan-to-submap ICP
-- Observation model: Direct pose measurement
-- Update frequency: Every scan (when ICP converges)
-
 **Feature-Based:**
 - Measurement: Landmark observations (ρ, α) or (x, y)
 - Observation model: Geometric projection from robot to landmark
 - Update frequency: Every landmark re-observation
+- Additional pose correction: submap ICP correction during submap stitching
 
 ### 10.3 Uncertainty Source
-
-**ICP-Based:**
-- Hessian of ICP residuals (Censi 2007)
-- Reflects point cloud alignment quality
-- Independent per scan
 
 **Feature-Based:**
 - Fisher Information Matrix from feature geometry
 - Propagated through EKF covariance
 - Correlated across landmarks
+- ICP stitching covariance is used as pose-correction uncertainty
 
 ## 11. Expected Outcomes
 
 ### 11.1 Hypotheses
 
 **H1: Accuracy**
-- ICP-based: Higher short-term accuracy, potential long-term drift
-- Feature-based: Consistent accuracy with proper data association
+- Feature-based: Consistent long-term accuracy with robust data association
+- ICP submap stitching: Improves global consistency across submaps
 
 **H2: Computational Efficiency**
-- ICP-based: Higher per-scan computation (dense matching)
-- Feature-based: Lower per-scan, but grows with landmark count
+- Feature extraction/association dominates per-scan cost
+- Landmark count drives EKF update growth over time
 
 **H3: Map Quality**
-- ICP-based: Denser, more complete visual maps
-- Feature-based: Sparser, geometrically interpretable maps
+- Geometrically interpretable wall/corner map with interpolated point cloud output
 
 **H4: Uncertainty Calibration**
-- Both approaches: Compare predicted uncertainty to actual error
-- Feature-based: Expected better calibration (full covariance)
+- Predicted EKF uncertainty should track measured trajectory error
+- Submap confidence should improve with repeated landmark observations
 
 ### 11.2 Contributions
 
 This comparative study provides:
-- ✅ Rigorous controlled comparison under identical exploration
+- ✅ Rigorous controlled evaluation under identical exploration
 - ✅ Quantitative evaluation across multiple metrics
 - ✅ Open-source implementation with reproducible results
-- ✅ Comprehensive documentation of both approaches
+- ✅ Comprehensive documentation of the deployed mapping pipeline
 - ✅ Uncertainty-aware mapping with quantitative confidence
 
 ## 12. Implementation Status
 
 ### 12.1 Completed Features
 
-**Both Modes:**
+**Feature Pipeline:**
 - ✅ ROS 2 integration with TF2
 - ✅ Ground truth comparison logging
 - ✅ Frontier-based exploration interface
 - ✅ Point cloud visualization
-
-**ICP Mode:**
-- ✅ Scan-to-submap ICP with Open3D
-- ✅ Hessian-based covariance estimation
-- ✅ Submap accumulation and stitching
-- ✅ Pose-only EKF
-
-**Feature Mode:**
 - ✅ Wall and corner extraction
 - ✅ Data association with segment overlap validation
 - ✅ Full EKF-SLAM with Joseph form update
 - ✅ Feature map with wall extension
 - ✅ Fisher Information covariance
 - ✅ Landmark pruning
+- ✅ ICP-based submap stitching and pose correction
 
 ### 12.2 Recent Improvements
 
@@ -484,7 +391,7 @@ This comparative study provides:
 ---
 
 **Next Steps:**
-1. Review methodology documents: `methodology_icp_mapping.md` and `methodology_feature_mapping.md`
-2. Run experiments with both modes under identical exploration
+1. Review methodology document: `methodology_feature_mapping.md`
+2. Run experiments across identical exploration scenarios
 3. Analyze results using evaluation scripts
 4. Generate thesis figures and statistical comparisons

@@ -35,13 +35,10 @@ class FeatureSLAMManager:
         # Initialize feature extractor
         self.feature_extractor = LandmarkFeatureExtractor(
             min_points_per_line=min_points_per_line,
+            line_fit_threshold=line_fit_threshold,
             min_line_length=min_line_length,
-            split_residual_threshold=line_fit_threshold,
-            merge_residual_threshold=line_fit_threshold,
-            merge_angle_threshold_deg=12.0,
             corner_angle_threshold=corner_angle_threshold,
-            max_gap=max_gap,
-            corner_neighbor_range=6
+            max_gap=max_gap
         )
 
         # Initialize feature map
@@ -56,7 +53,7 @@ class FeatureSLAMManager:
         self.total_scans_processed = 0
 
     def initialize_pose(self, x: float, y: float, theta: float):
-        
+        """Initialize robot pose in EKF."""
         self.ekf.initialize(x, y, theta)
         self.ekf_initialized = True
 
@@ -71,8 +68,6 @@ class FeatureSLAMManager:
        
         if not self.ekf_initialized:
             return self._empty_stats()
-
-        self.ekf.current_scan_number += 1
 
         # Extract features from scan (in robot frame)
         observed_features = self.feature_extractor.extract_features(scan_msg)

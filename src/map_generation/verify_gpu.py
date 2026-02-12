@@ -169,7 +169,7 @@ def main():
 
     if all_passed:
         print("\n🎉 All checks passed! GPU acceleration is ready to use.")
-        print("\nYour local_submap_generator will automatically use GPU acceleration.")
+        print("\nYour feature-based submap generator will automatically use GPU acceleration for submap stitching.")
         print("You should see messages like:")
         print("  ✓ GPU acceleration enabled: CUDA:0")
         print("  Submap 0: 5000 → 1200 points (GPU-processed)")

@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Transform utilities for SLAM frame computations.
 
-Provides helper functions for computing transforms between map, odom, and robot frames.
-"""
 
 import numpy as np
 from sensor_msgs.msg import PointCloud2, PointField
@@ -46,17 +42,17 @@ def compute_map_to_odom_transform(ekf_state, odom_pose):
     x_odom, y_odom, theta_odom = odom_pose
 
     # Build transformation matrices
-    T_map_from_base = pose_to_transform_matrix(x_map, y_map, theta_map)
-    T_odom_from_base = pose_to_transform_matrix(x_odom, y_odom, theta_odom)
+    T_map_to_base = pose_to_transform_matrix(x_map, y_map, theta_map)
+    T_odom_to_base = pose_to_transform_matrix(x_odom, y_odom, theta_odom)
 
     # Compute inverse: T_base_to_odom
-    T_base_from_odom = np.linalg.inv(T_odom_from_base)
+    T_base_to_odom = np.linalg.inv(T_odom_to_base)
 
     # Compute map → odom transform
-    T_map_from_odom =  T_map_from_base @ T_base_from_odom
+    T_map_to_odom = T_map_to_base @ T_base_to_odom
 
     # Extract pose from transform
-    x_correction, y_correction, theta_correction = transform_matrix_to_pose(T_map_from_odom)
+    x_correction, y_correction, theta_correction = transform_matrix_to_pose(T_map_to_odom)
 
     return (x_correction, y_correction, theta_correction)
 

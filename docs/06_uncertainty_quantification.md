@@ -1,6 +1,6 @@
 # Uncertainty Quantification and Map Confidence
 
-> **Note:** This document describes uncertainty quantification theory applicable to **both ICP-based and Feature-based mapping modes**. For complete system context, see `methodology_icp_mapping.md` and `methodology_feature_mapping.md`.
+> **Note:** This document describes uncertainty quantification for the **feature-based mapping pipeline** (including ICP-based submap stitching corrections).
 
 ## Table of Contents
 1. [Introduction](#1-introduction)

@@ -1,6 +1,6 @@
 # Submap Management and Global Map Construction
 
-> **Note:** This document describes submap management concepts applicable to **both ICP-based and Feature-based mapping modes**. For complete system context, see `methodology_icp_mapping.md` and `methodology_feature_mapping.md`.
+> **Note:** This document describes submap management in the **feature-based mapping pipeline**, where ICP is used for submap-to-global stitching.
 
 ## Table of Contents
 1. [Introduction](#1-introduction)
@@ -337,9 +337,10 @@ class SubmapManager:
         if self.submap_start_pose is None:
             self.submap_start_pose = current_pose
 
-        # Transform to submap frame
-        relative_pose = compute_relative_pose(current_pose, self.submap_start_pose)
-        points_local = transform_points(scan_points, relative_pose)
+        # Transform to submap-local frame using start pose as local origin
+        points_local = transform_to_submap_local(
+            scan_points, current_pose, self.submap_start_pose
+        )
 
         self.current_submap_points.append(points_local)
         self.scan_count += 1
@@ -367,9 +368,9 @@ class SubmapManager:
 
 | Component | File | Class/Function |
 |-----------|------|---------------|
-| Submap management | `local_submap_generator.py` | `LocalSubmapGenerator` |
+| Submap management | `local_submap_generator_feature.py` | `LocalSubmapGeneratorFeature` |
 | Stitching | `submap_stitcher.py` | `SubmapStitcher` |
-| Transform utils | `mapping_utils.py` | `compute_relative_pose()` |
+| Transform utils | `transform_utils.py` | `quaternion_to_rotation_matrix()` |
 
 ---
 

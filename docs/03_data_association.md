@@ -809,4 +809,4 @@ where $n_{\text{obs}}$ is the number of times the landmark has been observed.
 
 ---
 
-**Next:** `04_icp_alignment.md` — ICP algorithm, convergence analysis, and integration with EKF
+**Next:** `05_submap_management.md` — Submap stitching workflow and ICP-assisted global integration

@@ -6,16 +6,32 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     TimerAction,
-    LogInfo
+    LogInfo,
+    OpaqueFunction
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
 
 def generate_launch_description():
+    def reject_unknown_launch_arguments(context):
+        allowed_args = {'world', 'enable_navigation', 'use_rviz'}
+        unknown_args = sorted(
+            key for key in context.launch_configurations.keys()
+            if key not in allowed_args
+        )
+
+        if unknown_args:
+            unknown_str = ', '.join(unknown_args)
+            raise RuntimeError(
+                f"Unsupported launch argument(s): {unknown_str}. "
+                "This launch file supports only: world, enable_navigation, use_rviz."
+            )
+        return []
+
     # ========================================================================
     # CONFIGURATION
     # ========================================================================
@@ -57,17 +73,10 @@ def generate_launch_description():
         description='Launch RViz visualization'
     )
 
-    mapping_mode_arg = DeclareLaunchArgument(
-        'mapping_mode',
-        default_value='icp',
-        description='Mapping mode: icp (scan-to-submap ICP) or feature (landmark-based)'
-    )
-
     # Configuration
     world_name = LaunchConfiguration('world')
     enable_navigation = LaunchConfiguration('enable_navigation')
     use_rviz = LaunchConfiguration('use_rviz')
-    mapping_mode = LaunchConfiguration('mapping_mode')
 
     # File paths
     world_file = PathJoinSubstitution([
@@ -223,21 +232,6 @@ def generate_launch_description():
             actions=[spawn_robot, robot_state_publisher, robot_bridge]
         )
 
-        submap_generator_icp = Node(
-            package='map_generation',
-            executable='local_submap_generator_icp',
-            name=f'{robot_name}_submap_generator',
-            output='screen',
-            parameters=[{
-                'use_sim_time': True,
-                'robot_name': robot_name,
-                'save_directory': './submaps'
-            }],
-            condition=launch.conditions.IfCondition(
-                PythonExpression(["'", mapping_mode, "' == 'icp'"])
-            )
-        )
-
         submap_generator_feature = Node(
             package='map_generation',
             executable='local_submap_generator_feature',
@@ -247,15 +241,12 @@ def generate_launch_description():
                 'use_sim_time': True,
                 'robot_name': robot_name,
                 'save_directory': './submaps'
-            }],
-            condition=launch.conditions.IfCondition(
-                PythonExpression(["'", mapping_mode, "' == 'feature'"])
-            )
+            }]
         )
 
         submap_generator_delayed = TimerAction(
             period=mapping_delay,
-            actions=[submap_generator_icp, submap_generator_feature]
+            actions=[submap_generator_feature]
         )
 
         navigation_node = Node(
@@ -299,7 +290,7 @@ def generate_launch_description():
         world_arg,
         enable_navigation_arg,
         use_rviz_arg,
-        mapping_mode_arg,
+        OpaqueFunction(function=reject_unknown_launch_arguments),
 
         # System startup
         LogInfo(msg='========================================'),
@@ -307,7 +298,7 @@ def generate_launch_description():
         LogInfo(msg='========================================'),
         LogInfo(msg=['World: ', world_name]),
         LogInfo(msg=f'Robots: {NUM_ROBOTS}'),
-        LogInfo(msg=['Mapping Mode: ', mapping_mode]),
+        LogInfo(msg='Mapping Mode: feature (with ICP submap stitching)'),
         LogInfo(msg='========================================'),
 
         # Core system

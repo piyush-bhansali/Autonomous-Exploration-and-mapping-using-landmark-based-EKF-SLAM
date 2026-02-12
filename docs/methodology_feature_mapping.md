@@ -862,12 +862,10 @@ FeatureSLAMManager
 ```python
 class LocalSubmapGenerator(Node):
     def __init__(self):
-        self.mapping_mode = 'feature'
         self.slam_manager = FeatureSLAMManager(...)
 
     def scan_callback(self, msg):
-        if self.mapping_mode == 'feature':
-            stats = self.slam_manager.process_scan(msg)
+        stats = self.slam_manager.process_scan(msg)
 ```
 
 ### 12.3 Key Files
