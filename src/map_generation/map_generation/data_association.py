@@ -31,9 +31,11 @@ def associate_landmarks(
     observed_features: List[Dict],
     ekf_slam,
     feature_map=None,
-    max_mahalanobis_dist: float = 5.99,  
-    max_euclidean_dist: float = 1.0,
+    max_mahalanobis_dist: float = 5.99,
+    max_euclidean_dist: float = 6.0,
     wall_gap_tolerance: float = 0.5,
+    wall_angle_tolerance: float = 0.175,  # ~10 degrees in radians
+    wall_rho_tolerance: float = 0.3,  # 30cm tolerance for parallel wall detection
     return_extension_info: bool = False
 ) -> Tuple[List[Tuple[int, int]], List[int], Dict]:
 
@@ -69,14 +71,36 @@ def associate_landmarks(
                 lm_rho = ekf_slam.state[idx]
                 lm_alpha = ekf_slam.state[idx + 1]
 
-                # Spatial gating: check if wall is within range
-                dist_to_wall = abs(lm_rho - (x_r * np.cos(lm_alpha) + y_r * np.sin(lm_alpha)))
+                # Hessian parameter checks for wall matching (CRITICAL for duplicate prevention)
+                # Check 1: Alpha angle similarity (are walls parallel/same orientation?)
+                alpha_diff = abs(np.arctan2(np.sin(lm_alpha - feature['alpha']),
+                                            np.cos(lm_alpha - feature['alpha'])))
+                if alpha_diff > wall_angle_tolerance:
+                    continue  # Different wall orientation
 
-                if dist_to_wall > max_euclidean_dist:
-                    continue
+                # Check 2: Rho compatibility (are they at similar distance from origin?)
+                # Transform observed rho to map frame for comparison
+                obs_alpha_map = feature['alpha'] + theta_r
+                obs_alpha_map = np.arctan2(np.sin(obs_alpha_map), np.cos(obs_alpha_map))
+                obs_rho_map = feature['rho'] + (x_r * np.cos(obs_alpha_map) + y_r * np.sin(obs_alpha_map))
+
+                # Handle negative rho
+                if obs_rho_map < 0:
+                    obs_rho_map = -obs_rho_map
+                    obs_alpha_map = obs_alpha_map + np.pi
+                    obs_alpha_map = np.arctan2(np.sin(obs_alpha_map), np.cos(obs_alpha_map))
+
+                rho_diff = abs(lm_rho - obs_rho_map)
+                if rho_diff > wall_rho_tolerance:
+                    continue  # Different wall (parallel but at different location)
+
+                # Spatial gating: check if wall is within sensor range (in robot frame)
+                rho_pred = lm_rho - (x_r * np.cos(lm_alpha) + y_r * np.sin(lm_alpha))
+
+                if abs(rho_pred) > max_euclidean_dist:
+                    continue  # Wall too far from robot
 
                 # Predicted observation (wall in robot frame)
-                rho_pred = lm_rho - (x_r * np.cos(lm_alpha) + y_r * np.sin(lm_alpha))
                 alpha_pred = lm_alpha - theta_r
                 alpha_pred = np.arctan2(np.sin(alpha_pred), np.cos(alpha_pred))  # Normalize
 
@@ -167,35 +191,7 @@ def associate_landmarks(
                 continue
 
             if mahal_dist_sq < max_mahalanobis_dist**2 and mahal_dist < best_mahalanobis:
-                # For walls, verify segment overlap before accepting match
-                if feature['type'] == 'wall' and feature_map is not None:
-                    # Get existing wall endpoints from FeatureMap
-                    existing_wall = feature_map.get_wall(landmark_id)
-
-                    if existing_wall is not None:
-                       
-                        wall_tangent = np.array([-np.sin(lm_alpha), np.cos(lm_alpha)])
-
-                        obs_start = feature.get('start_point')
-                        obs_end = feature.get('end_point')
-
-                        if obs_start is not None and obs_end is not None:
-                            c = np.cos(theta_r)
-                            s = np.sin(theta_r)
-                            R = np.array([[c, -s], [s, c]])
-                            obs_start_map = R @ obs_start + np.array([x_r, y_r])
-                            obs_end_map = R @ obs_end + np.array([x_r, y_r])
-
-                            if not check_wall_segments_overlap_or_adjacent(
-                                existing_wall['start_point'],
-                                existing_wall['end_point'],
-                                obs_start_map,
-                                obs_end_map,
-                                wall_tangent,
-                                wall_gap_tolerance
-                            ):
-                                continue
-
+                # Wall matching now relies on Hessian parameters only (no endpoint checks)
                 best_mahalanobis = mahal_dist
                 best_landmark_id = landmark_id
 

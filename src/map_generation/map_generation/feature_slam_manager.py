@@ -22,8 +22,10 @@ class FeatureSLAMManager:
                  corner_angle_threshold: float = 50.0,
                  max_gap: float = 0.2,
                  max_mahalanobis_dist: float = 5.99,
-                 max_euclidean_dist: float = 2.0,
-                 wall_gap_tolerance: float = 0.5):
+                 max_euclidean_dist: float = 6.0,
+                 wall_gap_tolerance: float = 0.5,
+                 wall_angle_tolerance: float = 0.175,
+                 wall_rho_tolerance: float = 0.3):
        
         # Initialize EKF SLAM
         self.ekf = LandmarkEKFSLAM(
@@ -48,6 +50,8 @@ class FeatureSLAMManager:
         self.max_mahalanobis_dist = max_mahalanobis_dist
         self.max_euclidean_dist = max_euclidean_dist
         self.wall_gap_tolerance = wall_gap_tolerance
+        self.wall_angle_tolerance = wall_angle_tolerance
+        self.wall_rho_tolerance = wall_rho_tolerance
 
         # Statistics
         self.total_scans_processed = 0
@@ -83,6 +87,8 @@ class FeatureSLAMManager:
             max_mahalanobis_dist=self.max_mahalanobis_dist,
             max_euclidean_dist=self.max_euclidean_dist,
             wall_gap_tolerance=self.wall_gap_tolerance,
+            wall_angle_tolerance=self.wall_angle_tolerance,
+            wall_rho_tolerance=self.wall_rho_tolerance,
             return_extension_info=True
         )
 
@@ -292,8 +298,20 @@ class FeatureSLAMManager:
         return self.feature_map
 
     def generate_point_cloud(self, spacing: float = 0.05) -> np.ndarray:
-       
+
         return self.feature_map.generate_point_cloud(spacing=spacing)
+
+    def reset_wall_endpoints_for_new_submap(self):
+        """
+        Reset wall endpoints after submap creation.
+
+        This allows each submap to have fresh geometry while maintaining
+        EKF landmarks and their covariances. The next observations will
+        re-initialize endpoints for matched walls.
+
+        Called after submap creation (every 50 scans).
+        """
+        self.feature_map.reset_wall_endpoints()
 
     def is_initialized(self) -> bool:
         """Check if EKF is initialized."""

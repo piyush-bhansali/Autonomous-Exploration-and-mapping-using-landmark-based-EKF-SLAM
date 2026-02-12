@@ -66,8 +66,10 @@ class LocalSubmapGeneratorFeature(Node):
             corner_angle_threshold=50.0,
             max_gap=0.2,
             max_mahalanobis_dist=5.99,
-            max_euclidean_dist=3.5,
-            wall_gap_tolerance=0.5
+            max_euclidean_dist=6.0,  # Increased from 3.5 to avoid premature rejection
+            wall_gap_tolerance=0.5,
+            wall_angle_tolerance=0.175,  # ~10 degrees for wall orientation matching
+            wall_rho_tolerance=0.3  # 30cm for parallel wall detection
         )
 
         self.stitcher = SubmapStitcher(
@@ -563,6 +565,10 @@ class LocalSubmapGeneratorFeature(Node):
             # Reset scan counter but KEEP features (they persist across submaps)
             self.scans_in_current_submap = 0
             self.submap_start_pose = end_pose
+
+            # Reset wall endpoints for fresh geometry in next submap
+            # (EKF landmarks and covariances persist)
+            self.slam_manager.reset_wall_endpoints_for_new_submap()
 
     def shutdown(self):
         """Clean shutdown"""

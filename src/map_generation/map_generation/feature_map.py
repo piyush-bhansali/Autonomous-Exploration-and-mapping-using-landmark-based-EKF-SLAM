@@ -57,6 +57,8 @@ class FeatureMap:
         """
         Update wall endpoints to extend coverage.
 
+        If endpoints are None (after submap reset), initialize them instead of extending.
+
         Args:
             landmark_id: ID of wall to update
             new_start: [x, y] potentially extended start point
@@ -67,6 +69,14 @@ class FeatureMap:
             return
 
         wall = self.walls[landmark_id]
+
+        # If endpoints were reset (None), initialize them with new observation
+        if wall['start_point'] is None or wall['end_point'] is None:
+            wall['start_point'] = new_start
+            wall['end_point'] = new_end
+            wall['points'] = new_points
+            wall['observation_count'] += 1
+            return
 
         # Compute wall tangent direction from Hessian parameters
         # alpha is the angle of the NORMAL to the wall
@@ -209,6 +219,23 @@ class FeatureMap:
         # Remove from corners if present
         if landmark_id in self.corners:
             del self.corners[landmark_id]
+
+    def reset_wall_endpoints(self):
+        """
+        Reset wall endpoints for all walls while keeping Hessian parameters intact.
+
+        Called after submap creation to start fresh geometry tracking while
+        maintaining EKF landmarks and their covariances.
+
+        This allows each submap to have clean wall geometry without losing
+        the statistical information accumulated in the EKF state.
+        """
+        for wall_id, wall in self.walls.items():
+            # Keep rho, alpha, and observation_count
+            # Reset geometric representation to empty
+            wall['start_point'] = None
+            wall['end_point'] = None
+            wall['points'] = np.zeros((0, 2))  # Empty array with correct shape
 
     def clear_features(self):
         """Clear all features (for reset or new submap if needed)."""
