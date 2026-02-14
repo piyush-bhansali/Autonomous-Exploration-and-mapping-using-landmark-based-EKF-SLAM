@@ -3,7 +3,7 @@
 import numpy as np
 import open3d as o3d
 import open3d.core as o3c
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple
 from scipy.spatial import KDTree
 import time
 
@@ -152,7 +152,7 @@ class SubmapStitcher:
 
             return covariance
 
-        except Exception as e:
+        except Exception:
             # Return None if covariance computation fails
             return None
 
@@ -275,27 +275,3 @@ class SubmapStitcher:
             self._map_dirty = False
 
         return self._cached_numpy_map
-
-    def _rebuild_global_map(self):
-        """Rebuild global map after global transform updates."""
-        # Clear current global map
-        self.global_map_tensor = o3d.t.geometry.PointCloud(self.device)
-
-        # Re-stitch all submaps with current transforms
-        for submap in self.submaps:
-
-            pcd_tensor = submap['point_cloud']
-            transform_tensor = o3c.Tensor(submap['global_transform'], dtype=o3c.float32, device=self.device)
-            pcd_transformed = pcd_tensor.transform(transform_tensor)
-
-            if len(self.global_map_tensor.point.positions) == 0:
-                self.global_map_tensor = pcd_transformed
-            else:
-                self.global_map_tensor.point.positions = o3c.concatenate([
-                    self.global_map_tensor.point.positions,
-                    pcd_transformed.point.positions
-                ], axis=0)
-
-        self.global_map_tensor = self.global_map_tensor.voxel_down_sample(self.voxel_size)
-
-        self._map_dirty = True

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List
 from map_generation.ekf_predict import BaseEKF
 
 
@@ -290,29 +290,17 @@ class LandmarkEKFSLAM(BaseEKF):
         self.landmark_update_count += 1
 
     def prune_landmarks(self, current_scan_number: int) -> List[int]:
-        """
-        Prune landmarks that haven't been seen recently.
-
-        Args:
-            current_scan_number: Current scan number
-
-        Returns:
-            List of pruned landmark IDs (for FeatureMap synchronization)
-        """
+      
         to_remove = []
 
         for lm_id, lm_data in self.landmarks.items():
             scans_since_seen = current_scan_number - lm_data['last_seen']
 
-            # Prune if:
-            # 1. Not seen for timeout period, OR
-            # 2. Not enough observations and not seen recently (10 scans)
             if (scans_since_seen > self.landmark_timeout_scans or
                 (lm_data['observations'] < self.min_observations_for_init and
                  scans_since_seen > 10)):
                 to_remove.append(lm_id)
 
-        # Remove landmarks (highest index first to avoid invalidating indices)
         to_remove.sort(key=lambda lm_id: self.landmarks[lm_id]['state_index'], reverse=True)
 
         for lm_id in to_remove:
@@ -342,55 +330,13 @@ class LandmarkEKFSLAM(BaseEKF):
         # Remove from database
         del self.landmarks[landmark_id]
 
-    def get_landmark_positions(self) -> Dict[int, Tuple[float, float]]:
-        """
-        Get positions of all landmarks.
-
-        Returns:
-            Dictionary mapping landmark_id to (param1, param2)
-            For walls: (rho, alpha), for corners: (x, y)
-        """
-        positions = {}
-        for lm_id, lm_data in self.landmarks.items():
-            idx = lm_data['state_index']
-            positions[lm_id] = (self.state[idx], self.state[idx+1])
-        return positions
-
-    def get_landmark_covariance(self, landmark_id: int) -> Optional[np.ndarray]:
-        """
-        Get covariance of a specific landmark.
-
-        Args:
-            landmark_id: ID of landmark
-
-        Returns:
-            2x2 covariance matrix, or None if landmark doesn't exist
-        """
-        if landmark_id not in self.landmarks:
-            return None
-
-        idx = self.landmarks[landmark_id]['state_index']
-        return self.P[idx:idx+2, idx:idx+2]
-
     def update(self,
                x: float,
                y: float,
                theta: float,
                measurement_covariance: np.ndarray,
                measurement_type: str = "icp"):
-        """
-        EKF update with direct pose measurement (e.g., from ICP alignment).
-
-        This allows feature-based SLAM to also use pose corrections from ICP
-        during submap stitching, providing a hybrid correction mechanism.
-
-        Args:
-            x: Measured x position (meters)
-            y: Measured y position (meters)
-            theta: Measured orientation (radians)
-            measurement_covariance: 3x3 measurement noise covariance
-            measurement_type: Source of measurement (default: "icp")
-        """
+      
         if not self.initialized:
             return
 
@@ -402,8 +348,6 @@ class LandmarkEKFSLAM(BaseEKF):
         innovation = z - z_pred
         innovation[2] = np.arctan2(np.sin(innovation[2]), np.cos(innovation[2]))
 
-        # Observation model: direct pose measurement
-        # H observes only robot pose (first 3 elements), landmarks are unaffected
         H = np.zeros((3, n))
         H[0:3, 0:3] = np.eye(3)
 

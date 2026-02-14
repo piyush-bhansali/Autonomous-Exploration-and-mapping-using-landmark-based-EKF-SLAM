@@ -74,7 +74,7 @@ The problem of extracting linear features from 2D range data has been extensivel
 | Hough Transform | 12.7 ms | 96% | 0.92 | Excellent |
 | RANSAC | 8.4 ms | 95% | 0.91 | Excellent |
 
-**Conclusion**: For this thesis, **Split-and-Merge** provides the best balance of speed, accuracy, and simplicity for structured indoor environments typical of mobile robot applications.
+**Conclusion**: The current implementation uses an **incremental line-growing + adjacent merge** pipeline for deterministic real-time extraction while retaining geometric consistency checks.
 
 ### 1.3 Geometric Primitives in SLAM
 
@@ -150,128 +150,45 @@ Where $\tau_{\text{gap}} = 0.2$ m (typical).
 
 ## 3. Line Segmentation
 
-### 3.1 Split-and-Merge Algorithm
+### 3.1 Incremental Line Growing
 
-The split-and-merge algorithm recursively segments the point cloud into line segments.
+The current pipeline grows line segments over ordered scan points:
 
-**Algorithm:**
+1. Start from the first 2 points in the ordered segment.
+2. Add one point at a time.
+3. Evaluate max perpendicular residual to the endpoint-defined line.
+4. If residual exceeds `grow_residual_threshold`, finalize the previous segment and restart.
 
-```
-function SPLIT_AND_MERGE(points):
-    if length(points) < min_points:
-        return []
+Segment acceptance requires:
+- `min_points_per_line`
+- `min_line_length`
 
-    // Fit line to all points
-    line ← FIT_LINE_PCA(points)
+This avoids recursive splitting while preserving deterministic behavior.
 
-    // Find point with maximum perpendicular distance
-    distances ← [DISTANCE_TO_LINE(p, line) for p in points]
-    max_idx ← argmax(distances)
-    max_dist ← distances[max_idx]
+### 3.2 Adjacent Segment Merge
 
-    // Check if split is needed
-    if max_dist > threshold AND can_split(points, max_idx):
-        // Recursively split
-        left ← SPLIT_AND_MERGE(points[0:max_idx+1])
-        right ← SPLIT_AND_MERGE(points[max_idx:end])
-        return concat(left, right)
-    else:
-        // Accept as single segment
-        if length(points) >= min_points:
-            return [line]
-        else:
-            return []
-```
+After growth, adjacent segments are merged when they remain geometrically consistent:
+- acute direction difference below `merge_angle_tolerance`
+- endpoint gap below `max_gap`
+- residual of merged candidate below `merge_rho_tolerance`
 
-**Parameters:**
-- `min_points`: Minimum points per segment (e.g., 10)
-- `threshold`: Maximum perpendicular distance (e.g., 0.05 m)
-- `min_line_length`: Minimum Euclidean distance (e.g., 0.5 m)
+This keeps long wall continuity while preventing merges across discontinuities.
 
-### 3.2 PCA-Based Line Fitting
+### 3.3 Endpoint-Line Residual
 
-Principal Component Analysis (PCA) finds the best-fit line through a set of points.
-
-**Given:** Points $\{p_i\}_{i=1}^N$ where $p_i = [x_i, y_i]^T$
-
-**Step 1: Compute Centroid**
+Given segment endpoints $p_s, p_e$ and a candidate point $p_i$, the perpendicular residual is:
 
 $$
-\bar{p} = \frac{1}{N} \sum_{i=1}^N p_i = \begin{bmatrix}
-\bar{x} \\
-\bar{y}
-\end{bmatrix}
+r_i = \frac{|(p_i - p_s) \times (p_e - p_s)|}{\|p_e - p_s\|}
 $$
 
-**Step 2: Center Points**
+The segment quality metric is:
 
 $$
-\tilde{p}_i = p_i - \bar{p}
+r_{\max} = \max_i r_i
 $$
 
-**Step 3: Compute Covariance Matrix**
-
-$$
-\mathbf{C} = \frac{1}{N-1} \sum_{i=1}^N \tilde{p}_i \tilde{p}_i^T = \begin{bmatrix}
-\sigma_x^2 & \sigma_{xy} \\
-\sigma_{xy} & \sigma_y^2
-\end{bmatrix}
-$$
-
-**Step 4: Eigendecomposition**
-
-$$
-\mathbf{C} = \mathbf{V} \boldsymbol{\Lambda} \mathbf{V}^T
-$$
-
-Where:
-- $\mathbf{V} = [v_1 \mid v_2]$: Eigenvectors (principal axes)
-- $\boldsymbol{\Lambda} = \text{diag}(\lambda_1, \lambda_2)$: Eigenvalues (variances)
-- $\lambda_1 \geq \lambda_2$
-
-**Step 5: Line Direction**
-
-The line direction is the first principal component:
-
-$$
-\hat{d} = v_1 = \begin{bmatrix}
-d_x \\
-d_y
-\end{bmatrix}
-$$
-
-**Line Parameterization:**
-
-$$
-\ell(t) = \bar{p} + t \cdot \hat{d}, \quad t \in \mathbb{R}
-$$
-
-**Quality Metric:**
-
-$$
-\text{linearity} = \frac{\lambda_1}{\lambda_1 + \lambda_2}
-$$
-
-Values close to 1 indicate strong linear structure.
-
-### 3.3 Point-to-Line Distance
-
-The perpendicular distance from point $p$ to line $\ell$ defined by centroid $\bar{p}$ and direction $\hat{d}$:
-
-$$
-d(p, \ell) = \|(p - \bar{p}) - \langle p - \bar{p}, \hat{d} \rangle \hat{d}\|
-$$
-
-**Geometric Interpretation:**
-1. Project $(p - \bar{p})$ onto $\hat{d}$: $\text{proj} = \langle p - \bar{p}, \hat{d} \rangle \hat{d}$
-2. Compute perpendicular component: $\text{perp} = (p - \bar{p}) - \text{proj}$
-3. Distance is magnitude: $d = \|\text{perp}\|$
-
-**Simplified Form:**
-
-$$
-d(p, \ell) = \left| (p - \bar{p}) - \hat{d} \langle p - \bar{p}, \hat{d} \rangle \right|
-$$
+A candidate remains part of the segment while $r_{\max}$ is below the configured threshold.
 
 ---
 
@@ -294,27 +211,28 @@ Where:
 2. **Compactness:** Only 2 parameters
 3. **Orientation-invariant:** $\alpha$ is absolute (not relative to robot)
 
-### 4.2 Conversion from PCA Line
+### 4.2 Conversion from Endpoint-Defined Segment
 
-Given a line defined by centroid $\bar{p} = [\bar{x}, \bar{y}]^T$ and direction $\hat{d} = [d_x, d_y]^T$:
+Given a segment with endpoints $p_s = [x_s, y_s]^T$ and $p_e = [x_e, y_e]^T$:
 
 **Step 1: Compute Normal Vector**
 
-The normal is perpendicular to the direction (90° rotation):
+Compute direction and rotate by 90°:
 
 $$
+\hat{d} = \frac{p_e - p_s}{\|p_e - p_s\|}, \quad
 \mathbf{n} = \begin{bmatrix}
 -d_y \\
 d_x
 \end{bmatrix}
 $$
 
-**Step 2: Compute Distance $\rho$**
+**Step 2: Compute Midpoint and Distance $\rho$**
 
-The signed distance from origin to line is:
+Use the segment midpoint $\mathbf{m} = \frac{1}{2}(p_s + p_e)$:
 
 $$
-\rho_{\text{signed}} = \mathbf{n}^T \bar{p} = -d_y \bar{x} + d_x \bar{y}
+\rho_{\text{signed}} = \mathbf{n}^T \mathbf{m}
 $$
 
 **Step 3: Ensure $\rho \geq 0$**
@@ -759,10 +677,10 @@ def extract_features(scan):
 |-----------|------|----------|
 | Scan to Cartesian | `landmark_features.py` | `_scan_to_cartesian()` |
 | Gap detection | `landmark_features.py` | `_split_on_gaps()` |
-| Split-and-merge | `landmark_features.py` | `_extract_lines()` |
-| PCA line fitting | `landmark_features.py` | `_fit_line_pca()` |
+| Incremental line growing | `landmark_features.py` | `_grow_lines_incremental()` |
+| Adjacent segment merge | `landmark_features.py` | `_merge_adjacent_lines()` |
 | Hessian conversion | `landmark_features.py` | `_convert_line_to_hessian()` |
-| Corner detection | `landmark_features.py` | `_detect_corners_from_lines()` |
+| Corner detection | `landmark_features.py` | `_extract_corners_from_adjacent_lines()` |
 | Wall covariance | `landmark_features.py` | `_compute_wall_covariance()` |
 | Corner covariance | `landmark_features.py` | `_compute_corner_covariance()` |
 
@@ -771,15 +689,17 @@ def extract_features(scan):
 | Parameter | Typical Value | Effect |
 |-----------|--------------|--------|
 | `min_points_per_line` | 10 | More points → more stable lines, fewer detections |
-| `line_fit_threshold` | 0.05 m | Lower → more splitting, shorter segments |
+| `grow_residual_threshold` | 0.03 m | Lower → more splitting, shorter segments |
 | `min_line_length` | 0.5 m | Filters out small noise segments |
 | `corner_angle_threshold` | 45° | Minimum angle for valid corner |
 | `max_gap` | 0.2 m | Gap detection sensitivity |
+| `merge_angle_tolerance` | 0.15 rad | Controls directional compatibility during merge |
+| `merge_rho_tolerance` | 0.15 m | Controls merged-segment residual tolerance |
 
 **Tuning Strategy:**
-1. Set `line_fit_threshold` to ~2× expected sensor noise
+1. Set `grow_residual_threshold` to ~2-3× expected sensor noise
 2. Set `min_points_per_line` to ensure statistical significance
-3. Adjust `corner_angle_threshold` to match environment (sharp vs. rounded corners)
+3. Tune merge tolerances to preserve long walls without over-merging disconnected surfaces
 
 ---
 

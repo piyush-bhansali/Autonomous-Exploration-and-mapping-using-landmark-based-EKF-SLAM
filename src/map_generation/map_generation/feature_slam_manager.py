@@ -11,47 +11,36 @@ from map_generation.feature_map import FeatureMap
 
 
 class FeatureSLAMManager:
-   
 
-    def __init__(self,
-                 landmark_timeout_scans: int = 50,
-                 min_observations_for_init: int = 2,
-                 min_points_per_line: int = 5,
-                 line_fit_threshold: float = 0.03,
-                 min_line_length: float = 0.3,
-                 corner_angle_threshold: float = 50.0,
-                 max_gap: float = 0.2,
-                 max_mahalanobis_dist: float = 5.99,
-                 max_euclidean_dist: float = 6.0,
-                 wall_gap_tolerance: float = 0.5,
-                 wall_angle_tolerance: float = 0.175,
-                 wall_rho_tolerance: float = 0.3):
+    def __init__(self):
        
         # Initialize EKF SLAM
         self.ekf = LandmarkEKFSLAM(
-            landmark_timeout_scans=landmark_timeout_scans,
-            min_observations_for_init=min_observations_for_init
+            landmark_timeout_scans=25,
+            min_observations_for_init=2
         )
         self.ekf_initialized = False
 
-        # Initialize feature extractor
+        # Initialize feature extractor (incremental line growing + adjacent merge)
         self.feature_extractor = LandmarkFeatureExtractor(
-            min_points_per_line=min_points_per_line,
-            line_fit_threshold=line_fit_threshold,
-            min_line_length=min_line_length,
-            corner_angle_threshold=corner_angle_threshold,
-            max_gap=max_gap
+            min_points_per_line=10,
+            min_line_length=0.3,
+            corner_angle_threshold=50.0,
+            max_gap=0.2,
+            merge_angle_tolerance=0.22,
+            merge_rho_tolerance=0.15,
+            grow_residual_threshold=0.03,
+            corner_neighbor_range=6
         )
 
         # Initialize feature map
         self.feature_map = FeatureMap()
 
         # Data association parameters
-        self.max_mahalanobis_dist = max_mahalanobis_dist
-        self.max_euclidean_dist = max_euclidean_dist
-        self.wall_gap_tolerance = wall_gap_tolerance
-        self.wall_angle_tolerance = wall_angle_tolerance
-        self.wall_rho_tolerance = wall_rho_tolerance
+        self.max_mahalanobis_dist = 5.99
+        self.max_euclidean_dist = 6.0
+        self.wall_angle_tolerance = 0.349066
+        self.wall_rho_tolerance = 0.5
 
         # Statistics
         self.total_scans_processed = 0
@@ -86,7 +75,6 @@ class FeatureSLAMManager:
             self.feature_map,
             max_mahalanobis_dist=self.max_mahalanobis_dist,
             max_euclidean_dist=self.max_euclidean_dist,
-            wall_gap_tolerance=self.wall_gap_tolerance,
             wall_angle_tolerance=self.wall_angle_tolerance,
             wall_rho_tolerance=self.wall_rho_tolerance,
             return_extension_info=True
@@ -152,8 +140,9 @@ class FeatureSLAMManager:
                     measurement_covariance=feature['covariance']
                 )
 
-                # Transform corner from robot frame to map frame
-                corner_map = self._transform_point_to_map(z_x, z_y)
+                # Use EKF state directly for corner position (map frame)
+                lm_idx = self.ekf.landmarks[landmark_id]['state_index']
+                corner_map = self.ekf.state[lm_idx:lm_idx + 2]
 
                 # Update FeatureMap corner position
                 self.feature_map.update_corner_position(
@@ -167,8 +156,7 @@ class FeatureSLAMManager:
                 self.feature_map.update_wall_endpoints(
                     landmark_id=ext['landmark_id'],
                     new_start=ext['new_start'],
-                    new_end=ext['new_end'],
-                    new_points=ext['new_points']
+                    new_end=ext['new_end']
                 )
 
     def _process_unmatched_features(self, observed_features: List[Dict],
@@ -221,17 +209,13 @@ class FeatureSLAMManager:
         start_map = R @ feature['start_point'] + np.array([x_r, y_r])
         end_map = R @ feature['end_point'] + np.array([x_r, y_r])
 
-        # Transform points from robot frame to map frame
-        points_map = (R @ feature['points'].T).T + np.array([x_r, y_r])
-
         # Add to FeatureMap (using EKF's landmark_id)
         self.feature_map.add_wall(
             landmark_id=landmark_id,
             rho=rho_map,
             alpha=alpha_map,
             start_point=start_map,
-            end_point=end_map,
-            points=points_map
+            end_point=end_map
         )
 
     def _add_corner_landmark(self, feature: Dict):
@@ -246,8 +230,9 @@ class FeatureSLAMManager:
             scan_number=self.ekf.current_scan_number
         )
 
-        # Transform corner from robot frame to map frame
-        corner_map = self._transform_point_to_map(z_x, z_y)
+        # Use EKF state directly for corner position (map frame)
+        lm_idx = self.ekf.landmarks[landmark_id]['state_index']
+        corner_map = self.ekf.state[lm_idx:lm_idx + 2]
 
         # Add to FeatureMap (using EKF's landmark_id)
         self.feature_map.add_corner(
@@ -302,15 +287,7 @@ class FeatureSLAMManager:
         return self.feature_map.generate_point_cloud(spacing=spacing)
 
     def reset_wall_endpoints_for_new_submap(self):
-        """
-        Reset wall endpoints after submap creation.
-
-        This allows each submap to have fresh geometry while maintaining
-        EKF landmarks and their covariances. The next observations will
-        re-initialize endpoints for matched walls.
-
-        Called after submap creation (every 50 scans).
-        """
+       
         self.feature_map.reset_wall_endpoints()
 
     def is_initialized(self) -> bool:

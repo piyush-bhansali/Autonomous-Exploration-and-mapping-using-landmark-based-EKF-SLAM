@@ -36,15 +36,7 @@ def publish_feature_markers(
     publisher,
     robot_name: str
 ) -> None:
-    """
-    Publish visualization markers for detected features (walls and corners).
-
-    Args:
-        features: List of feature dictionaries with 'type', position/parameters, etc.
-        scan_timestamp: Timestamp from scan message for TF synchronization
-        publisher: ROS publisher for MarkerArray messages
-        robot_name: Name of the robot (for frame_id)
-    """
+    
     from visualization_msgs.msg import Marker, MarkerArray
     from std_msgs.msg import ColorRGBA
 

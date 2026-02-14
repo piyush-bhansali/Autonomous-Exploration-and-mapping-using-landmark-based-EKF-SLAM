@@ -57,20 +57,7 @@ class LocalSubmapGeneratorFeature(Node):
         os.makedirs(self.save_dir, exist_ok=True)
 
         # Initialize Feature SLAM Manager
-        self.slam_manager = FeatureSLAMManager(
-            landmark_timeout_scans=50,
-            min_observations_for_init=2,
-            min_points_per_line=5,
-            line_fit_threshold=0.03,
-            min_line_length=0.3,
-            corner_angle_threshold=50.0,
-            max_gap=0.2,
-            max_mahalanobis_dist=5.99,
-            max_euclidean_dist=6.0,  # Increased from 3.5 to avoid premature rejection
-            wall_gap_tolerance=0.5,
-            wall_angle_tolerance=0.175,  # ~10 degrees for wall orientation matching
-            wall_rho_tolerance=0.3  # 30cm for parallel wall detection
-        )
+        self.slam_manager = FeatureSLAMManager()
 
         self.stitcher = SubmapStitcher(
             voxel_size=self.voxel_size
@@ -371,7 +358,7 @@ class LocalSubmapGeneratorFeature(Node):
         return state
 
     def _sync_pose_from_ekf(self):
-        """Synchronize current_pose from EKF state."""
+        
         state = self.slam_manager.get_robot_pose()
         qx, qy, qz, qw = yaw_to_quaternion(state['theta'])
 
@@ -394,8 +381,7 @@ class LocalSubmapGeneratorFeature(Node):
         self._process_scan_feature_mode(msg)
 
     def _process_scan_feature_mode(self, msg):
-        """Process scan in Feature mode: delegate to FeatureSLAMManager."""
-
+        
         if not self.slam_manager.is_initialized():
             return
 

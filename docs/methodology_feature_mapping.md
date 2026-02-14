@@ -64,7 +64,7 @@ This document describes the feature-based SLAM methodology implemented for the c
 |-----------|---------|----------------|
 | **Feature Extraction** | Extract walls and corners | `landmark_features.py` |
 | **Data Association** | Match observations to landmarks | `data_association.py` |
-| **EKF-SLAM** | Probabilistic state estimation | `ekf_slam.py` |
+| **EKF-SLAM** | Probabilistic state estimation | `ekf_update_feature.py` |
 | **Feature Map** | Store landmark parameters | `feature_map.py` |
 | **SLAM Manager** | Coordinate SLAM operations | `feature_slam_manager.py` |
 | **Point Cloud Generation** | Interpolate map from features | `feature_map.generate_point_cloud()` |
@@ -83,14 +83,14 @@ Cartesian Conversion
 Gap Detection (split on occlusions)
      │
      ↓
-Angle-Based Breakpoint Detection
+Incremental Line Growing
      │
      ↓
-Line Fitting (PCA)
+Adjacent Segment Merging
      │
-     ├──> Wall Features (Hessian form)
+     ├──> Wall Features (Hessian form from endpoint geometry)
      │
-     └──> Corner Features (at breakpoints)
+     └──> Corner Features (from adjacent merged segments)
 ```
 
 ### 3.2 Scan to Cartesian Conversion
@@ -127,45 +127,29 @@ $$
 
 This prevents joining disconnected surfaces across gaps.
 
-### 3.4 Angle-Based Breakpoint Detection
+### 3.4 Incremental Line Growing
 
-Detect corners using angle changes between consecutive point vectors:
+Within each gap-separated cluster, line segments are grown sequentially from ordered scan points:
 
-```python
-for i in range(window, len(points) - window):
-    v1 = points[i] - points[i - window]  # Vector before
-    v2 = points[i + window] - points[i]  # Vector after
+1. Initialize candidate line growth from the first 2 points.
+2. Extend the candidate by one point.
+3. Compute the maximum perpendicular residual to the endpoint-defined line.
+4. If residual exceeds `grow_residual_threshold`, finalize the previous segment and restart.
 
-    angle = arccos(dot(normalize(v1), normalize(v2)))
+Segment finalization enforces:
+- minimum point count (`min_points_per_line`)
+- minimum geometric extent (`min_line_length`)
 
-    if angle > corner_angle_threshold:
-        breakpoints.append(i)  # Corner detected
-```
+This produces deterministic endpoint-based segments without recursive split logic.
 
-**Parameters:**
-- Window size: 3 points (smoothing)
-- Corner angle threshold: 50° (rad = 0.87)
+### 3.5 Adjacent Segment Merge
 
-**Rationale:**
-- Larger window reduces noise sensitivity
-- 50° threshold balances detection vs. false positives
-- Avoids joining walls that meet at corners
+Consecutive grown segments are merged when all of the following are satisfied:
+- acute direction difference below `merge_angle_tolerance`
+- endpoint gap below `max_gap`
+- merged candidate residual below `merge_rho_tolerance`
 
-### 3.5 Line Fitting with PCA
-
-Between breakpoints, fit lines using Principal Component Analysis:
-
-**Algorithm:**
-1. Compute centroid: $\mathbf{c} = \frac{1}{N}\sum_{i=1}^N \mathbf{p}_i$
-2. Center points: $\mathbf{p}_i' = \mathbf{p}_i - \mathbf{c}$
-3. Compute covariance: $C = \frac{1}{N}\sum_i \mathbf{p}_i' {\mathbf{p}_i'}^T$
-4. Eigendecomposition: $C = V\Lambda V^T$
-5. Principal direction: $\mathbf{d} = V[:,0]$ (largest eigenvalue)
-
-**Validation:**
-- Check max perpendicular distance: $d_{max} < 0.03m$
-- Check minimum length: $L > 0.3m$
-- Minimum points per line: 5
+This preserves wall continuity while preventing merges across disconnected geometry (e.g., door openings).
 
 ### 3.6 Wall Representation (Hessian Normal Form)
 
@@ -179,11 +163,12 @@ where:
 - $\rho$: Perpendicular distance from origin
 - $\alpha$: Angle of normal vector
 
-**Conversion from PCA:**
-1. Normal vector: $\mathbf{n} = [-d_y, d_x]$ (perpendicular to line direction)
-2. Distance: $\rho = \mathbf{n} \cdot \mathbf{c}$
-3. Ensure $\rho > 0$: If $\rho < 0$, negate both $\rho$ and $\mathbf{n}$
-4. Angle: $\alpha = \text{atan2}(n_y, n_x)$
+**Conversion from endpoint geometry:**
+1. Direction from segment endpoints: $\hat{d} = \frac{p_{end} - p_{start}}{\|p_{end} - p_{start}\|}$
+2. Normal vector: $\mathbf{n} = [-d_y, d_x]$
+3. Midpoint: $\mathbf{m} = \frac{1}{2}(p_{start} + p_{end})$
+4. Distance: $\rho = \mathbf{n} \cdot \mathbf{m}$, then enforce $\rho > 0$ by flipping sign if needed
+5. Angle: $\alpha = \text{atan2}(n_y, n_x)$
 
 **Advantages:**
 - No redundancy (unique representation)
@@ -751,7 +736,7 @@ def generate_point_cloud(spacing=0.05):
 - Bounded but grows with map complexity
 
 ❌ **Feature extraction overhead**
-- PCA, line fitting, corner detection required
+- Incremental segment growth, merge validation, and corner extraction required
 - More processing than raw ICP
 
 ## 10. Parameters and Configuration
@@ -761,10 +746,13 @@ def generate_point_cloud(spacing=0.05):
 ```python
 feature_params = {
     'min_points_per_line': 5,
-    'line_fit_threshold': 0.03,  # meters
     'min_line_length': 0.3,  # meters
     'corner_angle_threshold': 50.0,  # degrees
     'max_gap': 0.2,  # meters
+    'merge_angle_tolerance': 0.15,  # radians
+    'merge_rho_tolerance': 0.15,  # meters
+    'grow_residual_threshold': 0.03,  # meters
+    'corner_neighbor_range': 6,
     'lidar_noise_sigma': 0.01,  # meters
 }
 ```
@@ -774,8 +762,9 @@ feature_params = {
 ```python
 association_params = {
     'max_mahalanobis_dist': 5.99,  # χ² 95%, 2-DOF
-    'max_euclidean_dist': 2.0,  # meters
-    'wall_gap_tolerance': 0.5,  # meters
+    'max_euclidean_dist': 6.0,  # meters
+    'wall_angle_tolerance': 0.22,  # radians
+    'wall_rho_tolerance': 0.3,  # meters
 }
 ```
 

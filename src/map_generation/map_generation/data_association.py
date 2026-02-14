@@ -4,38 +4,14 @@ import numpy as np
 from typing import List, Dict, Tuple
 
 
-def check_wall_segments_overlap_or_adjacent(start1: np.ndarray, end1: np.ndarray,
-                                             start2: np.ndarray, end2: np.ndarray,
-                                             wall_tangent: np.ndarray,
-                                             gap_tolerance: float = 0.5) -> bool:
-    
-    proj1_start = np.dot(start1, wall_tangent)
-    proj1_end = np.dot(end1, wall_tangent)
-    proj2_start = np.dot(start2, wall_tangent)
-    proj2_end = np.dot(end2, wall_tangent)
-
-    range1_min = min(proj1_start, proj1_end)
-    range1_max = max(proj1_start, proj1_end)
-    range2_min = min(proj2_start, proj2_end)
-    range2_max = max(proj2_start, proj2_end)
-
-    if max(range1_min, range2_min) <= min(range1_max, range2_max):
-        return True  
-
-    gap = max(range1_min, range2_min) - min(range1_max, range2_max)
-
-    return gap <= gap_tolerance
-
-
 def associate_landmarks(
     observed_features: List[Dict],
     ekf_slam,
     feature_map=None,
     max_mahalanobis_dist: float = 5.99,
     max_euclidean_dist: float = 6.0,
-    wall_gap_tolerance: float = 0.5,
-    wall_angle_tolerance: float = 0.175,  # ~10 degrees in radians
-    wall_rho_tolerance: float = 0.3,  # 30cm tolerance for parallel wall detection
+    wall_angle_tolerance: float = 0.349066,  # 20 degrees in radians
+    wall_rho_tolerance: float = 0.5,  # 0.5m tolerance for parallel wall detection
     return_extension_info: bool = False
 ) -> Tuple[List[Tuple[int, int]], List[int], Dict]:
 
@@ -71,15 +47,27 @@ def associate_landmarks(
                 lm_rho = ekf_slam.state[idx]
                 lm_alpha = ekf_slam.state[idx + 1]
 
-                # Hessian parameter checks for wall matching (CRITICAL for duplicate prevention)
-                # Check 1: Alpha angle similarity (are walls parallel/same orientation?)
-                alpha_diff = abs(np.arctan2(np.sin(lm_alpha - feature['alpha']),
-                                            np.cos(lm_alpha - feature['alpha'])))
+                # Compute predicted observation in robot frame FIRST
+                # (used for both pre-checks and innovation)
+                rho_pred = lm_rho - (x_r * np.cos(lm_alpha) + y_r * np.sin(lm_alpha))
+                alpha_pred = lm_alpha - theta_r
+                alpha_pred = np.arctan2(np.sin(alpha_pred), np.cos(alpha_pred))
+
+                # Spatial gating: wall must be within sensor range (robot frame rho)
+                if abs(rho_pred) > max_euclidean_dist:
+                    continue
+
+                # Check 1: Alpha similarity - BOTH in robot frame
+                # feature['alpha'] is robot frame, alpha_pred is landmark projected to robot frame
+                # No 180° ambiguity: Hessian form enforces rho > 0 which uniquely determines
+                # the normal direction. Applying 180° symmetry would cause opposite walls
+                # (e.g. north/south corridor walls at equal distance) to falsely match.
+                alpha_diff = abs(np.arctan2(np.sin(alpha_pred - feature['alpha']),
+                                            np.cos(alpha_pred - feature['alpha'])))
                 if alpha_diff > wall_angle_tolerance:
                     continue  # Different wall orientation
 
-                # Check 2: Rho compatibility (are they at similar distance from origin?)
-                # Transform observed rho to map frame for comparison
+                # Check 2: Rho compatibility - transform observed rho to map frame
                 obs_alpha_map = feature['alpha'] + theta_r
                 obs_alpha_map = np.arctan2(np.sin(obs_alpha_map), np.cos(obs_alpha_map))
                 obs_rho_map = feature['rho'] + (x_r * np.cos(obs_alpha_map) + y_r * np.sin(obs_alpha_map))
@@ -87,22 +75,10 @@ def associate_landmarks(
                 # Handle negative rho
                 if obs_rho_map < 0:
                     obs_rho_map = -obs_rho_map
-                    obs_alpha_map = obs_alpha_map + np.pi
-                    obs_alpha_map = np.arctan2(np.sin(obs_alpha_map), np.cos(obs_alpha_map))
 
                 rho_diff = abs(lm_rho - obs_rho_map)
                 if rho_diff > wall_rho_tolerance:
-                    continue  # Different wall (parallel but at different location)
-
-                # Spatial gating: check if wall is within sensor range (in robot frame)
-                rho_pred = lm_rho - (x_r * np.cos(lm_alpha) + y_r * np.sin(lm_alpha))
-
-                if abs(rho_pred) > max_euclidean_dist:
-                    continue  # Wall too far from robot
-
-                # Predicted observation (wall in robot frame)
-                alpha_pred = lm_alpha - theta_r
-                alpha_pred = np.arctan2(np.sin(alpha_pred), np.cos(alpha_pred))  # Normalize
+                    continue  # Parallel wall at different distance
 
                 z_pred = np.array([rho_pred, alpha_pred])
                 z_obs = np.array([feature['rho'], feature['alpha']])
@@ -212,17 +188,10 @@ def associate_landmarks(
                     start_map = R @ obs_start + np.array([x_r, y_r])
                     end_map = R @ obs_end + np.array([x_r, y_r])
 
-                    obs_points = feature.get('points', np.array([]))
-                    if len(obs_points) > 0:
-                        points_map = (R @ obs_points.T).T + np.array([x_r, y_r])
-                    else:
-                        points_map = np.array([])
-
                     extension_info[feat_idx] = {
                         'landmark_id': best_landmark_id,
                         'new_start': start_map,
-                        'new_end': end_map,
-                        'new_points': points_map
+                        'new_end': end_map
                     }
         else:
             unmatched.append(feat_idx)
