@@ -17,23 +17,7 @@ class LandmarkFeatureExtractor:
                  merge_rho_tolerance: float = 0.15,
                  grow_residual_threshold: float = 0.03,
                  corner_neighbor_range: int = 6):
-        """
-        Feature extractor using incremental line-growing + adjacent merge.
-
-        Wall line geometry is endpoint-based.
-        Corner covariance is derived from intersecting wall covariances.
-
-        Args:
-            min_points_per_line: Minimum points to form a line segment.
-            min_line_length: Minimum length of a line segment.
-            corner_angle_threshold: Min angle between adjacent final segments (degrees).
-            max_gap: Maximum distance between consecutive points before segmentation.
-            lidar_noise_sigma: LiDAR measurement noise std dev.
-            merge_angle_tolerance: Max acute direction angle difference for merging (rad).
-            merge_rho_tolerance: Max merged endpoint-line residual for merge (m).
-            grow_residual_threshold: Max residual for incremental line growth (m).
-            corner_neighbor_range: Neighbor count per side for corner covariance.
-        """
+      
         self.min_points = min_points_per_line
         self.min_length = min_line_length
         self.corner_angle = np.radians(corner_angle_threshold)
@@ -187,22 +171,39 @@ class LandmarkFeatureExtractor:
 
         return segments
 
-    def _segment_residual_to_endpoint_line(self, segment_points: np.ndarray) -> float:
+    def _fit_line_tls(self, points: np.ndarray):
+        """Fit a line to points using Total Least Squares (PCA).
+
+        Returns (centroid, direction, normal) where direction and normal are
+        unit vectors. The line passes through centroid along direction.
+        """
+        centroid = points.mean(axis=0)
+        centered = points - centroid
+        # SVD: the line direction is the eigenvector of the largest eigenvalue
+        # i.e., the first right-singular vector of the centered data matrix
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        direction = Vt[0]  # principal axis (line direction)
+        normal = np.array([-direction[1], direction[0]])  # perpendicular
+        return centroid, direction, normal
+
+    def _segment_residual_tls(self, segment_points: np.ndarray) -> float:
+        """Max perpendicular distance from any point to the TLS best-fit line.
+
+        This replaces the endpoint-based residual which is sensitive to noisy
+        LiDAR endpoints (grazing-angle measurements).
+        """
         if len(segment_points) < 2:
             return 0.0
+        if len(segment_points) == 2:
+            return 0.0  # Two points always define a line exactly
 
-        p_start = segment_points[0]
-        p_end = segment_points[-1]
-        seg = p_end - p_start
-        seg_len_sq = np.dot(seg, seg)
-
-        if seg_len_sq < 1e-9:
-            return float(np.max(np.linalg.norm(segment_points - p_start, axis=1)))
-
-        v = segment_points - p_start
-        cross = v[:, 0] * seg[1] - v[:, 1] * seg[0]
-        dists = np.abs(cross) / np.sqrt(seg_len_sq)
+        centroid, _, normal = self._fit_line_tls(segment_points)
+        dists = np.abs((segment_points - centroid) @ normal)
         return float(np.max(dists))
+
+    # Keep old name as an alias so any remaining call sites still work
+    def _segment_residual_to_endpoint_line(self, segment_points: np.ndarray) -> float:
+        return self._segment_residual_tls(segment_points)
 
     def _try_finalize_segment(self, segment_points: np.ndarray) -> Optional[np.ndarray]:
         if len(segment_points) < self.min_points:

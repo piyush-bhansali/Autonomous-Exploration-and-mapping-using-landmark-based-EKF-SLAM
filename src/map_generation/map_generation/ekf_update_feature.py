@@ -6,29 +6,12 @@ from map_generation.ekf_predict import BaseEKF
 
 
 class LandmarkEKFSLAM(BaseEKF):
-    """
-    Full EKF-SLAM with landmark observations.
-
-    State vector: [x, y, θ, landmark_1, landmark_2, ..., landmark_N]
-    where landmarks are:
-    - Walls: [ρ_i, α_i] in Hessian normal form
-    - Corners: [x_i, y_i] in Cartesian coordinates
-
-    Used in feature-based mapping mode where:
-    - Prediction: odometry-based motion model (from BaseEKF)
-    - Update: landmark observations (walls/corners) with data association
-    """
+    
 
     def __init__(self,
                  landmark_timeout_scans: int = 50,
                  min_observations_for_init: int = 2):
-        """
-        Initialize landmark-based EKF-SLAM.
-
-        Args:
-            landmark_timeout_scans: Number of scans before pruning unseen landmarks
-            min_observations_for_init: Minimum observations before landmark is established
-        """
+        
         super().__init__()
 
         # Landmark database
@@ -47,18 +30,7 @@ class LandmarkEKFSLAM(BaseEKF):
                     z_y: float,
                     feature: Dict,
                     scan_number: int) -> int:
-        """
-        Add new landmark to state vector.
-
-        Args:
-            z_x: Observation x (rho for walls, x for corners)
-            z_y: Observation y (alpha for walls, y for corners)
-            feature: Feature dictionary with 'type', 'covariance', etc.
-            scan_number: Current scan number for tracking
-
-        Returns:
-            landmark_id: Unique ID of the added landmark
-        """
+       
         x_r, y_r, theta_r = self.state[0:3]
 
         R_obs = feature.get('covariance', np.eye(2) * 0.05**2)
@@ -155,16 +127,7 @@ class LandmarkEKFSLAM(BaseEKF):
                                     z_y: float,
                                     scan_number: int,
                                     measurement_covariance: np.ndarray):
-        """
-        Update EKF with landmark observation.
-
-        Args:
-            landmark_id: ID of observed landmark
-            z_x: Observation x (rho for walls, x for corners)
-            z_y: Observation y (alpha for walls, y for corners)
-            scan_number: Current scan number
-            measurement_covariance: 2x2 observation noise covariance
-        """
+       
         if landmark_id not in self.landmarks:
             return
 
@@ -278,6 +241,20 @@ class LandmarkEKFSLAM(BaseEKF):
 
         # Normalize robot orientation
         self.state[2] = np.arctan2(np.sin(self.state[2]), np.cos(self.state[2]))
+
+        # Normalize all wall landmarks: enforce rho >= 0.
+        # After EKF updates rho can drift negative, which flips the Hessian normal
+        # direction and causes future observations of the same wall to fail the
+        # alpha-difference check in data association, creating duplicate landmarks.
+        for lm_data in self.landmarks.values():
+            if lm_data['feature_type'] == 'wall':
+                i = lm_data['state_index']
+                if self.state[i] < 0.0:
+                    self.state[i] = -self.state[i]
+                    self.state[i + 1] = np.arctan2(
+                        np.sin(self.state[i + 1] + np.pi),
+                        np.cos(self.state[i + 1] + np.pi)
+                    )
 
         # Covariance update (Joseph form)
         I = np.eye(n)

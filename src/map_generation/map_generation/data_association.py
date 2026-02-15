@@ -72,9 +72,17 @@ def associate_landmarks(
                 obs_alpha_map = np.arctan2(np.sin(obs_alpha_map), np.cos(obs_alpha_map))
                 obs_rho_map = feature['rho'] + (x_r * np.cos(obs_alpha_map) + y_r * np.sin(obs_alpha_map))
 
-                # Handle negative rho
+                # Canonical Hessian form: enforce rho >= 0 by flipping both rho
+                # and alpha (adding π to alpha).  Previously only rho was
+                # negated without adjusting alpha, leaving an inconsistent
+                # (rho, alpha) pair that could cause false rho_diff matches or
+                # miss valid ones.
                 if obs_rho_map < 0:
                     obs_rho_map = -obs_rho_map
+                    obs_alpha_map = np.arctan2(
+                        np.sin(obs_alpha_map + np.pi),
+                        np.cos(obs_alpha_map + np.pi)
+                    )
 
                 rho_diff = abs(lm_rho - obs_rho_map)
                 if rho_diff > wall_rho_tolerance:
@@ -139,13 +147,20 @@ def associate_landmarks(
                 H = np.zeros((2, n))
 
                 # ∂h/∂robot_pose
-                H[0, 0] = -cos_theta
-                H[0, 1] =  sin_theta
-                H[0, 2] = -dx * sin_theta - dy * cos_theta
+                # Using c = cos(theta_r), s = sin(theta_r):
+                #   z_pred_x =  c*dx + s*dy  → ∂/∂x_r = -c, ∂/∂y_r = -s, ∂/∂θ = -s*dx + c*dy
+                #   z_pred_y = -s*dx + c*dy  → ∂/∂x_r =  s, ∂/∂y_r = -c, ∂/∂θ = -c*dx - s*dy
+                # (Previously H[0,2] and H[1,2] had opposite signs — wrong Jacobian.)
+                c = np.cos(theta_r)
+                s = np.sin(theta_r)
 
-                H[1, 0] = -sin_theta
-                H[1, 1] = -cos_theta
-                H[1, 2] =  dx * cos_theta - dy * sin_theta
+                H[0, 0] = -c
+                H[0, 1] = -s
+                H[0, 2] = -s * dx + c * dy
+
+                H[1, 0] =  s
+                H[1, 1] = -c
+                H[1, 2] = -c * dx - s * dy
 
                 # ∂h/∂landmark
                 H[0, idx] = cos_theta
