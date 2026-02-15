@@ -282,11 +282,13 @@ class LandmarkFeatureExtractor:
         }
 
     def _convert_line_to_hessian(self, points: np.ndarray) -> Tuple[float, float]:
-        line = self._line_from_endpoints(points)
-        normal = np.array(line['normal'], dtype=float)
-        midpoint = line['midpoint']
+        # Use TLS centroid and normal so that rho/alpha estimates are consistent
+        # with the TLS-based residuals used in grow and merge.  The old
+        # endpoint-based midpoint/normal depended on the two noisiest measured
+        # points (scan endpoints at grazing angle).
+        centroid, _, normal = self._fit_line_tls(points)
 
-        rho = float(np.dot(midpoint, normal))
+        rho = float(np.dot(centroid, normal))
         if rho < 0.0:
             rho = -rho
             normal = -normal
@@ -361,30 +363,43 @@ class LandmarkFeatureExtractor:
 
     def _compute_wall_covariance(self, line: Dict) -> np.ndarray:
         points = line['points']
+        sigma2 = self.lidar_sigma ** 2
+
         if len(points) < 2:
-            return np.eye(2) * 0.1
+            return np.eye(2) * sigma2 * 100.0  # maximum-uncertainty fallback
 
         rho, alpha = self._convert_line_to_hessian(points)
 
         cos_a = np.cos(alpha)
         sin_a = np.sin(alpha)
 
+        # Fisher information matrix:  A = Σ Jᵢᵀ Jᵢ   where
+        #   Jᵢ = [∂h/∂ρ,  ∂h/∂α] = [1,  px·sin(α) − py·cos(α)]
+        # and h = ρ − px·cos(α) − py·sin(α) is the perpendicular-distance
+        # constraint.  CRLB covariance is  Cov(ρ,α) = σ²·A⁻¹.
         A = np.zeros((2, 2))
-
         for px, py in points:
-            dr_d_rho = 1.0
             dr_d_alpha = px * sin_a - py * cos_a
-            J = np.array([[dr_d_rho, dr_d_alpha]])
+            J = np.array([[1.0, dr_d_alpha]])
             A += J.T @ J
 
-        sigma2 = self.lidar_sigma ** 2
+        # Eigenvalue floor on A before inversion.
+        # Using np.linalg.pinv on a near-singular A gives a near-zero
+        # covariance (over-confident) — instead we clamp each eigenvalue of A
+        # to a minimum that corresponds to a maximum variance of ~10·σ² per
+        # parameter.  This keeps the covariance finite and PD.
+        min_eig_A = sigma2 * 0.1   # → max output eigenvalue ≈ 10·σ²
+        eigvals, eigvecs = np.linalg.eigh(A)
+        eigvals_clamped = np.maximum(eigvals, min_eig_A)
+        A_inv = eigvecs @ np.diag(1.0 / eigvals_clamped) @ eigvecs.T
 
-        try:
-            A_inv = np.linalg.inv(A)
-        except np.linalg.LinAlgError:
-            A_inv = np.linalg.pinv(A)
+        cov = sigma2 * A_inv
 
-        return sigma2 * A_inv
+        # Output eigenvalue floor: guarantee strict positive-definiteness.
+        min_cov_eig = sigma2 * 1e-4
+        eigvals_out, eigvecs_out = np.linalg.eigh(cov)
+        eigvals_out = np.maximum(eigvals_out, min_cov_eig)
+        return eigvecs_out @ np.diag(eigvals_out) @ eigvecs_out.T
 
     def _compute_corner_covariance(self, left: Dict, right: Dict) -> Optional[np.ndarray]:
         rho_a = float(left['rho'])
@@ -398,8 +413,14 @@ class LandmarkFeatureExtractor:
         ])
         b = np.array([rho_a, rho_b])
 
+        # det(A) = sin(α_b − α_a): near zero when walls are nearly parallel.
+        # The previous threshold of 1e-6 was far too loose — walls only 0.003°
+        # apart would pass and produce a geometrically meaningless corner at
+        # ~19 km distance with astronomically large covariance.
+        # Threshold 0.1 ≈ sin(5.7°); the caller already gates on 50°, but this
+        # provides a numerical safety net.
         det = np.linalg.det(A)
-        if abs(det) < 1e-6:
+        if abs(det) < 0.1:
             return None
 
         try:
@@ -408,6 +429,10 @@ class LandmarkFeatureExtractor:
         except np.linalg.LinAlgError:
             return None
 
+        # First-order Jacobian of corner position wrt wall parameters θ=[ρ_a,α_a,ρ_b,α_b].
+        # Corner: x = A(α)⁻¹ b(ρ).
+        #   ∂x/∂ρ_k  = A⁻¹ · eₖ          (only b changes)
+        #   ∂x/∂α_k  = −A⁻¹·(∂A/∂α_k)·x  (only A changes; ∂b/∂α_k = 0)
         dA_dalpha1 = np.array([
             [-np.sin(alpha_a), np.cos(alpha_a)],
             [0.0, 0.0]
@@ -417,18 +442,29 @@ class LandmarkFeatureExtractor:
             [-np.sin(alpha_b), np.cos(alpha_b)]
         ])
 
-        dx_drho1 = A_inv @ np.array([1.0, 0.0])
-        dx_drho2 = A_inv @ np.array([0.0, 1.0])
+        dx_drho1   = A_inv @ np.array([1.0, 0.0])
+        dx_drho2   = A_inv @ np.array([0.0, 1.0])
         dx_dalpha1 = -A_inv @ (dA_dalpha1 @ x)
         dx_dalpha2 = -A_inv @ (dA_dalpha2 @ x)
 
+        # J shape (2, 4): columns ordered [∂x/∂ρ_a, ∂x/∂α_a, ∂x/∂ρ_b, ∂x/∂α_b]
         J = np.column_stack([dx_drho1, dx_dalpha1, dx_drho2, dx_dalpha2])
 
         cov1 = left.get('covariance', self._compute_wall_covariance(left))
         cov2 = right.get('covariance', self._compute_wall_covariance(right))
 
+        # Wall parameters assumed independent (no cross-wall covariance).
         Sigma_theta = np.zeros((4, 4))
         Sigma_theta[:2, :2] = cov1
         Sigma_theta[2:, 2:] = cov2
 
-        return J @ Sigma_theta @ J.T
+        cov_corner = J @ Sigma_theta @ J.T
+
+        # Numerical fix: first-order propagation can yield a matrix that is not
+        # strictly positive-definite due to floating-point cancellation or
+        # near-singular geometry.  Symmetrize and clamp negative eigenvalues.
+        cov_corner = 0.5 * (cov_corner + cov_corner.T)  # enforce symmetry
+        eigvals, eigvecs = np.linalg.eigh(cov_corner)
+        min_cov_eig = (self.lidar_sigma ** 2) * 1e-4
+        eigvals = np.maximum(eigvals, min_cov_eig)
+        return eigvecs @ np.diag(eigvals) @ eigvecs.T
