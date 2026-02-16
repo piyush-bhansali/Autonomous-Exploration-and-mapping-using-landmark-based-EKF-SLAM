@@ -752,7 +752,6 @@ feature_params = {
     'merge_angle_tolerance': 0.15,  # radians
     'merge_rho_tolerance': 0.15,  # meters
     'grow_residual_threshold': 0.03,  # meters
-    'corner_neighbor_range': 6,
     'lidar_noise_sigma': 0.01,  # meters
 }
 ```

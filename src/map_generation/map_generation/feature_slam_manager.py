@@ -29,8 +29,7 @@ class FeatureSLAMManager:
             max_gap=0.2,
             merge_angle_tolerance=0.22,
             merge_rho_tolerance=0.15,
-            grow_residual_threshold=0.03,
-            corner_neighbor_range=6
+            grow_residual_threshold=0.03
         )
 
         # Initialize feature map

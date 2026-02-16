@@ -1,453 +1,231 @@
 # Submap Management and Global Map Construction
 
-> **Note:** This document describes submap management in the **feature-based mapping pipeline**, where ICP is used for submap-to-global stitching.
-
 ## Table of Contents
 1. [Introduction](#1-introduction)
 2. [Submap Creation](#2-submap-creation)
-3. [Coordinate Transformations](#3-coordinate-transformations)
-4. [Submap Stitching](#4-submap-stitching)
-5. [Global Map Maintenance](#5-global-map-maintenance)
-6. [Implementation](#6-implementation)
+3. [ICP-Based Stitching](#3-icp-based-stitching)
+4. [ICP Covariance](#4-icp-covariance)
+5. [Pose Correction Feedback](#5-pose-correction-feedback)
+6. [Global Map Maintenance](#6-global-map-maintenance)
+7. [Implementation Reference](#7-implementation-reference)
 
 ---
 
 ## 1. Introduction
 
-**Submaps** are local point cloud segments collected over a fixed number of scans. They provide:
-- **Bounded complexity:** Fixed-size ICP targets
-- **Temporal coherence:** Points collected under consistent localization
-- **Hierarchical structure:** Building blocks for global map
+The EKF operates in a local coordinate frame and accumulates drift over long trajectories. A separate submap-stitching layer corrects this drift by aligning accumulated local point clouds against the growing global map using ICP.
 
-### 1.0 Historical Context and Hierarchical Mapping
+Every $N$ scans, the local point cloud is declared a complete submap. The submap is registered to the global map using point-to-point ICP. The resulting pose correction is fed back into the EKF as a direct pose observation, propagating the correction to all correlated landmarks.
 
-The concept of hierarchical and local mapping emerged as a solution to the scalability challenges of global SLAM. Early SLAM systems attempted to maintain a single monolithic map, but computational complexity ($O(n^3)$ for EKF-SLAM) made this intractable for large environments.
-
-**Foundational Work:**
-
-**Bosse et al. (2004)** introduced the **Atlas framework**, a seminal work in hierarchical SLAM:
-- Multiple **local coordinate frames** instead of single global frame
-- Relative pose constraints between submaps
-- Delayed decision-making for loop closure
-- Demonstrated large-scale mapping in cyclic environments
-
-**Key Insight** (Bosse et al., 2004): *"By representing the world as a collection of locally accurate submaps rather than a single global map, we can defer ambiguous association decisions and gracefully handle large-scale cyclic environments."*
-
-**Konolige & Agrawal (2008)** developed **FrameSLAM** for visual SLAM:
-- Keyframe-based submapping
-- Bundle adjustment within local frames
-- Graph-based optimization for global consistency
-- **Real-time performance** with bounded computational cost
-
-**Magnusson et al. (2007)** applied submaps to **3D NDT (Normal Distributions Transform)** mapping:
-- Local probabilistic surface representations
-- Scan registration using NDT instead of ICP
-- Demonstrated in underground mining environments (extreme conditions)
-
-**Stachniss et al. (2005)** introduced **information-theoretic submap selection**:
-- Actively select which submaps to maintain based on information content
-- Marginalize out low-information submaps to bound complexity
-- Theoretical framework linking map entropy to SLAM performance
-
-### 1.1 Submap Design Principles
-
-**Submaps vs. Global Mapping** (Bosse et al., 2004):
-
-| Aspect | Global Map | Submap Approach |
-|--------|------------|-----------------|
-| **Computational Complexity** | $O(n^3)$ (unbounded) | $O(k \cdot m^3)$ where $m \ll n$ (bounded) |
-| **Drift Accumulation** | Global drift affects all | Drift isolated within submaps |
-| **Loop Closure** | Immediate global update | Graph optimization between submaps |
-| **Real-time Feasibility** | Challenging for large $n$ | Scalable through local processing |
-
-**Submap Size Selection** (empirical guidelines):
-- **Too small** (< 20 scans): Insufficient overlap for reliable ICP
-- **Too large** (> 100 scans): Drift accumulates, loses local consistency
-- **Optimal** (40-60 scans): Balances overlap, drift, and computational cost
-
-**Temporal Coherence Principle** (Konolige & Agrawal, 2008):
-
-Scan points collected within a submap should be **temporally proximate** to minimize accumulated localization error:
-
-$$
-\Delta t_{\text{submap}} < \frac{\epsilon_{\text{tol}}}{\sigma_{\text{drift}}}
-$$
-
-where:
-- $\epsilon_{\text{tol}}$: acceptable positioning error
-- $\sigma_{\text{drift}}$: drift rate (m/s)
-
-**For typical mobile robot** ($\sigma_{\text{drift}} \approx 0.01$ m/s):
-- Submap duration: ~50-60 seconds
-- At 1 Hz scan rate: 50-60 scans per submap
-
-### 1.2 Architecture
-
-```
-Scan 1-50  → Submap 0 ────┐
-Scan 51-100 → Submap 1 ────┼──> Global Map
-Scan 101-150 → Submap 2 ───┘
-```
+The submap layer serves two purposes:
+1. It builds and maintains a metric point cloud map of the environment.
+2. It provides periodic global consistency corrections to the EKF state.
 
 ---
 
 ## 2. Submap Creation
 
-### 2.1 Trigger Criteria
+### 2.1 Trigger
 
-A new submap is created when:
-
-$$
-n_{\text{scans}} \geq N_{\text{threshold}}
-$$
-
-**Typical value:** $N_{\text{threshold}} = 50$ scans
-
-**Rationale:**
-- Sufficient points for reliable ICP ($\sim$18k points)
-- Short enough to limit drift within submap
-- Balances update frequency vs. computational cost
-
-### 2.2 Local Frame Construction
-
-Each submap has a **local coordinate frame** anchored at the submap start pose.
-
-**Submap Start Pose** (in map frame):
+A submap is finalised when the scan count reaches a fixed threshold:
 
 $$
-\mathbf{T}_{\text{submap}}^{\text{map}} = \begin{bmatrix}
-\mathbf{R}(\theta_0) & \mathbf{t}_0 \\
-0 & 1
-\end{bmatrix}
+n_{\mathrm{scans}} \geq N_{\mathrm{threshold}}, \qquad N_{\mathrm{threshold}} = 50.
 $$
 
-Where $(x_0, y_0, \theta_0)$ is the robot pose when the submap was initialized.
+At 1 Hz scan rate this corresponds to approximately 50 seconds of travel. This duration is short enough that odometric drift within a single submap is small (typically < 0.05 m), which keeps the initial guess for ICP within the convergence basin.
 
-### 2.3 Point Accumulation
+### 2.2 Point Accumulation
 
-As scans arrive, points are transformed to the **submap-local frame**:
+Scan points are expressed in the robot body frame at the time of acquisition. Before accumulation each scan is transformed into the submap-local frame, which is anchored at the robot pose when the submap was initialised, $(x_0, y_0, \theta_0)$.
 
-**Step 1: Current pose relative to submap start**
-
-$$
-\mathbf{T}_{\text{current}}^{\text{submap}} = (\mathbf{T}_{\text{submap}}^{\text{map}})^{-1} \cdot \mathbf{T}_{\text{current}}^{\text{map}}
-$$
-
-**Step 2: Transform scan points**
-
-For each scan point $p_i^{\text{robot}}$ in robot frame:
+Let the current robot pose be $(x_r, y_r, \theta_r)$ in the map frame. The relative pose of the current scan with respect to the submap origin is
 
 $$
-p_i^{\text{submap}} = \mathbf{T}_{\text{current}}^{\text{submap}} \cdot \mathbf{T}_{\text{robot}}^{\text{current}} \cdot p_i^{\text{robot}}
+\Delta x = x_r - x_0, \quad \Delta y = y_r - y_0, \quad \Delta\theta = \theta_r - \theta_0.
 $$
 
-**Step 3: Accumulate**
+Each scan point $\mathbf{p}^{\mathrm{robot}}$ is transformed to the submap frame by the rotation $\mathbf{R}(\theta_r)$ followed by translation, then expressed relative to the submap origin. In practice the implementation passes a 4×4 transformation matrix $\mathbf{T}_{\mathrm{submap}}$ computed from the EKF state at scan time.
 
-$$
-\mathcal{S}_{\text{submap}} = \mathcal{S}_{\text{submap}} \cup \{p_i^{\text{submap}}\}
-$$
+All accumulated points are stored in the submap-local frame. When the submap is finalised the full transformation $\mathbf{T}_{\mathrm{submap}}^{\mathrm{map}}$ (start pose in the map frame) is used to project the submap into the global map frame before ICP.
 
-**Result:** All points expressed in common submap-local frame.
+### 2.3 Voxel Downsampling
+
+Before ICP each submap is voxel-downsampled at $v = 0.05$ m. This reduces the point count, removes redundant measurements from overlapping scans, and gives uniform spatial density. A submap with fewer than 50 points after downsampling is discarded without attempting ICP.
 
 ---
 
-## 3. Coordinate Transformations
+## 3. ICP-Based Stitching
 
-### 3.1 Transformation Chain
+### 3.1 Algorithm
 
-```
-scan_point^robot → scan_point^submap → scan_point^map
-```
-
-**Full transformation:**
+Point-to-point ICP (Besl & McKay, 1992) minimises the sum of squared distances between matched point pairs. Given a source point cloud $\mathcal{S}$ and a target cloud $\mathcal{T}$, ICP seeks the rigid transform $(\mathbf{R}^*, \mathbf{t}^*)$ that minimises
 
 $$
-p^{\text{map}} = \mathbf{T}_{\text{submap}}^{\text{map}} \cdot \mathbf{T}_{\text{current}}^{\text{submap}} \cdot p^{\text{robot}}
+E(\mathbf{R}, \mathbf{t}) = \sum_{i \in \mathcal{C}} \| \mathbf{R}\,\mathbf{p}_i + \mathbf{t} - \mathbf{q}_i \|^2,
 $$
 
-### 3.2 Inverse Transformation
+where $\mathcal{C}$ is the set of closest-point correspondences $(\mathbf{p}_i \in \mathcal{S},\, \mathbf{q}_i \in \mathcal{T})$ within the maximum correspondence distance.
 
-To convert a map-frame correction back to local frame:
+**Implementation.** The system uses Open3D's tensor-based ICP (`o3d.t.pipelines.registration.icp`) with:
+- Maximum correspondence distance: 0.05 m (equal to the voxel size)
+- Maximum iterations: 50
+- Convergence: relative fitness and RMSE change < $10^{-6}$
+- Initial guess: the transformation matrix from the current EKF pose
 
-$$
-\Delta p^{\text{submap}} = (\mathbf{R}_{\text{submap}}^{\text{map}})^{-1} \cdot \Delta p^{\text{map}}
-$$
+The first submap (index 0) is placed directly into the global map without ICP, since there is no existing map to register against.
 
-**Rotation-only** (orientation unchanged):
+### 3.2 Fitness Score
 
-$$
-\mathbf{R}^{-1} = \mathbf{R}^T \quad \text{(orthogonality)}
-$$
-
-### 3.3 Transform Composition
-
-Given $\mathbf{T}_1$ and $\mathbf{T}_2$:
+Open3D reports an ICP fitness score as the fraction of source points that find a correspondence within the maximum distance. A submap is accepted if
 
 $$
-\mathbf{T}_{\text{composed}} = \mathbf{T}_2 \cdot \mathbf{T}_1 = \begin{bmatrix}
-\mathbf{R}_2 \mathbf{R}_1 & \mathbf{R}_2 \mathbf{t}_1 + \mathbf{t}_2 \\
-0 & 1
-\end{bmatrix}
+\mathrm{fitness} \geq 0.45.
 $$
 
-**Implementation:**
+A fitness below this threshold indicates poor overlap, and the odometric transform is used instead.
+
+### 3.3 Correction Sanity Check
+
+Even when ICP converges, the correction is rejected if it is implausibly large:
+
+$$
+\| \Delta \mathbf{t} \| > 1.0\;\mathrm{m} \quad \text{or} \quad |\Delta\theta| > 20°.
+$$
+
+A correction this large would indicate ICP has converged to a wrong minimum. In that case the odometric transform is used and no pose correction is sent to the EKF.
+
+---
+
+## 4. ICP Covariance
+
+### 4.1 Derivation
+
+The covariance of the ICP pose estimate is derived from the Gauss–Newton Hessian of the cost function (Censi, 2007). Each inlier correspondence contributes a Jacobian row $\mathbf{J}_i \in \mathbb{R}^{2 \times 3}$ relating a small perturbation $[\delta x, \delta y, \delta\theta]^\top$ to the residual at that point:
+
+$$
+\mathbf{J}_i = \begin{bmatrix} -1 & 0 & -\dot{R}\,\mathbf{p}_i[0] \\ 0 & -1 & -\dot{R}\,\mathbf{p}_i[1] \end{bmatrix},
+$$
+
+where $\dot{R} = \frac{d\mathbf{R}}{d\theta} = \begin{bmatrix} -\sin\theta & -\cos\theta \\ \cos\theta & -\sin\theta \end{bmatrix}$ evaluated at the ICP solution $\theta^*$.
+
+The information matrix (Gauss–Newton Hessian) is
+
+$$
+\mathbf{A} = \sum_{i \in \mathcal{C}_{\mathrm{inlier}}} \mathbf{J}_i^\top \mathbf{J}_i,
+$$
+
+and the covariance is
+
+$$
+\mathbf{R}_{\mathrm{ICP}} = \sigma^2\,\mathbf{A}^{-1},
+$$
+
+where $\sigma = 0.01\;\mathrm{m}$ is the LiDAR range noise from the TurtleBot3 LDS-01 specification. This is the same sensor noise model used for wall covariance in the EKF.
+
+### 4.2 Interpretation
+
+$\mathbf{R}_{\mathrm{ICP}}$ is a $3 \times 3$ matrix in $[x, y, \theta]$ space. Its eigenvalues capture how well the alignment is constrained in each direction:
+
+- Along a flat wall: $x$ and $y$ components along the wall are poorly constrained (large eigenvalue).
+- In a corner or L-shaped corridor: all three components are well constrained (small eigenvalues).
+- In a featureless corridor: translation along the corridor direction is almost unconstrained (very large eigenvalue in that direction).
+
+This geometry-awareness makes $\mathbf{R}_{\mathrm{ICP}}$ more informative than a fixed diagonal covariance. The EKF uses $\mathbf{R}_{\mathrm{ICP}}$ as the measurement noise for the pose correction observation, so degenerate ICP alignments automatically receive low weight.
+
+### 4.3 Fallback
+
+If fewer than 6 inlier correspondences remain after distance filtering, or if $\mathbf{A}$ is singular, the covariance computation returns `None`. When `None` is returned, the EKF update for the ICP correction is skipped.
+
+---
+
+## 5. Pose Correction Feedback
+
+### 5.1 Correction Extraction
+
+The ICP result is a $4 \times 4$ transform $\mathbf{T}_{\mathrm{refined}}$ from source to target. The correction relative to the odometric initial guess is
+
+$$
+\mathbf{T}_{\mathrm{corr}} = \mathbf{T}_{\mathrm{odometric}}^{-1}\,\mathbf{T}_{\mathrm{refined}}.
+$$
+
+The correction is extracted as a 2D pose increment:
+
+$$
+[dx,\; dy,\; d\theta] = \bigl[\mathbf{T}_{\mathrm{corr}}[0,3],\; \mathbf{T}_{\mathrm{corr}}[1,3],\; \arctan2(\mathbf{T}_{\mathrm{corr}}[1,0],\; \mathbf{T}_{\mathrm{corr}}[0,0])\bigr].
+$$
+
+A correction is only forwarded to the EKF when $\|[dx, dy]\| > 0.01\;\mathrm{m}$. Smaller corrections are below the sensor noise level and would add noise without benefit.
+
+### 5.2 EKF Integration
+
+The correction $[dx, dy, d\theta]^\top$ is injected into the EKF as a direct pose observation. The observation model is the identity on the robot pose sub-state. The EKF update uses $\mathbf{R}_{\mathrm{ICP}}$ as the measurement noise covariance.
+
+Because the EKF state includes all landmark parameters, the pose correction propagates to every landmark through the cross-covariance terms $\mathbf{P}_{r,m}$. This is the mechanism by which global consistency is maintained: an ICP correction at one point in the trajectory shifts all correlated landmarks consistently.
+
+---
+
+## 6. Global Map Maintenance
+
+### 6.1 Data Structure
+
+The global map is an Open3D tensor point cloud (`o3d.t.geometry.PointCloud`). The tensor API supports GPU acceleration via CUDA where available, falling back to CPU automatically.
+
+### 6.2 Incremental Update
+
+After ICP, the aligned submap is concatenated with the global map:
+
+$$
+\mathcal{M} \leftarrow \mathcal{M} \cup \mathcal{S}_{\mathrm{aligned}}.
+$$
+
+The merged map is then voxel-downsampled at $v = 0.05\;\mathrm{m}$ to maintain constant point density and prevent unbounded memory growth.
+
+### 6.3 Dirty Cache
+
+Numpy conversion from GPU tensors is expensive. The implementation caches the last numpy array and invalidates the cache only when the map is modified (`_map_dirty` flag). Reads that do not modify the map reuse the cached array.
+
+### 6.4 Persistence
+
+The global map is saved as a binary PCD file using Open3D's tensor I/O:
+
 ```python
-def compose_transforms(T1, T2):
-    """Compose two 4x4 transformation matrices."""
-    return T2 @ T1
+o3d.t.io.write_point_cloud(filepath, global_map_tensor, write_ascii=False, compressed=False)
 ```
 
 ---
 
-## 4. Submap Stitching
+## 7. Implementation Reference
 
-### 4.1 Global Map Integration
+| Component | File | Notes |
+|---|---|---|
+| `SubmapStitcher` | `submap_stitcher.py` | Main class |
+| `process_submap` | `submap_stitcher.py:38` | Voxel filter on ingestion |
+| `align_submap_with_icp` | `submap_stitcher.py:47` | ICP + covariance |
+| `_compute_icp_covariance` | `submap_stitcher.py:91` | Gauss–Newton Hessian |
+| `integrate_submap_to_global_map` | `submap_stitcher.py:159` | Full pipeline |
+| `save_global_map` | `submap_stitcher.py:260` | PCD persistence |
 
-When a submap is complete:
+### 7.1 Parameters
 
-**Step 1: Transform to Map Frame**
-
-$$
-\mathcal{S}_{\text{map}} = \{ \mathbf{T}_{\text{submap}}^{\text{map}} \cdot p \mid p \in \mathcal{S}_{\text{submap}} \}
-$$
-
-**Step 2: Align to Global Map (ICP)**
-
-If global map exists:
-
-$$
-\mathbf{T}_{\text{correction}} = \text{ICP}(\mathcal{S}_{\text{map}}, \mathcal{M}_{\text{global}})
-$$
-
-**Step 3: Apply Correction**
-
-$$
-\mathcal{S}_{\text{corrected}} = \{ \mathbf{T}_{\text{correction}} \cdot p \mid p \in \mathcal{S}_{\text{map}} \}
-$$
-
-**Step 4: Merge into Global Map**
-
-$$
-\mathcal{M}_{\text{global}} \leftarrow \mathcal{M}_{\text{global}} \cup \mathcal{S}_{\text{corrected}}
-$$
-
-### 4.2 Voxel Grid Filtering
-
-To prevent unbounded growth, downsample the global map:
-
-$$
-\mathcal{M}_{\text{global}}' = \text{voxel\_filter}(\mathcal{M}_{\text{global}}, v)
-$$
-
-**Voxel size:** $v = 0.05$ m
-
-**Benefit:** Maintains constant point density regardless of overlaps.
-
-### 4.3 Pose Correction Feedback
-
-If ICP correction is significant, feed back to EKF:
-
-$$
-\mathbf{x}_{\text{EKF}}^+ = \mathbf{x}_{\text{EKF}} + \mathbf{K}_{\text{EKF}} \cdot \Delta \mathbf{x}_{\text{ICP}}
-$$
-
-Where $\Delta \mathbf{x}_{\text{ICP}} = [dx, dy, d\theta]^T$ from submap ICP.
-
----
-
-## 5. Global Map Maintenance
-
-### 5.1 Data Structure
-
-**Open3D TensorPointCloud:**
-- GPU-accelerated operations
-- Efficient voxel downsampling
-- Fast nearest-neighbor search
-
-```python
-global_map = o3d.t.geometry.PointCloud(device)
-global_map.point.positions = o3c.Tensor(points, o3c.float32, device)
-```
-
-### 5.2 Incremental Update
-
-```python
-def integrate_submap(submap_points, T_submap_to_map, global_map, voxel_size):
-    """
-    Integrate new submap into global map.
-    """
-    # Transform submap to map frame
-    submap_transformed = submap_points @ T_submap_to_map[:3, :3].T + T_submap_to_map[:3, 3]
-
-    # Create point cloud
-    submap_pcd = o3d.t.geometry.PointCloud(device)
-    submap_pcd.point.positions = o3c.Tensor(submap_transformed, o3c.float32, device)
-
-    # ICP alignment (if global map exists)
-    if len(global_map.point.positions) > 0:
-        result = o3d.t.pipelines.registration.icp(
-            submap_pcd, global_map,
-            max_correspondence_distance=voxel_size * 2,
-            criteria=...
-        )
-        submap_pcd = submap_pcd.transform(result.transformation)
-
-    # Merge
-    global_map.point.positions = o3c.concatenate([
-        global_map.point.positions,
-        submap_pcd.point.positions
-    ], axis=0)
-
-    # Downsample
-    global_map = global_map.voxel_down_sample(voxel_size)
-
-    return global_map
-```
-
-### 5.3 Map Serialization
-
-**Save to disk:**
-```python
-o3d.t.io.write_point_cloud("global_map.pcd", global_map)
-```
-
-**PCD format:**
-- ASCII or binary
-- Standard point cloud format
-- Compatible with CloudCompare, PCL, etc.
-
----
-
-## 6. Implementation
-
-### 6.1 Submap State Machine
-
-```python
-class SubmapManager:
-    def __init__(self, scans_per_submap=50):
-        self.scans_per_submap = scans_per_submap
-        self.current_submap_points = []
-        self.scan_count = 0
-        self.submap_start_pose = None
-
-    def process_scan(self, scan_points, current_pose):
-        """
-        Add scan to current submap.
-        """
-        if self.submap_start_pose is None:
-            self.submap_start_pose = current_pose
-
-        # Transform to submap-local frame using start pose as local origin
-        points_local = transform_to_submap_local(
-            scan_points, current_pose, self.submap_start_pose
-        )
-
-        self.current_submap_points.append(points_local)
-        self.scan_count += 1
-
-        if self.scan_count >= self.scans_per_submap:
-            self.finalize_submap()
-
-    def finalize_submap(self):
-        """
-        Complete current submap and start new one.
-        """
-        # Stack all points
-        submap = np.vstack(self.current_submap_points)
-
-        # Integrate into global map
-        self.integrate_to_global_map(submap, self.submap_start_pose)
-
-        # Reset for next submap
-        self.current_submap_points = []
-        self.scan_count = 0
-        self.submap_start_pose = None
-```
-
-### 6.2 Code Mapping
-
-| Component | File | Class/Function |
-|-----------|------|---------------|
-| Submap management | `local_submap_generator_feature.py` | `LocalSubmapGeneratorFeature` |
-| Stitching | `submap_stitcher.py` | `SubmapStitcher` |
-| Transform utils | `transform_utils.py` | `quaternion_to_rotation_matrix()` |
+| Parameter | Default | Notes |
+|---|---|---|
+| `voxel_size` | 0.05 m | Downsampling resolution |
+| `icp_max_correspondence_dist` | 0.05 m | = voxel size |
+| `icp_fitness_threshold` | 0.45 | Minimum inlier fraction |
+| `lidar_noise_sigma` | 0.01 m | LDS-01 spec; matches EKF wall noise |
+| `N_threshold` (scans per submap) | 50 | Set in `LocalSubmapGeneratorFeature` |
 
 ---
 
 ## References
 
-### Hierarchical and Local Mapping
+1. **Besl, P. J., & McKay, N. D. (1992).** "A Method for Registration of 3-D Shapes." *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 14(2), 239–256.
 
-1. **Bosse, M., Newman, P., Leonard, J., & Teller, S. (2004).** "Simultaneous Localization and Map Building in Large-Scale Cyclic Environments Using the Atlas Framework." *The International Journal of Robotics Research*, 23(12), 1113-1139.
-   - Foundational work on hierarchical SLAM with multiple local coordinate frames
-   - Atlas framework for large-scale cyclic environments
-   - Delayed decision-making for ambiguous loop closures
+2. **Censi, A. (2007).** "An Accurate Closed-Form Estimate of ICP's Covariance." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 3167–3172.
 
-2. **Konolige, K., & Agrawal, M. (2008).** "FrameSLAM: From Bundle Adjustment to Real-Time Visual Mapping." *IEEE Transactions on Robotics*, 24(5), 1066-1077.
-   - Keyframe-based submapping for visual SLAM
-   - Local bundle adjustment within frames
-   - Real-time performance through bounded optimization
+3. **Bosse, M., Newman, P., Leonard, J., & Teller, S. (2004).** "Simultaneous Localisation and Map Building in Large-Scale Cyclic Environments Using the Atlas Framework." *The International Journal of Robotics Research*, 23(12), 1113–1139.
 
-3. **Estrada, C., Neira, J., & Tardós, J. D. (2005).** "Hierarchical SLAM: Real-Time Accurate Mapping of Large Environments." *IEEE Transactions on Robotics*, 21(4), 588-596.
-   - Two-level hierarchical approach: local and global maps
-   - Real-time EKF-SLAM through hierarchical decomposition
-   - Experimental validation in large indoor environments
+4. **Thrun, S., Burgard, W., & Fox, D. (2005).** *Probabilistic Robotics*. MIT Press.
 
-### Submap Stitching and Registration
-
-4. **Magnusson, M., Lilienthal, A., & Duckett, T. (2007).** "Scan Registration for Autonomous Mining Vehicles Using 3D-NDT." *Journal of Field Robotics*, 24(10), 803-827.
-   - Normal Distributions Transform for scan registration
-   - Probabilistic submap representation
-   - Robust to extreme environments (underground mining)
-
-5. **Ni, K., Steedly, D., & Dellaert, F. (2007).** "Tectonic SAM: Exact, Out-of-Core, Submap-Based SLAM." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 1678-1685.
-   - Submap-based SLAM using Smoothing and Mapping (SAM)
-   - Exact inference through Cholesky factorization
-   - Out-of-core processing for very large maps
-
-### Information-Theoretic Map Management
-
-6. **Stachniss, C., Grisetti, G., & Burgard, W. (2005).** "Information Gain-based Exploration Using Rao-Blackwellized Particle Filters." *Proceedings of Robotics: Science and Systems (RSS)*.
-   - Information-theoretic submap selection
-   - Active mapping strategies
-   - Particle filter-based SLAM with selective map updates
-
-7. **Bosse, M., & Zlot, R. (2009).** "Keypoint Design and Evaluation for Place Recognition in 2D Lidar Maps." *Robotics and Autonomous Systems*, 57(12), 1211-1224.
-   - Place recognition for loop closure between submaps
-   - Keypoint descriptors from 2D LiDAR data
-   - Experimental evaluation on large-scale datasets
-
-### Graph-Based Global Optimization
-
-8. **Grisetti, G., Stachniss, C., Grzonka, S., & Burgard, W. (2007).** "A Tree Parameterization for Efficiently Computing Maximum Likelihood Maps Using Gradient Descent." *Proceedings of Robotics: Science and Systems (RSS)*.
-   - Graph optimization for submap stitching
-   - Efficient gradient descent on pose graphs
-   - TreeMap: Hierarchical representation
-
-9. **Kummerle, R., Grisetti, G., Strasdat, H., Konolige, K., & Burgard, W. (2011).** "g2o: A General Framework for Graph Optimization." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 3607-3613.
-   - General framework for pose graph optimization
-   - Applicable to submap stitching and loop closure
-   - Open-source implementation widely used in SLAM
-
-### Coordinate Frame Management
-
-10. **Foote, T. (2013).** "tf: The Transform Library." *Proceedings of IEEE International Conference on Technologies for Practical Robot Applications (TePRA)*, pp. 1-6.
-    - ROS transform library for managing multiple coordinate frames
-    - Time-synchronized transform trees
-    - Critical infrastructure for multi-frame SLAM systems
-
-### Modern Approaches
-
-11. **Hess, W., Kohler, D., Rapp, H., & Andor, D. (2016).** "Real-Time Loop Closure in 2D LIDAR SLAM." *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, pp. 1271-1278.
-    - Google Cartographer: Submap-based 2D/3D SLAM
-    - Efficient loop closure through branch-and-bound scan matching
-    - Real-time performance on large-scale environments
-
-12. **Behley, J., & Stachniss, C. (2018).** "Efficient Surfel-Based SLAM using 3D Laser Range Data in Urban Environments." *Proceedings of Robotics: Science and Systems (RSS)*.
-    - Surfel-based map representation
-    - Hierarchical map structure for efficiency
-    - Real-world urban mapping applications
-
----
-
-**Next:** `06_uncertainty_quantification.md` — Information theory and confidence metrics
+5. **Zhou, Q.-Y., Park, J., & Koltun, V. (2018).** "Open3D: A Modern Library for 3D Data Processing." *arXiv:1801.09847*.

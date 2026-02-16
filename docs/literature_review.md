@@ -1,369 +1,316 @@
-# Literature Review: Comparative Study of ICP-Based and Feature-Based SLAM with Frontier Exploration
+# Literature Review: Feature-Based EKF-SLAM for Indoor Mobile Robotics
+
+## Table of Contents
+1. [Introduction](#1-introduction)
+2. [Foundations of SLAM](#2-foundations-of-slam)
+3. [Feature Extraction from 2D LiDAR](#3-feature-extraction-from-2d-lidar)
+4. [Feature-Based EKF-SLAM](#4-feature-based-ekf-slam)
+5. [Data Association](#5-data-association)
+6. [Scan Registration and Global Consistency](#6-scan-registration-and-global-consistency)
+7. [Uncertainty Quantification](#7-uncertainty-quantification)
+8. [Research Gap and Thesis Contribution](#8-research-gap-and-thesis-contribution)
+9. [References](#references)
+
+---
 
 ## 1. Introduction
 
-Simultaneous Localization and Mapping (SLAM) has emerged as a fundamental challenge in mobile robotics, enabling autonomous robots to navigate unknown environments without external positioning systems. The problem is characterized by a circular dependency: accurate localization requires a map, while accurate mapping requires knowing the robot's position (Smith & Cheeseman, 1987). Over the past four decades, researchers have developed two predominant approaches to address this challenge: **dense scan matching** using Iterative Closest Point (ICP) algorithms, and **sparse feature-based** methods using Extended Kalman Filters (EKF-SLAM). This literature review examines both approaches, their theoretical foundations, practical implementations, and comparative performance for autonomous exploration tasks.
+Simultaneous Localisation and Mapping (SLAM) is the problem of building a map of an unknown environment while tracking the robot's position within it. The problem is circular: accurate localisation requires a map, and accurate mapping requires knowing the robot's position (Smith & Cheeseman, 1987). Over four decades of research have produced a mature set of solutions. This review covers the specific literature relevant to the implemented system: geometric feature extraction from 2D LiDAR, EKF-based SLAM with line and corner landmarks, Mahalanobis-distance data association, and ICP-based scan registration with Hessian covariance estimation.
+
+---
 
 ## 2. Foundations of SLAM
 
-### 2.1 Theoretical Framework
+### 2.1 Probabilistic Formulation
 
-The mathematical foundations of SLAM were established through seminal contributions in the 1980s and 1990s. Smith and Cheeseman (1987) introduced the concept of representing spatial uncertainty using covariance matrices, recognizing that landmarks observed from uncertain vehicle locations inherit correlated errors. This insight about correlation structure became fundamental to all subsequent SLAM research. Smith et al. (1990) expanded this framework to robotic mapping applications, demonstrating that maintaining explicit correlations between robot pose and landmark positions is essential for building consistent maps.
+Thrun et al. (2005) provide the standard Bayesian formulation. The SLAM posterior is
 
-Dissanayake et al. (2001) provided rigorous convergence proofs for SLAM, establishing three fundamental theorems:
-1. Any submatrix of the map covariance decreases monotonically as more observations are incorporated
-2. Landmark estimates become fully correlated in the limit
-3. The lower bound on covariance is determined solely by initial vehicle uncertainty
+$$
+p(\mathbf{x}_{0:t},\, \mathbf{m} \mid \mathbf{z}_{1:t},\, \mathbf{u}_{1:t}),
+$$
 
-These theoretical results demonstrated that SLAM is fundamentally solvable under appropriate conditions. Durrant-Whyte and Bailey (2006) presented comprehensive tutorial papers establishing the Bayesian filtering formulation for modern SLAM algorithms, emphasizing that landmark correlations are critical components and that minimizing or ignoring these correlations leads to filter inconsistency.
+where $\mathbf{x}_{0:t}$ is the robot trajectory, $\mathbf{m}$ is the map, $\mathbf{z}_{1:t}$ are sensor observations, and $\mathbf{u}_{1:t}$ are odometry increments. Different SLAM approaches make different assumptions about this posterior and use different map representations.
 
-### 2.2 The SLAM Problem Formulation
+### 2.2 Correlation Structure
 
-The SLAM problem can be formulated probabilistically as computing the posterior distribution over the robot trajectory and map given sensor measurements and control inputs:
+Smith and Cheeseman (1987) showed that landmarks observed from uncertain robot positions inherit correlated errors. Dissanayake et al. (2001) proved three convergence results for EKF-SLAM:
 
-$$p(x_{0:t}, m | z_{1:t}, u_{1:t})$$
+1. Any submatrix of the map covariance decreases monotonically as observations accumulate.
+2. Landmark estimates become fully correlated in the limit.
+3. The lower bound on map uncertainty is determined solely by initial vehicle uncertainty.
 
-where $x_{0:t}$ represents the robot trajectory, $m$ is the map, $z_{1:t}$ are sensor observations, and $u_{1:t}$ are control inputs (Thrun et al., 2005). Different SLAM approaches make different assumptions about this posterior distribution and employ different representations for the map $m$.
+These results establish that maintaining the full joint covariance — including cross-terms between robot pose and all landmarks — is essential for a consistent filter. Ignoring correlations leads to overconfident estimates and eventual divergence (Durrant-Whyte & Bailey, 2006).
 
-## 3. ICP-Based SLAM Approaches
+### 2.3 Filter Consistency
 
-### 3.1 Iterative Closest Point Algorithm
+Huang et al. (2010) identified a subtle inconsistency in standard EKF-SLAM: the linearised system has two unobservable degrees of freedom (global position and heading), whereas the true nonlinear system has three. This mismatch causes the filter to gain spurious information, producing overconfident pose estimates. The First Estimates Jacobian (FEJ) approach — computing motion and observation Jacobians at the first-ever state estimate rather than the current one — restores correct observability and significantly improves consistency in experiments.
 
-The Iterative Closest Point (ICP) algorithm, introduced by Besl and McKay (1992), provides a method for registering point clouds through iterative optimization. The algorithm alternates between two steps:
-1. **Correspondence**: Find nearest point pairs between source and target point clouds
-2. **Transformation**: Compute the optimal rigid transformation minimizing point-pair distances
+---
 
-This alternating optimization converges to a local minimum of the alignment error. The algorithm has become foundational for scan matching in laser-based SLAM systems.
+## 3. Feature Extraction from 2D LiDAR
 
-### 3.2. Evolution of Scan Matching Methods
+### 3.1 Line Extraction
 
-Lu and Milios (1997) pioneered the use of scan matching for globally consistent SLAM. Their approach constructs a pose graph where nodes represent robot poses and edges represent spatial constraints from scan matching. This formulation enables batch optimization for global map consistency. However, their original approach required storing all scans and performing expensive batch optimization.
+Nguyen et al. (2005) compared line extraction algorithms for 2D laser range data. Split-and-merge (Pavlidis & Horowitz, 1974) provides the best balance of speed, accuracy, and simplicity for structured indoor environments. The algorithm recursively subdivides point sequences based on a perpendicular distance threshold. This system uses an incremental grow variant followed by an adjacent-segment merge step.
 
-Gutmann and Konolige (2000) introduced incremental scan matching for online mapping. Their approach matches each new scan against a locally accumulated map, updating the robot pose incrementally. This enables real-time operation but can accumulate drift over long trajectories. They demonstrated successful mapping of office environments using 2D laser rangefinders.
+The critical choice is which residual to minimise during extraction. An endpoint-to-endpoint residual measures perpendicular distance from each interior point to the line connecting the two segment endpoints. This is dominated by noise at grazing-angle endpoints. Total Least Squares (TLS) minimises perpendicular distances from all points simultaneously and is more robust. The TLS normal and centroid are computed via Singular Value Decomposition (SVD): the normal is the eigenvector corresponding to the smallest eigenvalue of the scatter matrix $\sum_i (\mathbf{p}_i - \bar{\mathbf{p}})(\mathbf{p}_i - \bar{\mathbf{p}})^\top$.
 
-Censi (2007) made an important theoretical contribution by deriving closed-form ICP covariance estimates. His work established that the Hessian matrix from ICP optimization represents the Fisher Information Matrix. For Gaussian noise, measurement covariance equals sensor noise variance times the inverse Hessian:
+### 3.2 Hessian Normal Form
 
-$$\Sigma_{ICP} = \sigma^2 H^{-1}$$
+Siegwart and Nourbakhsh (2011) discuss feature representation choices. A line is represented in Hessian normal form as
 
-This formula separates sensor noise (from hardware specifications) from geometric uncertainty (captured by the Hessian). Censi (2008) extended this work to point-to-line metrics for 2D laser scans, showing improved convergence in structured environments.
+$$
+x \cos\alpha + y \sin\alpha = \rho,
+$$
 
-### 3.3 Modern ICP Variants and Optimizations
+where $\rho \geq 0$ is the perpendicular distance from the origin to the line and $\alpha \in [-\pi, \pi]$ is the angle of the outward normal. This parameterisation is compact, non-redundant, and avoids the endpoint sensitivity of slope-intercept form. The canonical constraint $\rho \geq 0$ must be enforced explicitly: if an EKF update drives $\rho$ negative, the Hessian normal flips direction and future observations fail the angle-difference check in data association, creating duplicate landmarks.
 
-Biber and Straßer (2003) developed the Normal Distributions Transform (NDT) as an alternative to ICP. NDT represents the environment using a grid of cells, each containing a normal distribution fitted to local points. Scan matching optimizes alignment by maximizing the likelihood of source points under the target distribution. This approach provides smooth, differentiable objective functions and often converges faster than ICP.
+### 3.3 Corner Detection
 
-Segal et al. (2009) introduced Generalized-ICP, which estimates local surface geometry at each point and uses plane-to-plane rather than point-to-point metrics. This yields better convergence properties and higher accuracy, especially for planar environments like building interiors.
+Arras et al. (1998) demonstrated that corners — intersections of adjacent wall segments — constrain robot position in two dimensions simultaneously, whereas a single wall constrains only the perpendicular direction. Combining walls and corners improves filter observability. Corners are computed as line-line intersections and stored as Cartesian coordinates $(x, y)$.
 
-Rusinkiewicz and Levoy (2001) systematically analyzed ICP variants, examining different choices for point selection, correspondence matching, weighting, and rejection of outliers. Their experimental comparison demonstrated that combining proper algorithmic choices can improve ICP performance by orders of magnitude compared to naive implementations.
+---
 
-### 3.4 Dense SLAM Approaches
+## 4. Feature-Based EKF-SLAM
 
-Grisetti et al. (2007) developed GMapping, combining scan matching with particle filters for efficient large-scale SLAM. Each particle maintains a map and trajectory hypothesis. Scan matching provides proposal distributions for particle resampling, significantly reducing the number of particles needed. This approach scales to building-sized environments while maintaining global consistency through loop closure.
+### 4.1 State Representation
 
-Hess et al. (2016) introduced Google Cartographer, which combines scan matching with pose graph optimization for real-time SLAM without loop closure delays. Cartographer uses a multi-resolution approach: local submaps for scan matching and global optimization for consistency. The system can handle large environments (thousands of square meters) in real-time.
+The EKF state vector contains the robot pose and all landmark parameters jointly:
 
-Kohlbrecher et al. (2011) developed Hector SLAM specifically for rescue robotics. Their approach uses scan matching on occupancy grid maps without odometry, making it robust for robots operating on irregular terrain or during collisions. The multi-resolution map representation enables efficient matching even with large displacements.
+$$
+\mathbf{x} = \bigl[x_r,\, y_r,\, \theta_r,\; \rho_1,\, \alpha_1,\; \ldots,\; \rho_{N_w},\, \alpha_{N_w},\; x_1^c,\, y_1^c,\; \ldots,\; x_{N_c}^c,\, y_{N_c}^c \bigr]^\top,
+$$
 
-### 3.5 Advantages and Limitations of ICP-Based SLAM
+where $(\rho_i, \alpha_i)$ are wall parameters in Hessian normal form and $(x_j^c, y_j^c)$ are corner positions. The full joint covariance $\mathbf{P}$ is maintained so that a single landmark observation updates both that landmark and every other landmark through the cross-covariance structure.
 
-**Advantages:**
-- Dense representation captures fine geometric details
-- Works in feature-poor environments (e.g., long corridors, warehouses)
-- No feature extraction overhead
-- Accurate short-term localization through dense point cloud alignment
-- Robust to dynamic obstacles through outlier rejection
+### 4.2 Prediction
 
-**Limitations:**
-- Computational cost scales with point cloud density
-- Memory requirements for storing dense maps
-- Accumulates drift without explicit loop closure
-- Sensitive to initial alignment (local minima)
-- Uncertainty estimation less straightforward than probabilistic filters
-- Difficulty in recognizing previously visited areas without additional place recognition
+Odometry increments $(\delta_d, \delta_\theta)$ propagate the robot pose through a midpoint-integration motion model (Barfoot, 2017):
 
-## 4. Feature-Based SLAM Approaches
+$$
+\theta_{\mathrm{mid}} = \theta + \tfrac{1}{2}\delta_\theta, \qquad
+x' = x + \delta_d \cos\theta_{\mathrm{mid}}, \qquad
+y' = y + \delta_d \sin\theta_{\mathrm{mid}}, \qquad
+\theta' = \theta + \delta_\theta.
+$$
 
-### 4.1 Extended Kalman Filter SLAM
+Midpoint integration reduces linearisation error compared to the forward-Euler model. The state Jacobian is
 
-The Extended Kalman Filter provides a probabilistic framework maintaining a joint Gaussian distribution over robot pose and landmark positions. Thrun et al. (2005) provide comprehensive coverage of EKF-SLAM in "Probabilistic Robotics". The EKF maintains a state vector containing robot pose and landmark parameters:
+$$
+\mathbf{F}_{rr} = \begin{bmatrix}
+1 & 0 & -\delta_d \sin\theta_{\mathrm{mid}} \\
+0 & 1 &  \delta_d \cos\theta_{\mathrm{mid}} \\
+0 & 0 & 1
+\end{bmatrix},
+$$
 
-$$\mathbf{x} = [x_r, y_r, \theta_r, x_{l_1}, y_{l_1}, ..., x_{l_N}, y_{l_N}]^T$$
+and the noise Jacobian (wrt $[\delta_d,\, \delta_\theta]^\top$) is
 
-and a full covariance matrix $\mathbf{P}$ capturing uncertainty and correlations.
+$$
+\mathbf{G}_r = \begin{bmatrix}
+\cos\theta_{\mathrm{mid}} & -\tfrac{1}{2}\delta_d \sin\theta_{\mathrm{mid}} \\
+\sin\theta_{\mathrm{mid}} &  \tfrac{1}{2}\delta_d \cos\theta_{\mathrm{mid}} \\
+0 & 1
+\end{bmatrix}.
+$$
 
-The EKF operates through prediction and update cycles:
+The $\tfrac{1}{2}$ factor appears in $\mathbf{G}$ (derivative of $x'$ wrt $\delta_\theta$ through $\theta_{\mathrm{mid}}$) but **not** in $\mathbf{F}$ (derivative wrt the state $\theta$, where $\partial\theta_{\mathrm{mid}}/\partial\theta = 1$). The process noise is motion-scaled: $\sigma_d^2 = q_d \delta_d^2 + \epsilon_d$ and $\sigma_\theta^2 = q_\theta \delta_\theta^2 + \epsilon_\theta$, with small minimum variances $\epsilon$ to prevent zero noise when stationary.
 
-**Prediction** (using odometry):
-$$\mathbf{x}_t^- = f(\mathbf{x}_{t-1}, \mathbf{u}_t)$$
-$$\mathbf{P}_t^- = F_t \mathbf{P}_{t-1} F_t^T + G_t Q_t G_t^T$$
+### 4.3 Observation Models
 
-**Update** (using landmark observations):
-$$K_t = \mathbf{P}_t^- H_t^T (H_t \mathbf{P}_t^- H_t^T + R_t)^{-1}$$
-$$\mathbf{x}_t = \mathbf{x}_t^- + K_t (\mathbf{z}_t - h(\mathbf{x}_t^-))$$
-$$\mathbf{P}_t = (I - K_t H_t) \mathbf{P}_t^-$$
+**Wall.** The predicted robot-frame observation of map-frame wall $(\rho_m, \alpha_m)$ is
 
-The key advantage is explicit uncertainty representation with theoretically grounded confidence estimates for every part of the map.
+$$
+\hat{\rho}_r = \rho_m - (x_r \cos\alpha_m + y_r \sin\alpha_m), \qquad
+\hat{\alpha}_r = \alpha_m - \theta_r.
+$$
 
-### 4.2 Computational Complexity and Scalability
+**Corner.** With $\Delta x = x_m - x_r$, $\Delta y = y_m - y_r$, $c = \cos\theta_r$, $s = \sin\theta_r$:
 
-The computational bottleneck of EKF-SLAM is the update step, which requires $O(n^2)$ operations for $n$ landmarks (Dissanayake et al., 2001). Memory requirements scale as $O(n^2)$ for storing the full covariance matrix. This quadratic scaling limits traditional EKF-SLAM to hundreds of landmarks.
+$$
+\hat{z}_x = c\,\Delta x + s\,\Delta y, \qquad
+\hat{z}_y = -s\,\Delta x + c\,\Delta y.
+$$
 
-Montemerlo et al. (2002) introduced FastSLAM, which uses Rao-Blackwellized particle filters to achieve $O(M \log N)$ complexity where $M$ is the number of particles and $N$ is the number of landmarks. Each particle maintains an independent estimate of landmark positions conditioned on its trajectory hypothesis. This factorization exploits conditional independence in the SLAM problem.
+### 4.4 Covariance Update — Joseph Form
 
-Eade and Drummond (2006) developed Monocular SLAM using inverse depth parameterization for visual features. Their approach scales to thousands of features in real-time by maintaining only recently observed features and marginalizing out old ones.
+The standard EKF covariance update $\mathbf{P} = (\mathbf{I} - \mathbf{K}\mathbf{H})\bar{\mathbf{P}}$ is numerically sensitive: rounding errors in $\mathbf{K}\mathbf{H}$ can make $\mathbf{P}$ non-symmetric or indefinite. The Joseph form (Bierman, 1977) is used instead:
 
-### 4.3 Filter Consistency and Observability
+$$
+\mathbf{P} = (\mathbf{I} - \mathbf{K}\mathbf{H})\,\bar{\mathbf{P}}\,(\mathbf{I} - \mathbf{K}\mathbf{H})^\top + \mathbf{K}\,\mathbf{R}\,\mathbf{K}^\top.
+$$
 
-A critical discovery came from Huang et al. (2010), who found that standard EKF-SLAM suffers from inconsistency where the filter underestimates true uncertainty. This overconfidence can lead to divergence. The root cause is a mismatch in observability: the true nonlinear SLAM system has three unobservable degrees of freedom (global position and orientation), while the linearized EKF system has only two.
+This is algebraically equivalent but guarantees symmetry and preserves positive semi-definiteness regardless of finite-precision errors in $\mathbf{K}$.
 
-Huang et al. proposed First Estimates Jacobian (FEJ) to restore correct observability. Instead of using current estimates for Jacobian computation, FEJ uses first-ever estimates, preserving the three-dimensional unobservable subspace. Experimental results showed standard EKF violates 95% confidence bounds ~50% of the time, while FEJ-EKF respects confidence bounds ~95% of the time.
+### 4.5 Wall Normalisation
 
-### 4.4 Feature Extraction and Representation
+After every EKF update, all wall landmarks are checked for sign drift. If $\rho_i < 0$, the canonical form is restored by:
 
-Feature extraction from laser range data has been extensively studied. Nguyen et al. (2005) compared line extraction algorithms, finding split-and-merge provides the best balance of speed, accuracy, and simplicity for structured indoor environments. The split-and-merge algorithm (Pavlidis & Horowitz, 1974) recursively subdivides point sequences based on perpendicular distance thresholds, achieving $O(n \log n)$ complexity.
+$$
+\rho_i \leftarrow -\rho_i, \qquad
+\alpha_i \leftarrow \alpha_i + \pi \pmod{2\pi} \text{ (wrapped to } [-\pi, \pi]).
+$$
 
-Siegwart and Nourbakhsh (2011) discuss feature representation choices. The Hessian normal form for lines, $\rho = x \cos\alpha + y \sin\alpha$, avoids redundancy issues with other parameterizations. Arras et al. (2001) demonstrated that line-based features achieve 2-3× better localization accuracy than point-based features in structured environments with similar computational cost.
+Both $\rho$ and $\alpha$ are adjusted together. Adjusting only $\rho$ creates an inconsistent pair that would pass the rho-difference check in data association but fail the alpha-difference check, inserting a geometrically incorrect duplicate landmark.
 
-Corner detection provides complementary information, as corners constrain position in both dimensions simultaneously while walls primarily constrain perpendicular direction. Combining walls and corners improves observability (Siegwart & Nourbakhsh, 2011).
+### 4.6 Landmark Management
 
-### 4.5 Data Association and the Correspondence Problem
+A new landmark is not added to the state immediately on first observation. It is placed in a provisional buffer and confirmed only after $n_{\min} = 2$ observations. Landmarks not observed for more than $T_{\mathrm{prune}} = 50$ scans are removed by deleting the corresponding rows and columns from $\mathbf{x}$ and $\mathbf{P}$, and decrementing the state indices of all subsequent landmarks.
 
-Data association—matching observations to existing landmarks—is critical for feature-based SLAM. Incorrect associations corrupt the map irrecoverably (Neira & Tardós, 2001). The standard approach uses gating with Mahalanobis distance:
+---
 
-$$d_M = \sqrt{(\mathbf{z} - \hat{\mathbf{z}})^T S^{-1} (\mathbf{z} - \hat{\mathbf{z}})}$$
+## 5. Data Association
 
-where $S$ is the innovation covariance. Bailey et al. (2006) provide comprehensive treatment of data association approaches.
+### 5.1 The Correspondence Problem
 
-Joint Compatibility Branch and Bound (JCBB) from Neira and Tardós (2001) evaluates joint compatibility of observation-landmark pairs to avoid inconsistent associations. However, JCBB has exponential worst-case complexity. Nearest neighbor with validation gates provides practical real-time performance at the cost of occasional incorrect associations (Bar-Shalom & Li, 1995).
+Data association — matching each observed feature to an existing landmark or declaring it new — is the most failure-prone step in feature-based SLAM. Neira and Tardós (2001) showed that a single incorrect association is sufficient to corrupt the map irrecoverably. False positives (wrong match accepted) are more harmful than false negatives (correct match missed): a false negative produces a duplicate landmark that will be pruned, whereas a false positive introduces a persistent bias.
 
-### 4.6 Advantages and Limitations of Feature-Based SLAM
+### 5.2 Mahalanobis Distance
 
-**Advantages:**
-- Explicit probabilistic uncertainty representation
-- Theoretically grounded confidence estimates
-- Efficient representation for structured environments
-- Natural loop closure through landmark re-observation
-- Bounded memory requirements (scales with number of features, not measurements)
-- Well-studied theoretical properties and convergence guarantees
+Nearest-neighbour association with Mahalanobis-distance gating is the standard practical approach (Bar-Shalom & Fortmann, 1988). The squared Mahalanobis distance of observation $\mathbf{z}$ against predicted observation $\hat{\mathbf{z}}$ is
 
-**Limitations:**
-- Requires reliable feature extraction
-- Struggles in feature-poor environments
-- Computational cost scales with number of landmarks
-- Linearization errors can cause inconsistency
-- Vulnerable to incorrect data association
-- Discrete observations create gaps between feature detections
+$$
+D_M^2 = (\mathbf{z} - \hat{\mathbf{z}})^\top \mathbf{S}^{-1} (\mathbf{z} - \hat{\mathbf{z}}),
+$$
 
-## 5. Comparative Studies of SLAM Approaches
+where $\mathbf{S} = \mathbf{H}\bar{\mathbf{P}}\mathbf{H}^\top + \mathbf{R}$ is the innovation covariance. Unlike Euclidean distance, $D_M^2$ accounts for different variances in each component and for correlations, and is dimensionless.
 
-### 5.1 Hybrid and Comparative Approaches
+If the observation genuinely comes from the predicted landmark then $D_M^2 \sim \chi^2(d)$, where $d$ is the observation dimension. For the 2-DOF features used here, a match is accepted if $D_M^2 \leq 5.991$ ($\chi^2_{0.05}(2)$, 95% confidence). Comparing $D_M^2$ to the threshold directly — not to its square — is essential; comparing to $5.991^2 = 35.88$ would make the gate more than six times too loose.
 
-Konolige and Chou (1999) explored combining scan matching with feature-based localization, showing benefits over either method alone. Scan matching provides dense, accurate short-term estimates while feature-based methods provide sparse, consistent long-term estimates.
+### 5.3 Spatial Pre-Filter
 
-Hähnel et al. (2003) developed FastSLAM with scan matching for large-scale cyclic environments. The hybrid approach addresses complementary strengths: ICP handles local registration while landmarks enable global consistency through loop closures.
+A Euclidean pre-filter reduces the candidate set before the Mahalanobis test. The spatial threshold (5.0 m) must be larger than the LiDAR range (3.5 m). A threshold smaller than the sensor range would reject valid observations before the Mahalanobis test can run.
 
-Steux and El Hamzaoui (2010) compared tinySLAM (grid-based scan matching) with CoreSLAM (particle filter with scan matching), finding that algorithm choice significantly impacts performance based on environment characteristics and computational constraints.
+### 5.4 Joint Compatibility
 
-### 5.2 Benchmark Datasets and Evaluation Metrics
+Neira and Tardós (2001) also introduced Joint Compatibility Branch and Bound (JCBB), which evaluates the joint statistical compatibility of a full set of observation-landmark pairs. JCBB is more robust than nearest-neighbour when landmarks are closely spaced. However, its worst-case complexity is exponential. Nearest-neighbour with the chi-squared gate provides real-time performance at the cost of occasional incorrect associations, which is acceptable for the structured indoor environments targeted here.
 
-Kümmerle et al. (2009) introduced evaluation metrics for SLAM systems:
-- **Absolute Trajectory Error (ATE)**: Measures global consistency
-- **Relative Pose Error (RPE)**: Measures local accuracy
-- **Map quality metrics**: Precision, recall for occupancy grids
+---
 
-The Radish dataset repository provides standard benchmarks for comparing SLAM algorithms (Howard & Roy, 2003). The Intel Research Lab and MIT Killian Court datasets are widely used for algorithm comparison.
+## 6. Scan Registration and Global Consistency
 
-### 5.3 Performance Comparison Factors
+### 6.1 Iterative Closest Point
 
-Cadena et al. (2016) provide a comprehensive survey identifying key comparison dimensions:
+Besl and McKay (1992) introduced ICP for aligning point clouds. The algorithm alternates between two steps:
+1. **Correspondence**: pair each source point to its nearest target point.
+2. **Transform**: compute the optimal rigid transform minimising the sum of squared point-pair distances.
 
-**Accuracy**: Feature-based methods often achieve better global consistency through explicit loop closure. ICP-based methods provide superior local accuracy through dense matching.
+This alternates to a local minimum of
 
-**Computational efficiency**: Scan matching scales with point cloud size. Feature extraction and EKF updates scale with number of features. Optimal choice depends on environment complexity.
+$$
+E(\mathbf{R}, \mathbf{t}) = \sum_{i \in \mathcal{C}} \|\mathbf{R}\,\mathbf{p}_i + \mathbf{t} - \mathbf{q}_i\|^2.
+$$
 
-**Robustness**: ICP performs better in feature-poor environments. Feature-based methods handle larger loop closures through landmark recognition.
+ICP is sensitive to initial alignment and can converge to incorrect minima. Providing an initial guess from the EKF pose estimate keeps ICP within the convergence basin.
 
-**Memory requirements**: Dense methods require storing point clouds or occupancy grids. Sparse methods store only feature parameters.
+### 6.2 Submap-Based Stitching
 
-**Uncertainty quantification**: EKF-SLAM provides explicit covariance. ICP uncertainty estimation requires additional computation (Censi, 2007).
+Rather than running ICP scan-by-scan, the system accumulates points into submaps of fixed size ($N = 50$ scans). Each completed submap is registered against the growing global map. This reduces ICP frequency and provides denser point clouds with better overlap for registration. Hess et al. (2016) use a similar submap hierarchy in Google Cartographer for real-time loop closure.
 
-## 6. Frontier-Based Exploration
+### 6.3 ICP Covariance
 
-### 6.1 Frontier Detection and Selection
+Censi (2007) derived a closed-form estimate of ICP covariance from the Gauss–Newton Hessian of the cost function. The information matrix accumulated over all inlier correspondences is
 
-Yamauchi (1997) introduced frontier-based exploration as a practical autonomous exploration strategy. Frontiers are boundaries between free space (explored) and unknown space (unexplored). The robot selects frontiers as navigation goals to incrementally expand its map. This greedy approach is computationally efficient and produces reasonable coverage.
+$$
+\mathbf{A} = \sum_{i \in \mathcal{C}_{\mathrm{inlier}}} \mathbf{J}_i^\top \mathbf{J}_i,
+$$
 
-Zelinsky et al. (1993) developed distance transforms for efficient frontier identification in occupancy grid maps. The distance transform computes shortest paths to frontiers, enabling cost-based frontier selection.
+and the pose covariance is $\mathbf{R}_{\mathrm{ICP}} = \sigma^2 \mathbf{A}^{-1}$, where $\sigma$ is the sensor noise standard deviation. This is the same Cramér–Rao structure used for wall covariance. The result is geometry-aware: alignment in a featureless corridor is poorly constrained along the corridor direction, reflected in a large eigenvalue of $\mathbf{R}_{\mathrm{ICP}}$ in that direction. This automatically downweights degenerate ICP corrections in the EKF update.
 
-### 6.2 Information-Theoretic Exploration
+---
 
-Feder et al. (1999) pioneered information-theoretic exploration, where robot motion maximizes information gain about both pose and map. For Gaussian distributions, information gain relates to covariance reduction through mutual information.
+## 7. Uncertainty Quantification
 
-Stachniss et al. (2005) extended this to Rao-Blackwellized particle filters, computing information gain for each particle trajectory. The robot selects actions maximizing expected information gain, enabling active exploration that deliberately improves map quality.
+### 7.1 Cramér–Rao Lower Bound
 
-Carrillo et al. (2012) compared uncertainty criteria for active SLAM:
-- **D-optimality**: Minimizes determinant of covariance (maximizes information)
-- **A-optimality**: Minimizes trace of covariance (minimizes average variance)
-- **E-optimality**: Minimizes maximum eigenvalue (bounds worst-case uncertainty)
+Kay (1993) establishes that the covariance of any unbiased estimator satisfies $\mathrm{Cov}(\hat{\boldsymbol{\theta}}) \geq \mathcal{I}^{-1}$, where $\mathcal{I}$ is the Fisher information matrix. For a linear Gaussian model $\mathbf{z} = \mathbf{H}\boldsymbol{\theta} + \mathbf{n}$, $\mathbf{n} \sim \mathcal{N}(\mathbf{0}, \sigma^2 \mathbf{I})$, the Fisher information is $\mathcal{I} = \sigma^{-2} \mathbf{H}^\top \mathbf{H}$ and the CRLB is $\sigma^2 (\mathbf{H}^\top \mathbf{H})^{-1}$.
 
-Their experimental comparison revealed trade-offs between criteria for various environments.
+### 7.2 Wall Covariance
 
-### 6.3 Hybrid Frontier-Information Approaches
+The Hessian normal form residual for scan point $(p_x, p_y)$ is
 
-Combining frontier detection with information-theoretic evaluation selects frontiers maximizing information gain rather than simple proximity. González-Baños and Latombe (2002) developed visibility-based exploration considering sensor range and occlusions.
+$$
+r = p_x \cos\alpha + p_y \sin\alpha - \rho.
+$$
 
-Sim and Roy (2005) formalized active SLAM as balancing exploration (reducing map uncertainty) and exploitation (using known map information). Optimal strategy depends on mission objectives and time constraints.
+The per-point Jacobian is $\mathbf{J}_i = [1,\; p_x \sin\alpha - p_y \cos\alpha]$ (derivatives wrt $\rho$ and $\alpha$ respectively). The Fisher information matrix accumulated over all $N$ supporting points is $\mathbf{A} = \sum_i \mathbf{J}_i^\top \mathbf{J}_i$, and the wall covariance is
 
-### 6.4 Multi-Robot Exploration
+$$
+\mathrm{Cov}(\rho, \alpha) = \sigma^2 \mathbf{A}^{-1},
+$$
 
-Burgard et al. (2000) extended frontier exploration to multi-robot systems, where robots coordinate to avoid redundant coverage while maximizing collective exploration efficiency. Cost-based frontier assignment considers both frontier utility and robot travel cost.
+with $\sigma = 0.01\;\mathrm{m}$ from the TurtleBot3 LDS-01 specification. Using a fixed sensor noise avoids the optimism of estimating $\sigma$ from residuals, which artificially reduces uncertainty as more points are added.
 
-Simmons et al. (2000) developed coordination strategies for heterogeneous robot teams with different sensing capabilities. Their approach allocates frontiers based on robot capabilities and current uncertainty.
+### 7.3 Corner Covariance
 
-## 7. Uncertainty Quantification in SLAM
+Corner covariance is propagated analytically from the two parent wall covariances. If the corner is the intersection of walls $(\rho_1, \alpha_1)$ and $(\rho_2, \alpha_2)$, first-order error propagation gives
 
-### 7.1 Theoretical Foundations
+$$
+\mathrm{Cov}(x_c, y_c) = \mathbf{J}\,\boldsymbol{\Sigma}_\theta\,\mathbf{J}^\top,
+$$
 
-The Fisher Information Matrix quantifies measurement information about unknown parameters. The Cramér-Rao bound states that parameter covariance cannot be smaller than the inverse Fisher Information Matrix (Kay, 1993). For Gaussian measurement models:
+where $\boldsymbol{\Sigma}_\theta = \mathrm{diag}(\mathrm{Cov}(\rho_1, \alpha_1),\, \mathrm{Cov}(\rho_2, \alpha_2))$ is the block-diagonal wall covariance and $\mathbf{J}$ is the $2 \times 4$ Jacobian of the intersection formula wrt $(\rho_1, \alpha_1, \rho_2, \alpha_2)$.
 
-$$\mathcal{I} = H^T R^{-1} H$$
+### 7.4 Covariance Conditioning
 
-where $H$ is the measurement Jacobian and $R$ is measurement noise covariance. The parameter covariance bound is $\Sigma \geq \mathcal{I}^{-1}$.
+Near-singular covariance matrices arise when a wall segment contains too few points or the supporting geometry is degenerate. The system uses eigenvalue floor clamping: after computing $\mathbf{A}^{-1}$, eigenvalues of the output covariance are clamped from below at $\sigma^2 \times 10^{-4}$. This is more conservative than pseudoinverse, which can return near-zero covariance for near-singular $\mathbf{A}$.
 
-### 7.2 Hessian-Based Covariance Estimation
-
-Censi's (2007) ICP covariance formula provides practical uncertainty quantification for scan matching:
-
-$$\Sigma_{ICP} = \sigma^2 \left(\sum_{i} J_i^T J_i\right)^{-1}$$
-
-where $J_i$ is the Jacobian of the point-to-line distance for the $i$-th correspondence. Using fixed sensor noise $\sigma^2$ from hardware specifications avoids optimism—estimating noise from residuals artificially reduces uncertainty with more measurement points.
-
-The Hessian captures how environment geometry constrains pose estimates:
-- Corners provide constraints in all directions → small covariance
-- Corridors constrain only perpendicular direction → large covariance in unconstrained directions
-- Open spaces provide weak constraints → large covariance
-
-### 7.3 Covariance Propagation and Fusion
-
-Barfoot and Furgale (2014) developed rigorous covariance propagation for SE(3) transformations in Lie groups. Their theoretical framework supports proper uncertainty handling in 3D SLAM.
-
-When fusing ICP and landmark measurements, the EKF update properly combines information sources:
-
-$$\Sigma_{posterior}^{-1} = \Sigma_{prior}^{-1} + H_{ICP}^T R_{ICP}^{-1} H_{ICP} + H_{landmark}^T R_{landmark}^{-1} H_{landmark}$$
-
-This additivity of information matrices enables principled sensor fusion maintaining filter consistency.
+---
 
 ## 8. Research Gap and Thesis Contribution
 
-Despite extensive research on both ICP-based and feature-based SLAM, comprehensive comparative studies evaluating both approaches under identical exploration scenarios remain limited. Most existing comparisons focus on localization accuracy or mapping quality in isolation, without considering the coupled effects of exploration strategy and mapping approach.
+Most prior EKF-SLAM implementations use point landmarks, which are easier to extract but poorly suited to indoor environments dominated by planar surfaces. Line-based EKF-SLAM has been demonstrated (Arras et al., 1998; Castellanos et al., 1999), but these systems predate the availability of low-cost 360° LiDAR sensors and modern compute platforms.
 
-This thesis addresses this gap by conducting a systematic comparative study of:
+This thesis implements and evaluates a complete feature-based EKF-SLAM system on the TurtleBot3 Waffle Pi with a 360° LDS-01 LiDAR, targeting practical indoor mapping. The specific contributions are:
 
-1. **ICP-based SLAM** using dense scan matching with Hessian-based uncertainty quantification
-2. **Feature-based SLAM** using EKF with wall and corner landmarks in Hessian normal form
-3. **Frontier-based autonomous exploration** applied to both approaches under identical conditions
+1. **TLS-based feature extraction**: Using SVD-based TLS residuals in both the grow and merge phases, rather than endpoint-based residuals, for robustness to grazing-angle noise.
 
-The comparison evaluates:
-- Localization accuracy (Absolute Trajectory Error)
-- Map quality (precision, completeness)
-- Computational efficiency (runtime, memory)
-- Exploration efficiency (coverage rate, path length)
-- Robustness (success rate in different environments)
-- Uncertainty calibration (consistency of confidence estimates)
+2. **CRLB wall covariance**: Deriving wall covariance from the Fisher information matrix with fixed sensor noise, rather than from fit residuals, to prevent overconfident estimates in under-determined configurations.
 
-By implementing both approaches within a unified framework and testing with identical exploration scenarios, this research provides empirical evidence for selecting appropriate SLAM approaches based on application requirements and environmental characteristics.
+3. **Analytical corner covariance**: Propagating corner uncertainty from parent wall covariances through the intersection Jacobian, rather than using ad-hoc heuristics.
 
-## 9. Conclusion
+4. **Joseph form EKF with wall normalisation**: Using the numerically stable Joseph covariance update and enforcing $\rho \geq 0$ after every state update to prevent sign-drift-induced landmark duplication.
 
-The literature review establishes that both ICP-based and feature-based SLAM approaches have solid theoretical foundations and extensive practical validation. ICP-based methods excel in providing dense, accurate local maps and work well in feature-poor environments. Feature-based methods provide efficient sparse representations with explicit uncertainty quantification and natural loop closure capabilities.
+5. **Hessian ICP covariance for EKF feedback**: Computing geometry-aware ICP pose covariance from the Gauss–Newton Hessian and injecting ICP corrections into the EKF as weighted pose observations.
 
-Frontier-based exploration offers a practical strategy for autonomous mapping, with well-established algorithms for frontier detection and selection. Recent information-theoretic extensions enable active exploration that explicitly optimizes map quality.
+Performance is assessed using absolute trajectory error (ATE), landmark map accuracy, point cloud quality, and filter consistency via the normalised estimation error squared (NEES).
 
-This thesis contributes a systematic comparative evaluation of these approaches under identical exploration conditions, providing empirical guidance for practitioners selecting SLAM strategies for autonomous mobile robotics applications.
+---
 
 ## References
 
-Arras, K. O., Castellanos, J. A., Schilt, M., & Siegwart, R. (2001). Feature-based multi-hypothesis localization and tracking using geometric constraints. *Robotics and Autonomous Systems*, 44(1), 41-53.
+Arras, K. O., Tomatis, N., Jensen, B. T., & Siegwart, R. (1998). Multisensor on-the-fly localization using laser and vision. *Robotics and Autonomous Systems*, 34(2–3), 131–143.
 
-Bailey, T., & Durrant-Whyte, H. (2006). Simultaneous localization and mapping (SLAM): Part II. *IEEE Robotics & Automation Magazine*, 13(3), 108-117.
+Bar-Shalom, Y., & Fortmann, T. E. (1988). *Tracking and Data Association*. Academic Press.
 
-Bar-Shalom, Y., & Li, X. R. (1995). *Multitarget-multisensor tracking: Principles and techniques*. YBS Publishing.
+Barfoot, T. D. (2017). *State Estimation for Robotics*. Cambridge University Press.
 
-Barfoot, T. D., & Furgale, P. T. (2014). Associating uncertainty with three-dimensional poses for use in estimation problems. *IEEE Transactions on Robotics*, 30(3), 679-693.
+Besl, P. J., & McKay, N. D. (1992). A method for registration of 3-D shapes. *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 14(2), 239–256.
 
-Besl, P. J., & McKay, N. D. (1992). Method for registration of 3-D shapes. *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 14(2), 239-256.
+Bierman, G. J. (1977). *Factorization Methods for Discrete Sequential Estimation*. Academic Press.
 
-Biber, P., & Straßer, W. (2003). The normal distributions transform: A new approach to laser scan matching. *Proceedings of IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)*, 2743-2748.
+Castellanos, J. A., Montiel, J. M. M., Neira, J., & Tardós, J. D. (1999). The SPmap: A probabilistic framework for simultaneous localisation and map building. *IEEE Transactions on Robotics and Automation*, 15(5), 948–952.
 
-Burgard, W., Moors, M., Stachniss, C., & Schneider, F. E. (2000). Coordinated multi-robot exploration. *IEEE Transactions on Robotics*, 21(3), 376-386.
+Censi, A. (2007). An accurate closed-form estimate of ICP's covariance. *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, 3167–3172.
 
-Cadena, C., Carlone, L., Carrillo, H., Latif, Y., Scaramuzza, D., Neira, J., Reid, I., & Leonard, J. J. (2016). Past, present, and future of simultaneous localization and mapping: Toward the robust-perception age. *IEEE Transactions on Robotics*, 32(6), 1309-1332.
+Dissanayake, M. G., Newman, P., Clark, S., Durrant-Whyte, H. F., & Csorba, M. (2001). A solution to the simultaneous localisation and map building (SLAM) problem. *IEEE Transactions on Robotics and Automation*, 17(3), 229–241.
 
-Carrillo, H., Reid, I., & Castellanos, J. A. (2012). On the comparison of uncertainty criteria for active SLAM. *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, 2080-2087.
+Durrant-Whyte, H., & Bailey, T. (2006). Simultaneous localisation and mapping: Part I. *IEEE Robotics & Automation Magazine*, 13(2), 99–110.
 
-Censi, A. (2007). An accurate closed-form estimate of ICP's covariance. *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, 3167-3172.
+Hess, W., Kohler, D., Rapp, H., & Andor, D. (2016). Real-time loop closure in 2D LIDAR SLAM. *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, 1271–1278.
 
-Censi, A. (2008). An ICP variant using a point-to-line metric. *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, 19-25.
+Huang, G. P., Mourikis, A. I., & Roumeliotis, S. I. (2010). Observability-based rules for designing consistent EKF SLAM estimators. *The International Journal of Robotics Research*, 29(5), 502–528.
 
-Dissanayake, M. G., Newman, P., Clark, S., Durrant-Whyte, H. F., & Csorba, M. (2001). A solution to the simultaneous localization and map building (SLAM) problem. *IEEE Transactions on Robotics and Automation*, 17(3), 229-241.
+Kay, S. M. (1993). *Fundamentals of Statistical Signal Processing: Estimation Theory*. Prentice Hall.
 
-Durrant-Whyte, H., & Bailey, T. (2006). Simultaneous localization and mapping: Part I. *IEEE Robotics & Automation Magazine*, 13(2), 99-110.
+Neira, J., & Tardós, J. D. (2001). Data association in stochastic mapping using the joint compatibility test. *IEEE Transactions on Robotics and Automation*, 17(6), 890–897.
 
-Eade, E., & Drummond, T. (2006). Scalable monocular SLAM. *Proceedings of IEEE Computer Society Conference on Computer Vision and Pattern Recognition (CVPR)*, 469-476.
+Nguyen, V., Gächter, S., Martinelli, A., Tomatis, N., & Siegwart, R. (2005). A comparison of line extraction algorithms using 2D range data for indoor mobile robotics. *Autonomous Robots*, 23(2), 97–111.
 
-Feder, H. J. S., Leonard, J. J., & Smith, C. M. (1999). Adaptive mobile robot navigation and mapping. *The International Journal of Robotics Research*, 18(7), 650-668.
+Pavlidis, T., & Horowitz, S. L. (1974). Segmentation of plane curves. *IEEE Transactions on Computers*, C-23(8), 860–870.
 
-González-Baños, H. H., & Latombe, J. C. (2002). Navigation strategies for exploring indoor environments. *The International Journal of Robotics Research*, 21(10-11), 829-848.
+Siegwart, R., & Nourbakhsh, I. R. (2011). *Introduction to Autonomous Mobile Robots* (2nd ed.). MIT Press.
 
-Grisetti, G., Stachniss, C., & Burgard, W. (2007). Improved techniques for grid mapping with Rao-Blackwellized particle filters. *IEEE Transactions on Robotics*, 23(1), 34-46.
+Smith, R. C., & Cheeseman, P. (1987). On the representation and estimation of spatial uncertainty. *The International Journal of Robotics Research*, 5(4), 56–68.
 
-Gutmann, J. S., & Konolige, K. (2000). Incremental mapping of large cyclic environments. *Proceedings of IEEE International Symposium on Computational Intelligence in Robotics and Automation (CIRA)*, 318-325.
-
-Hähnel, D., Burgard, W., Fox, D., & Thrun, S. (2003). An efficient FastSLAM algorithm for generating maps of large-scale cyclic environments from raw laser range measurements. *Proceedings of IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)*, 206-211.
-
-Hess, W., Kohler, D., Rapp, H., & Andor, D. (2016). Real-time loop closure in 2D LIDAR SLAM. *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, 1271-1278.
-
-Howard, A., & Roy, N. (2003). The robotics data set repository (Radish). http://radish.sourceforge.net/
-
-Huang, G. P., Mourikis, A. I., & Roumeliotis, S. I. (2010). Observability-based rules for designing consistent EKF SLAM estimators. *The International Journal of Robotics Research*, 29(5), 502-528.
-
-Kay, S. M. (1993). *Fundamentals of statistical signal processing: Estimation theory*. Prentice Hall.
-
-Kohlbrecher, S., Meyer, J., von Stryk, O., & Klingauf, U. (2011). A flexible and scalable SLAM system with full 3D motion estimation. *Proceedings of IEEE International Symposium on Safety, Security, and Rescue Robotics (SSRR)*, 155-160.
-
-Konolige, K., & Chou, K. (1999). Markov localization using correlation. *Proceedings of International Joint Conference on Artificial Intelligence (IJCAI)*, 1154-1159.
-
-Kümmerle, R., Steder, B., Dornhege, C., Ruhnke, M., Grisetti, G., Stachniss, C., & Kleiner, A. (2009). On measuring the accuracy of SLAM algorithms. *Autonomous Robots*, 27(4), 387-407.
-
-Lu, F., & Milios, E. (1997). Globally consistent range scan alignment for environment mapping. *Autonomous Robots*, 4(4), 333-349.
-
-Montemerlo, M., Thrun, S., Koller, D., & Wegbreit, B. (2002). FastSLAM: A factored solution to the simultaneous localization and mapping problem. *Proceedings of AAAI National Conference on Artificial Intelligence*, 593-598.
-
-Neira, J., & Tardós, J. D. (2001). Data association in stochastic mapping using the joint compatibility test. *IEEE Transactions on Robotics and Automation*, 17(6), 890-897.
-
-Nguyen, V., Gächter, S., Martinelli, A., Tomatis, N., & Siegwart, R. (2005). A comparison of line extraction algorithms using 2D range data for indoor mobile robotics. *Autonomous Robots*, 23(2), 97-111.
-
-Pavlidis, T., & Horowitz, S. L. (1974). Segmentation of plane curves. *IEEE Transactions on Computers*, C-23(8), 860-870.
-
-Rusinkiewicz, S., & Levoy, M. (2001). Efficient variants of the ICP algorithm. *Proceedings of International Conference on 3D Digital Imaging and Modeling (3DIM)*, 145-152.
-
-Segal, A., Haehnel, D., & Thrun, S. (2009). Generalized-ICP. *Proceedings of Robotics: Science and Systems (RSS)*.
-
-Siegwart, R., & Nourbakhsh, I. R. (2011). *Introduction to autonomous mobile robots* (2nd ed.). MIT Press.
-
-Sim, R., & Roy, N. (2005). Global A-optimal robot exploration in SLAM. *Proceedings of IEEE International Conference on Robotics and Automation (ICRA)*, 661-666.
-
-Simmons, R., Apfelbaum, D., Burgard, W., Fox, D., Moors, M., Thrun, S., & Younes, H. (2000). Coordination for multi-robot exploration and mapping. *Proceedings of AAAI National Conference on Artificial Intelligence*, 852-858.
-
-Smith, R., Self, M., & Cheeseman, P. (1990). Estimating uncertain spatial relationships in robotics. In *Autonomous Robot Vehicles* (pp. 167-193). Springer.
-
-Smith, R. C., & Cheeseman, P. (1987). On the representation and estimation of spatial uncertainty. *The International Journal of Robotics Research*, 5(4), 56-68.
-
-Stachniss, C., Grisetti, G., & Burgard, W. (2005). Information gain-based exploration using Rao-Blackwellized particle filters. *Proceedings of Robotics: Science and Systems (RSS)*, 65-72.
-
-Steux, B., & El Hamzaoui, O. (2010). tinySLAM: A SLAM algorithm in less than 200 lines C-language program. *Proceedings of International Conference on Control, Automation, Robotics and Vision (ICARCV)*, 1975-1979.
-
-Thrun, S., Burgard, W., & Fox, D. (2005). *Probabilistic robotics*. MIT Press.
-
-Yamauchi, B. (1997). A frontier-based approach for autonomous exploration. *Proceedings of IEEE International Symposium on Computational Intelligence in Robotics and Automation (CIRA)*, 146-151.
-
-Zelinsky, A., Jarvis, R. A., Byrne, J. C., & Yuta, S. (1993). Planning paths of complete coverage of an unstructured environment by a mobile robot. *Proceedings of International Conference on Advanced Robotics*, 533-538.
+Thrun, S., Burgard, W., & Fox, D. (2005). *Probabilistic Robotics*. MIT Press.

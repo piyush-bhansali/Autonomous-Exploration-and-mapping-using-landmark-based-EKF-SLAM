@@ -1,54 +1,23 @@
 # Thesis Abstract
 
-## A Comparative Study of ICP-Based and Feature-Based SLAM for Autonomous Mobile Robots Using Frontier Exploration
+## Feature-Based EKF-SLAM for Autonomous Indoor Mapping on TurtleBot3
 
----
+Simultaneous localisation and mapping (SLAM) is a core problem in mobile robotics. A robot must build a map of an unknown environment while tracking its own position within that map. This thesis develops and evaluates a feature-based SLAM system for autonomous indoor navigation on the TurtleBot3 Waffle Pi platform.
 
-### Abstract
+The system uses a 360° 2D LiDAR as its primary sensor. Raw range scans are processed to extract geometric landmarks — walls and corners — from the structured geometry of indoor spaces. Walls are parameterised in Hessian normal form $(\rho, \alpha)$, where $\rho \geq 0$ is the perpendicular distance from the origin to the wall line and $\alpha \in [-\pi, \pi]$ is the angle of the outward normal. Corners are stored as Cartesian coordinates $(x, y)$. This parameterisation is compact, non-redundant, and free of the endpoint sensitivity that affects other line representations.
 
-Simultaneous Localization and Mapping (SLAM) is fundamental to autonomous mobile robotics, enabling robots to construct maps of unknown environments while tracking their pose. Two dominant paradigms exist: dense scan-matching methods like Iterative Closest Point (ICP) and sparse feature-based approaches using Extended Kalman Filter SLAM (EKF-SLAM). While both have been extensively studied independently, rigorous comparative evaluations under identical operational conditions remain limited. This thesis presents a systematic comparison of ICP-based and feature-based SLAM implementations for autonomous indoor navigation.
+Line segments are extracted by incremental growing followed by an adjacent-segment merge step. The residual used in both stages is the maximum perpendicular distance from any point to the total least squares (TLS) best-fit line, computed via singular value decomposition over all candidate points. This is more robust than an endpoint-to-endpoint residual, which can be dominated by noise at grazing-angle scan endpoints. The Hessian parameters and covariances are derived from the same TLS fit. Wall covariance follows from the Cramér–Rao lower bound,
 
-We develop two complete SLAM systems within a unified ROS 2 framework: (1) an **ICP-based approach** using scan-to-submap alignment with Hessian-based uncertainty quantification (Censi, 2007), and (2) a **feature-based approach** using geometric landmark extraction (walls in Hessian normal form and corner points) with full EKF-SLAM and Fisher Information Matrix covariance tracking. To ensure fair comparison, both systems operate under identical frontier-based autonomous exploration strategies, eliminating exploration bias and ensuring both methods observe the same environment regions.
+$$\mathrm{Cov}(\rho,\,\alpha) = \sigma^2\,\mathbf{A}^{-1},$$
 
-The ICP-based system employs dense point cloud registration for high-accuracy short-term localization, accumulating scans into local submaps with pose-only state estimation. The feature-based system extracts geometric primitives from laser scans, performs Mahalanobis distance-based data association with segment overlap validation, and maintains a joint robot-landmark state with full covariance tracking. Both approaches implement submap-based hierarchical mapping for scalability and provide quantitative uncertainty estimates through information-theoretic confidence metrics.
+where $\mathbf{A} = \sum_i \mathbf{J}_i^\top \mathbf{J}_i$ is the Fisher information matrix accumulated from all supporting scan points, $\mathbf{J}_i = [1,\; p_x^i \sin\alpha - p_y^i \cos\alpha]$ is the per-point residual Jacobian, and $\sigma = 0.01\,\mathrm{m}$ is the LiDAR range noise from the TurtleBot3 LDS-01 specification. Corner covariance is propagated analytically from the two parent wall covariances through the Jacobian of the line-intersection formula, using first-order error propagation.
 
-Experimental evaluation is conducted in structured indoor environments (simulated in Gazebo and real-world scenarios) using a TurtleBot3 platform with 2D LiDAR. Performance is assessed across multiple dimensions: localization accuracy via Absolute Trajectory Error (ATE) against ground truth, map quality through point cloud alignment metrics, computational efficiency via per-scan processing time, and uncertainty calibration using chi-squared consistency tests.
+State estimation is performed by an Extended Kalman Filter (EKF). The state vector contains the robot pose $(x, y, \theta)$ and all landmark parameters jointly, so that a single observation updates both the observed landmark and every other landmark through the cross-covariance structure. At each scan, odometry increments propagate the state through a midpoint-integration motion model with motion-scaled process noise. Landmarks are matched to observations using nearest-neighbour association with Mahalanobis-distance gating at the 95% chi-squared confidence level ($\chi^2_{0.05}(2) = 5.99$ for 2-DOF features). After each EKF update, wall parameters are normalised to enforce $\rho \geq 0$, preventing sign drift that would cause a previously observed wall to fail the association gate and be re-entered as a duplicate.
 
-Key contributions include: (1) a rigorous controlled comparison framework ensuring identical exploration trajectories, (2) comprehensive uncertainty quantification for both dense and sparse methods, (3) detailed analysis of computational-accuracy trade-offs, (4) open-source ROS 2 implementation with reproducible evaluation methodology, and (5) quantitative guidance for practitioners on selecting appropriate SLAM approaches based on environment structure, computational constraints, and accuracy requirements.
+Global consistency is maintained by a submap-stitching layer. Every $N$ scans the accumulated local point cloud is registered against the growing global map using point-to-point ICP. The alignment covariance is computed from the Gauss–Newton Hessian of the ICP cost function,
 
-Results demonstrate that ICP-based methods achieve superior short-term localization accuracy and complete environmental coverage at the cost of higher computational load and potential drift accumulation. Feature-based methods provide consistent long-term accuracy through explicit landmark correspondence, compact map representations, and interpretable geometric primitives, but require sufficient environmental structure for reliable feature extraction. Uncertainty calibration analysis reveals that feature-based full covariance tracking better reflects true estimation error compared to ICP Hessian estimates, particularly over extended operation.
+$$\mathbf{R}_{\mathrm{ICP}} = \sigma^2\,\mathbf{A}_{\mathrm{ICP}}^{-1},$$
 
-This work provides a comprehensive empirical foundation for understanding the practical trade-offs between dense and sparse SLAM paradigms in real-world autonomous navigation scenarios.
+making it geometry-aware: low uncertainty along well-constrained directions and high uncertainty in degenerate directions such as along a featureless corridor. The ICP pose correction is injected into the EKF as a direct pose observation, propagating the correction to all correlated landmarks.
 
----
-
-### Keywords
-
-Simultaneous Localization and Mapping (SLAM), Iterative Closest Point (ICP), Extended Kalman Filter (EKF), Frontier-based Exploration, Uncertainty Quantification, Feature Extraction, Data Association, Mobile Robotics, ROS 2, Comparative Analysis
-
----
-
-### Thesis Structure
-
-1. **Introduction** - Motivation, problem statement, contributions
-2. **Literature Review** - ICP-based SLAM, feature-based SLAM, frontier exploration, comparative studies
-3. **Methodology: ICP-Based Mapping** - Algorithm, implementation, uncertainty quantification
-4. **Methodology: Feature-Based Mapping** - Feature extraction, EKF-SLAM, data association
-5. **Experimental Setup** - Hardware platform, environments, evaluation metrics
-6. **Results and Analysis** - Accuracy, efficiency, uncertainty calibration, trade-off analysis
-7. **Conclusion and Future Work** - Summary, practical guidance, extensions
-
----
-
-### Supervisor Information
-[Add supervisor name and affiliation]
-
-### Institution
-[Add institution name]
-
-### Date
-February 2026
-
----
-
-**Word Count**: 442 words (suitable for most thesis requirements; can be condensed to 250-300 words if needed)
+The system is implemented as a ROS 2 node in Python, tested on TurtleBot3 in structured indoor environments. Performance is assessed using the absolute trajectory error (ATE), landmark map accuracy, point cloud quality, and filter consistency via the normalised estimation error squared (NEES).

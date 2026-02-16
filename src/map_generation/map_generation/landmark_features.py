@@ -15,8 +15,7 @@ class LandmarkFeatureExtractor:
                  lidar_noise_sigma: float = 0.01,
                  merge_angle_tolerance: float = 0.350,
                  merge_rho_tolerance: float = 0.15,
-                 grow_residual_threshold: float = 0.03,
-                 corner_neighbor_range: int = 6):
+                 grow_residual_threshold: float = 0.03):
       
         self.min_points = min_points_per_line
         self.min_length = min_line_length
@@ -25,7 +24,6 @@ class LandmarkFeatureExtractor:
         self.merge_angle_tol = merge_angle_tolerance
         self.merge_residual_tol = merge_rho_tolerance
         self.grow_residual_threshold = grow_residual_threshold
-        self.corner_neighbor_range = max(2, int(corner_neighbor_range))
 
         self.lidar_sigma = lidar_noise_sigma
 
@@ -148,7 +146,7 @@ class LandmarkFeatureExtractor:
 
         while i < n:
             candidate = points[start:i + 1]
-            residual = self._segment_residual_to_endpoint_line(candidate)
+            residual = self._segment_residual_tls(candidate)
 
             if residual <= self.grow_residual_threshold:
                 i += 1
@@ -172,26 +170,17 @@ class LandmarkFeatureExtractor:
         return segments
 
     def _fit_line_tls(self, points: np.ndarray):
-        """Fit a line to points using Total Least Squares (PCA).
-
-        Returns (centroid, direction, normal) where direction and normal are
-        unit vectors. The line passes through centroid along direction.
-        """
+        
         centroid = points.mean(axis=0)
         centered = points - centroid
-        # SVD: the line direction is the eigenvector of the largest eigenvalue
-        # i.e., the first right-singular vector of the centered data matrix
+        
         _, _, Vt = np.linalg.svd(centered, full_matrices=False)
         direction = Vt[0]  # principal axis (line direction)
         normal = np.array([-direction[1], direction[0]])  # perpendicular
         return centroid, direction, normal
 
     def _segment_residual_tls(self, segment_points: np.ndarray) -> float:
-        """Max perpendicular distance from any point to the TLS best-fit line.
-
-        This replaces the endpoint-based residual which is sensitive to noisy
-        LiDAR endpoints (grazing-angle measurements).
-        """
+        
         if len(segment_points) < 2:
             return 0.0
         if len(segment_points) == 2:
@@ -200,10 +189,6 @@ class LandmarkFeatureExtractor:
         centroid, _, normal = self._fit_line_tls(segment_points)
         dists = np.abs((segment_points - centroid) @ normal)
         return float(np.max(dists))
-
-    # Keep old name as an alias so any remaining call sites still work
-    def _segment_residual_to_endpoint_line(self, segment_points: np.ndarray) -> float:
-        return self._segment_residual_tls(segment_points)
 
     def _try_finalize_segment(self, segment_points: np.ndarray) -> Optional[np.ndarray]:
         if len(segment_points) < self.min_points:
@@ -233,7 +218,7 @@ class LandmarkFeatureExtractor:
             else:
                 candidate = np.vstack([current, seg])
 
-            residual = self._segment_residual_to_endpoint_line(candidate)
+            residual = self._segment_residual_tls(candidate)
 
             if (angle_diff <= self.merge_angle_tol and
                     endpoint_gap <= self.max_gap and
@@ -257,29 +242,6 @@ class LandmarkFeatureExtractor:
     def _acute_angle_between_dirs(self, d1: np.ndarray, d2: np.ndarray) -> float:
         dot = np.clip(np.dot(d1, d2), -1.0, 1.0)
         return np.arccos(abs(dot))
-
-    def _line_from_endpoints(self, points: np.ndarray) -> Dict:
-        start = points[0]
-        end = points[-1]
-        delta = end - start
-        length = np.linalg.norm(delta)
-
-        if length < 1e-9:
-            direction = np.array([1.0, 0.0])
-            normal = np.array([0.0, 1.0])
-            midpoint = np.array(start, dtype=float)
-        else:
-            direction = delta / length
-            normal = np.array([-direction[1], direction[0]])
-            midpoint = 0.5 * (start + end)
-
-        return {
-            'start': np.array(start, dtype=float),
-            'end': np.array(end, dtype=float),
-            'direction': direction,
-            'normal': normal,
-            'midpoint': midpoint
-        }
 
     def _convert_line_to_hessian(self, points: np.ndarray) -> Tuple[float, float]:
         # Use TLS centroid and normal so that rho/alpha estimates are consistent

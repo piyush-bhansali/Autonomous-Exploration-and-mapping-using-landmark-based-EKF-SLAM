@@ -1,397 +1,444 @@
-# Feature-Based SLAM with ICP Submap Stitching
+# System Overview
 
-## Abstract
-
-This document provides a comprehensive overview of the production mapping stack used in this repository: **feature-based EKF-SLAM** with **ICP-based submap-to-global stitching**. It summarizes architecture, data flow, uncertainty handling, and evaluation metrics used in structured indoor environments.
-
-## 1. Thesis Objective
-
-### 1.1 Research Question
-
-**How does feature-based EKF-SLAM with ICP-assisted submap stitching perform in terms of:**
-- Localization accuracy
-- Map quality and completeness
-- Computational efficiency
-- Uncertainty quantification
-- Robustness to different environment structures
-
-### 1.2 Methodology
-
-Both approaches are implemented within the same ROS 2 framework and evaluated using:
-- **Identical exploration strategy**: Frontier-based autonomous navigation
-- **Same sensor configuration**: 2D LiDAR (360-degree laser scanner)
-- **Same test environments**: Structured indoor spaces (simulated and real-world)
-- **Consistent evaluation metrics**: Pose error, map accuracy, computation time, uncertainty metrics
-
-## 2. System Architecture
-
-The runtime system now uses a single mapping pipeline:
-
-### 2.1 Feature-Based Mapping (Runtime)
-
-**Approach:** Sparse landmark tracking with EKF-SLAM
-
-**Core Components:**
-- Feature extraction (walls and corners)
-- Data association with Mahalanobis distance gating
-- Full EKF-SLAM (joint robot-landmark state)
-- Fisher Information Matrix uncertainty quantification
-- Feature map representation with geometric primitives
-
-**See:** `docs/methodology_feature_mapping.md` for complete details.
-
-## 3. Common Framework
-
-### 3.1 Shared Components
-
-Core system components:
-
-| Component | Purpose | Implementation |
-|-----------|---------|----------------|
-| **Frontier Explorer** | Autonomous navigation | `autonomous_exploration` package |
-| **Transform Management** | Coordinate frame handling | `transform_utils.py` |
-| **Point Cloud Processing** | Scan conversion and filtering | `mapping_utils.py` |
-| **Data Logging** | CSV output for evaluation | `evaluation_utils.py` |
-| **Ground Truth Interface** | Simulation pose subscription | `local_submap_generator_feature.py` |
-
-### 3.2 ROS 2 Integration
-
-**Main Node:** `LocalSubmapGeneratorFeature`
-
-**Runtime Selection:**
-- Feature mode is the only supported mapping runtime mode.
-
-**Common Subscriptions:**
-- `/tb3_1/scan` (LaserScan) — LiDAR measurements
-- `/tb3_1/odom` (Odometry) — Wheel encoder estimates
-- `/tb3_1/ground_truth_pose` (PoseStamped) — Simulation ground truth
-
-**Common Publications:**
-- `/tb3_1/ekf_pose` (PoseStamped) — Corrected robot pose
-- `/tb3_1/ekf_path` (Path) — Trajectory history
-- `/tb3_1/global_map` (PointCloud2) — Global map
-
-**Additional Publications:**
-- `/tb3_1/scan_features` (MarkerArray) — Detected landmarks
-- `/tb3_1/current_submap` (PointCloud2) — Current submap
-
-**TF Broadcast:**
-- `map → tb3_1/odom` — Corrected transform (feature pipeline)
-
-## 4. Coordinate Frames
-
-Both systems use the standard ROS REP-105 coordinate frame convention:
-
-```
-map (Fixed World Frame)
- │
- └─> odom (Odometry Frame, drift-prone)
-      │
-      └─> base_footprint (Robot Frame)
-```
-
-### 4.1 Frame Definitions
-
-**`map` Frame:**
-- Fixed global reference frame
-- Origin defined at system initialization
-- Corrected by SLAM (EKF state estimate)
-
-**`odom` Frame:**
-- Locally consistent odometry frame
-- Drifts over time due to wheel slip
-- Updated by Gazebo odometry
-
-**`base_footprint` Frame:**
-- Robot-centered frame
-- LiDAR measurements expressed here initially
-
-### 4.2 Transform Chain
-
-The EKF publishes `map → odom` transform:
-
-$$
-^{map}\mathbf{T}_{base} = \, ^{map}\mathbf{T}_{odom} \times \, ^{odom}\mathbf{T}_{base}
-$$
-
-## 5. Evaluation Framework
-
-### 5.1 Evaluation Metrics
-
-| Metric | Description | Computation |
-|--------|-------------|-------------|
-| **Absolute Trajectory Error (ATE)** | Pose error vs ground truth | RMSE of position and orientation |
-| **Map Accuracy** | Point cloud alignment error | Cloud-to-cloud distance |
-| **Computation Time** | Processing latency per scan | Wall-clock timing |
-| **Uncertainty Calibration** | Predicted vs actual error | Chi-squared test, NEES |
-| **Landmark Count** | Map sparsity (feature mode) | Number of landmarks in state |
-| **Memory Usage** | State vector size | Bytes allocated |
-
-### 5.2 Data Collection
-
-**Logged Data:**
-
-| File | Content | Purpose |
-|------|---------|---------|
-| `ekf_vs_groundtruth.csv` | Pose errors over time | Accuracy evaluation |
-| `submap_confidence.csv` | Uncertainty metrics per submap | Uncertainty analysis |
-| `global_map.pcd` | Final point cloud map | Visual comparison |
-| `computation_time.csv` | Per-scan processing time | Efficiency evaluation |
-
-**Feature Pipeline Additional Data:**
-- `landmark_count.csv` — Number of landmarks over time
-- `feature_matches.csv` — Data association statistics
-
-## 6. Mapping Architecture
-
-### 6.1 Feature-Based Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                Feature-Based SLAM Pipeline                   │
-│                                                               │
-│  ┌──────────────┐      ┌──────────────┐                     │
-│  │   LiDAR      │────>│   Feature     │                     │
-│  │   Scans      │      │  Extraction   │                     │
-│  └──────────────┘      └──────────────┘                     │
-│                               │                               │
-│                               ↓                               │
-│                    ┌──────────────────┐                      │
-│                    │      Data        │                      │
-│                    │   Association    │                      │
-│                    └──────────────────┘                      │
-│                               │                               │
-│                               ↓                               │
-│                    ┌──────────────────┐                      │
-│                    │   Full EKF-SLAM  │                      │
-│                    │ (Robot+Landmarks)│                      │
-│                    └──────────────────┘                      │
-│                               │                               │
-│                               ↓                               │
-│                    ┌──────────────────┐                      │
-│                    │   Feature Map    │                      │
-│                    │   Management     │                      │
-│                    └──────────────────┘                      │
-│                               │                               │
-│                               ↓                               │
-│                    ┌──────────────────┐                      │
-│                    │  Point Cloud     │────> Sparse Map      │
-│                    │  Generation      │                      │
-│                    └──────────────────┘                      │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Key Classes:**
-- `FeatureSLAMManager` (encapsulates all feature SLAM logic)
-- `LandmarkFeatureExtractor` in `landmark_features.py`
-- `associate_landmarks()` in `data_association.py`
-- `FeatureMap` in `feature_map.py`
-
-## 7. Performance Characteristics
-
-### 7.1 Feature-Based Approach
-
-| Aspect | Characteristic | Notes |
-|--------|---------------|-------|
-| **Representation** | Sparse landmarks | Walls (ρ, α) + Corners (x, y) |
-| **Computational Complexity** | O(N + L²) per scan | N = features, L = landmarks |
-| **Memory** | Grows quadratically | O(L²) covariance matrix |
-| **Accuracy** | Consistent long-term | Explicit data association prevents drift |
-| **Uncertainty** | Full covariance | Robot-landmark correlations tracked |
-| **Robustness** | Requires features | Struggles in feature-poor environments |
-| **Map Quality** | Geometric abstraction | Compact, semantic representation |
-
-## 8. Exploration Strategy
-
-### 8.1 Frontier-Based Exploration
-
-The mapping pipeline uses the same frontier-based autonomous navigation stack:
-
-**Algorithm:**
-1. Detect frontiers (boundaries between known free space and unknown space)
-2. Rank frontiers by information gain and distance
-3. Select best frontier as navigation goal
-4. Use ROS 2 Nav2 for path planning and execution
-5. Repeat until no frontiers remain
-
-**Implementation:**
-- `autonomous_exploration` ROS 2 package
-- Occupancy grid generation from laser scans
-- Frontier detection with morphological operations
-- Nav2 integration for global/local planning
-
-### 8.2 Controlled Comparison
-
-**Why Same Exploration?**
-- Ensures both methods observe the same environment regions
-- Eliminates exploration bias from results
-- Allows fair comparison of SLAM performance independent of path choice
-
-**Logging:**
-- Exploration paths recorded with timestamps
-- Frontier selection logged for reproducibility
-- Ground truth trajectory stored for error analysis
-
-## 9. Thesis Structure
-
-### 9.1 Documentation Organization
-
-| Document | Purpose |
-|----------|---------|
-| **00_system_overview.md** (this file) | High-level system overview |
-| **literature_review.md** | Academic background and related work |
-| **methodology_feature_mapping.md** | Complete feature-based approach documentation |
-| **01_ekf_slam_theory.md** | Mathematical derivations for EKF-SLAM |
-| **02_landmark_features.md** | Feature extraction algorithms |
-| **03_data_association.md** | Data association theory |
-| **05_submap_management.md** | Submap creation and stitching |
-| **06_uncertainty_quantification.md** | Uncertainty metrics and theory |
-| **07_coordinate_frames.md** | Transform conventions |
-
-### 9.2 Experimental Workflow
-
-```
-1. Setup
-   ├─> Configure simulation environment (Gazebo)
-   ├─> Launch exploration system
-   └─> Start feature-based mapping pipeline
-
-2. Data Collection
-   ├─> Run same exploration scenario
-   ├─> Log pose errors, landmarks, timing
-   └─> Save final feature map + point cloud
-
-3. Analysis
-   ├─> Compute ATE
-   ├─> Compare map quality (cloud-to-cloud)
-   ├─> Analyze uncertainty calibration
-   ├─> Compare computational efficiency
-   └─> Statistical significance testing
-
-4. Visualization
-   ├─> Plot trajectory errors
-   ├─> Render final maps
-   ├─> Generate performance figures
-   └─> Create thesis figures
-```
-
-## 10. Pipeline Summary
-
-### 10.1 State Representation
-
-**Feature-Based EKF-SLAM:**
-$$
-\mathbf{x} = \begin{bmatrix}
-x_r, y_r, \theta_r \\
-\rho_1, \alpha_1 \\
-\vdots \\
-x_{c_1}, y_{c_1} \\
-\vdots
-\end{bmatrix} \quad \text{(robot + landmarks)}
-$$
-
-### 10.2 Measurement Update
-
-**Feature-Based:**
-- Measurement: Landmark observations (ρ, α) or (x, y)
-- Observation model: Geometric projection from robot to landmark
-- Update frequency: Every landmark re-observation
-- Additional pose correction: submap ICP correction during submap stitching
-
-### 10.3 Uncertainty Source
-
-**Feature-Based:**
-- Fisher Information Matrix from feature geometry
-- Propagated through EKF covariance
-- Correlated across landmarks
-- ICP stitching covariance is used as pose-correction uncertainty
-
-## 11. Expected Outcomes
-
-### 11.1 Hypotheses
-
-**H1: Accuracy**
-- Feature-based: Consistent long-term accuracy with robust data association
-- ICP submap stitching: Improves global consistency across submaps
-
-**H2: Computational Efficiency**
-- Feature extraction/association dominates per-scan cost
-- Landmark count drives EKF update growth over time
-
-**H3: Map Quality**
-- Geometrically interpretable wall/corner map with interpolated point cloud output
-
-**H4: Uncertainty Calibration**
-- Predicted EKF uncertainty should track measured trajectory error
-- Submap confidence should improve with repeated landmark observations
-
-### 11.2 Contributions
-
-This comparative study provides:
-- ✅ Rigorous controlled evaluation under identical exploration
-- ✅ Quantitative evaluation across multiple metrics
-- ✅ Open-source implementation with reproducible results
-- ✅ Comprehensive documentation of the deployed mapping pipeline
-- ✅ Uncertainty-aware mapping with quantitative confidence
-
-## 12. Implementation Status
-
-### 12.1 Completed Features
-
-**Feature Pipeline:**
-- ✅ ROS 2 integration with TF2
-- ✅ Ground truth comparison logging
-- ✅ Frontier-based exploration interface
-- ✅ Point cloud visualization
-- ✅ Wall and corner extraction
-- ✅ Data association with segment overlap validation
-- ✅ Full EKF-SLAM with Joseph form update
-- ✅ Feature map with wall extension
-- ✅ Fisher Information covariance
-- ✅ Landmark pruning
-- ✅ ICP-based submap stitching and pose correction
-
-### 12.2 Recent Improvements
-
-**Wall Matching Fix (February 2026):**
-- Added segment overlap validation to prevent merging non-overlapping collinear walls
-- 0.5m gap tolerance for localization errors
-- Improved data association robustness
-
-**Code Cleanup:**
-- Removed dead code (`get_covariance`, `get_statistics`)
-- Fixed redundant imports
-- Verified build success
-
-**Documentation Overhaul:**
-- Created comprehensive literature review
-- Separate methodology documents for both approaches
-- Updated system overview (this file) for comparative study framing
-
-## 13. References
-
-**SLAM Foundations:**
-1. Durrant-Whyte, H., & Bailey, T. (2006). "Simultaneous Localization and Mapping." *IEEE Robotics & Automation Magazine*.
-2. Thrun, S., Burgard, W., & Fox, D. (2005). *Probabilistic Robotics*. MIT Press.
-
-**ICP-Based Methods:**
-3. Besl, P. J., & McKay, N. D. (1992). "A Method for Registration of 3-D Shapes." *IEEE TPAMI*.
-4. Censi, A. (2007). "An Accurate Closed-Form Estimate of ICP's Covariance." *ICRA 2007*.
-
-**Feature-Based Methods:**
-5. Dissanayake, G., et al. (2001). "A Solution to the Simultaneous Localization and Map Building (SLAM) Problem." *IEEE Trans. Robotics and Automation*.
-6. Nguyen, V., et al. (2005). "A Comparison of Line Extraction Algorithms using 2D Laser Rangefinder." *IROS 2005*.
-
-**Exploration:**
-7. Yamauchi, B. (1997). "A Frontier-Based Approach for Autonomous Exploration." *CIRA*.
-8. Burgard, W., et al. (2005). "Coordinated Multi-Robot Exploration." *IEEE Trans. Robotics*.
-
-**See:** `docs/literature_review.md` for complete bibliography (50+ references)
+This thesis presents an autonomous indoor mapping system that integrates real-time feature-based SLAM with ICP-based global map stitching. The system uses an Extended Kalman Filter (EKF) as the core state estimator, fusing wheel odometry with geometric landmark observations to maintain a joint estimate of robot pose and map. A separate navigation module provides frontier-based exploration with RRT* path planning and Pure Pursuit path tracking, enabling the robot to explore unknown environments autonomously. The system is implemented in Python using ROS 2 Jazzy as the middleware framework, with the TurtleBot3 Waffle Pi as the robot platform and Gazebo Harmonic for simulation.
 
 ---
 
-**Next Steps:**
-1. Review methodology document: `methodology_feature_mapping.md`
-2. Run experiments across identical exploration scenarios
-3. Analyze results using evaluation scripts
-4. Generate thesis figures and statistical comparisons
+## System Architecture
+
+The complete system consists of three primary packages: the **Mapping Module** (`map_generation`), the **Navigation Module** (`navigation`), and the **Simulation and Launch infrastructure** (`autonomous_exploration`), all operating within the ROS 2 Jazzy framework.
+
+### High-Level Architecture
+
+The system operates through a hierarchical data flow starting from simulated sensors in Gazebo, processing through the ROS 2 middleware, performing SLAM and navigation computations, and culminating in velocity commands sent back to the robot actuators.
+
+The Gazebo simulation environment provides two sensor streams used by the system:
+
+- **LiDAR**: 360° laser scanner operating at 10 Hz providing 360 range measurements per scan.
+- **Odometry**: Wheel encoder-based position estimates at 10 Hz.
+
+These streams are transmitted through the `gz_ros2_bridge` to the ROS 2 ecosystem, where they are consumed by two parallel processing pipelines: the Mapping Module and the Navigation Module.
+
+### Mapping Module Architecture
+
+The Mapping Module implements the complete SLAM pipeline centred around the `local_submap_generator_feature` node. This node performs three operations in sequence for every incoming scan.
+
+**Feature Extraction.** Each LiDAR scan is processed by `LandmarkFeatureExtractor` to extract geometric landmarks. Line segments are grown incrementally using a Total Least Squares (TLS) residual threshold. Segments are merged where geometrically compatible. Each accepted segment is converted to Hessian normal form $(\rho, \alpha)$ with covariance derived from the Fisher information matrix. Corners are detected at adjacent segment pairs and stored as Cartesian coordinates with analytically propagated covariance.
+
+**EKF-SLAM.** The `LandmarkEKFSLAM` class maintains a joint state vector of robot pose and all confirmed landmarks. Each scan produces: an odometry-based prediction step using midpoint integration, a data association step using nearest-neighbour Mahalanobis gating, and an EKF update step for each matched landmark using the Joseph form covariance update. After every update, wall landmarks are normalised to enforce $\rho \geq 0$.
+
+**Submap Generation and Integration.** After every 50 scans, the accumulated point cloud is passed to `SubmapStitcher`. The submap is voxel-downsampled and registered against the global map using point-to-point ICP. The ICP covariance is computed from the Gauss–Newton Hessian ($\mathbf{R}_{\mathrm{ICP}} = \sigma^2 \mathbf{A}^{-1}$) and injected into the EKF as a direct pose observation to correct odometric drift.
+
+### Navigation Module Architecture
+
+The Navigation Module implements a finite state machine for autonomous exploration centred around the `SimpleNavigationNode` (`simple_navigation.py`). This node runs a 10 Hz control loop cycling through five states: `WAIT_FOR_MAP`, `DETECT_FRONTIERS`, `PLAN_PATH`, `EXECUTE_PATH`, and `DONE`.
+
+**Frontier Detection.** The `ConvexFrontierDetector` identifies frontiers as candidate positions on the convex hull boundary of the current global point cloud, offset inward by 0.5 m. Raw frontier candidates are clustered using DBSCAN to produce discrete exploration goals. Each frontier is scored based on distance from the robot and angular deviation from current heading.
+
+**Path Planning.** Once a frontier goal is selected, `RRTStar` computes a collision-free path through the point cloud map. The planner uses a KDTree built from the point cloud for obstacle queries, with a safety margin of 0.5 m around obstacles. It runs up to 1500 iterations with step size 0.2 m and goal bias 0.5.
+
+**Path Tracking and Control.** `PurePursuit` tracks the planned path using a lookahead distance of 0.8 m. Maximum linear velocity is 0.20 m/s and maximum angular velocity is 1.0 rad/s. A reactive safety layer monitors the LiDAR scan: if any reading within a 60° forward arc falls below 0.4 m the robot stops and replans.
+
+**Failure Recovery.** The system monitors for path deviation beyond 0.5 m and robot stagnation (less than 0.1 m travel in 5 seconds). On failure, the state machine returns to `DETECT_FRONTIERS` and selects an alternative goal.
+
+### Module Organisation
+
+| Package | Node | Key Files |
+|---|---|---|
+| `map_generation` | `local_submap_generator_feature` | `local_submap_generator_feature.py`, `feature_slam_manager.py`, `ekf_predict.py`, `ekf_update_feature.py`, `landmark_features.py`, `data_association.py`, `submap_stitcher.py`, `feature_map.py`, `mapping_utils.py`, `transform_utils.py`, `evaluation_utils.py` |
+| `navigation` | `simple_navigation` | `simple_navigation.py`, `convex_frontier_detector.py`, `rrt_star.py`, `pure_pursuit_controller.py`, `navigation_utils.py` |
+| `autonomous_exploration` | — | `full_system.launch.py`, `qos_profiles.py`, `worlds/maze.sdf`, `models/turtlebot3_waffle_pi/model.sdf` |
+
+---
+
+## Key System Features
+
+### SLAM and Mapping Capabilities
+
+**TLS-Based Feature Extraction.** Line segments are fit using Total Least Squares via SVD. The TLS residual (maximum perpendicular distance from any point to the best-fit line) is used in both the grow and merge phases. This is more robust than endpoint-based residuals, which are dominated by noise at shallow incidence angles.
+
+**CRLB Covariance.** Wall covariance is derived from the Fisher information matrix $\mathbf{A} = \sum_i \mathbf{J}_i^\top \mathbf{J}_i$ with fixed sensor noise $\sigma = 0.01\;\mathrm{m}$ from the LDS-01 specification: $\mathrm{Cov}(\rho, \alpha) = \sigma^2 \mathbf{A}^{-1}$. Corner covariance is propagated analytically through the line-intersection Jacobian.
+
+**Joint EKF State.** The full joint covariance over robot pose and all landmarks is maintained. A single observation updates the observed landmark and all correlated landmarks through the cross-covariance terms. This is the mechanism that makes EKF-SLAM globally consistent.
+
+**Joseph Form Update.** The covariance update uses the Joseph form $\mathbf{P} = (\mathbf{I} - \mathbf{K}\mathbf{H})\mathbf{P}(\mathbf{I} - \mathbf{K}\mathbf{H})^\top + \mathbf{K}\mathbf{R}\mathbf{K}^\top$, which guarantees positive semi-definiteness regardless of finite-precision errors in $\mathbf{K}$.
+
+**Wall Normalisation.** After every EKF update all wall landmarks are checked. If $\rho_i < 0$, both $\rho_i$ and $\alpha_i$ are flipped. This prevents sign drift from causing the same physical wall to be re-entered as a duplicate landmark.
+
+**Hessian ICP Covariance.** The ICP covariance is computed from the Gauss–Newton Hessian of the point-to-point alignment cost, giving a geometry-aware $3 \times 3$ covariance in $[x, y, \theta]$ space. In featureless corridors the eigenvalue along the corridor direction is large, automatically downweighting that component in the EKF update.
+
+**GPU Acceleration.** All point cloud operations in `SubmapStitcher` use the Open3D tensor API. CUDA is used where available; the system falls back to CPU automatically.
+
+### Navigation and Exploration Capabilities
+
+**Convex Hull Frontier Detection.** Frontiers are generated as a regularly spaced set of candidate positions on the inward-offset boundary of the convex hull of the current global map. This avoids the need for an occupancy grid and works directly with the native point cloud map representation.
+
+**DBSCAN Clustering.** Raw frontier candidates are grouped using DBSCAN, which determines cluster count automatically and filters noise. Cluster centroids become exploration goals.
+
+**RRT* Path Planning.** The planner uses RRT* rather than basic RRT, incorporating rewiring operations that progressively improve path quality. Initial paths are typically found in well under 1500 iterations, with subsequent iterations refining toward shorter solutions.
+
+**Reactive Safety Layer.** While following a planned path, the node continuously monitors the forward LiDAR arc (±30° from heading). If any reading falls below 0.4 m the robot stops immediately and a replan is triggered.
+
+**Stuck Detection.** If the robot travels less than 0.1 m in any 5-second window during path execution, it is declared stuck. The state machine abandons the current goal and selects a new frontier.
+
+**Thread-Safe Map Access.** The global map is protected by a `threading.Lock`. The navigation and mapping nodes run in separate threads; the lock prevents race conditions between map updates and map reads during frontier detection and path planning.
+
+---
+
+## Technology Stack
+
+| Component | Technology | Version | Purpose |
+|---|---|---|---|
+| Middleware | ROS 2 | Jazzy | Robot communication framework |
+| Simulator | Gazebo | Harmonic | Physics-based simulation |
+| Point Cloud | Open3D | 0.18+ | GPU-accelerated ICP and voxel operations |
+| Clustering | scikit-learn | Latest | DBSCAN frontier clustering |
+| Geometry | Shapely | Latest | Convex hull frontier boundary computation |
+| Numerical | NumPy / SciPy | Latest | Matrix operations, KDTree |
+
+There is no GTSAM dependency. Loop closure and pose graph optimisation are not implemented. Global consistency is maintained solely through the EKF cross-covariance structure and periodic ICP submap corrections.
+
+### Hardware Requirements
+
+| Component | Specification |
+|---|---|
+| CPU | Intel Core i7-10750H @ 2.60 GHz (6 cores, 12 threads) |
+| RAM | 8 GB |
+| GPU | NVIDIA GeForce GTX 1660 Ti (6 GB VRAM, CUDA 12.0) |
+| Storage | 1 TB SSD |
+
+---
+
+## ROS 2 Software Architecture
+
+The system runs two primary nodes concurrently. The mapping node processes sensor data and maintains the SLAM state. The navigation node queries the map, plans paths, and sends velocity commands.
+
+### System Nodes
+
+#### Mapping Node: `local_submap_generator_feature`
+
+Implemented in `map_generation/local_submap_generator_feature.py`. Responsible for feature extraction, EKF-SLAM, submap stitching, and publishing the corrected pose and global map.
+
+**Subscribed Topics:**
+
+| Topic | Type | Rate | Content |
+|---|---|---|---|
+| `/{robot}/scan` | `sensor_msgs/LaserScan` | 10 Hz | 360 range measurements, 1° resolution |
+| `/{robot}/odom` | `nav_msgs/Odometry` | 10 Hz | Pose and twist in odometry frame |
+
+**Published Topics:**
+
+| Topic | Type | Rate | Content |
+|---|---|---|---|
+| `/{robot}/ekf_pose` | `geometry_msgs/PoseStamped` | Per scan | EKF-corrected robot pose |
+| `/{robot}/ekf_path` | `nav_msgs/Path` | Per scan | Full trajectory history |
+| `/{robot}/scan_features` | `visualization_msgs/MarkerArray` | Per scan | Extracted wall and corner markers |
+| `/{robot}/current_submap` | `sensor_msgs/PointCloud2` | Per submap | Current accumulated point cloud |
+| `/{robot}/global_map` | `sensor_msgs/PointCloud2` | 1 Hz timer | Stitched global map |
+
+**TF Broadcast:** `map → {robot}/odom` at 10 Hz, computed from the EKF pose minus the latest odometry pose.
+
+#### Navigation Node: `simple_navigation`
+
+Implemented in `navigation/simple_navigation.py`. Runs a 10 Hz control loop that drives the robot through the state machine.
+
+**Subscribed Topics:**
+
+| Topic | Type | Rate | Content |
+|---|---|---|---|
+| `/{robot}/global_map` | `sensor_msgs/PointCloud2` | 1 Hz | Accumulated map for frontier detection and collision checking |
+| `/{robot}/scan` | `sensor_msgs/LaserScan` | 10 Hz | Forward scan for reactive obstacle avoidance |
+
+**Published Topics:**
+
+| Topic | Type | Rate | Content |
+|---|---|---|---|
+| `/{robot}/cmd_vel` | `geometry_msgs/Twist` | 10 Hz | Linear and angular velocity commands |
+| `/{robot}/planned_path` | `nav_msgs/Path` | Per replan | RRT* trajectory waypoints |
+| `/{robot}/frontier_markers` | `visualization_msgs/MarkerArray` | Per detection | Frontier cluster visualisation |
+| `/{robot}/hull_boundary` | `visualization_msgs/MarkerArray` | Per detection | Convex hull boundary marker |
+
+Robot pose is obtained from the TF tree (`map → {robot}/odom → {robot}/base_footprint`) using `tf2_ros`.
+
+### Quality of Service Profiles
+
+QoS profiles are defined centrally in `autonomous_exploration/qos_profiles.py` and shared by both nodes.
+
+| Topic Class | QoS Policy | Rationale |
+|---|---|---|
+| `/scan` | RELIABLE | All scans needed for consistent map; dropped scans create coverage gaps |
+| `/odom` | RELIABLE | Missing odometry increments cause EKF prediction errors |
+| `/cmd_vel` | RELIABLE | Lost velocity commands cause unpredictable motion |
+| `/global_map` | RELIABLE | Large messages must arrive complete for planning to function |
+
+### Simulation Module
+
+The simulation infrastructure is managed through `autonomous_exploration/launch/full_system.launch.py`.
+
+**Configurable launch arguments:**
+
+| Argument | Default | Options |
+|---|---|---|
+| `world` | `maze` | `maze`, `park` |
+| `enable_navigation` | `true` | `true`, `false` |
+| `use_rviz` | `true` | `true`, `false` |
+
+The number of robots is controlled by `NUM_ROBOTS` (currently 1; supports up to 2). Robot 1 spawns at $(-12, -12)$ m facing east. Robot 2, if enabled, spawns at $(12, 12)$ m facing southwest.
+
+Startup is sequenced with timers: Gazebo at $t = 0$ s, robot spawn at $t = 2$ s, mapping node at $t = 4$ s, RViz at $t = 6$ s, navigation node at $t = 8$ s.
+
+---
+
+## Data Flow
+
+The system processes data through two primary pipelines running in parallel.
+
+### Scan Processing Pipeline (10 Hz)
+
+```
+/{robot}/scan  (LaserScan, 10 Hz)
+       │
+       ▼
+LandmarkFeatureExtractor
+  ├─ TLS line growing + merge  →  walls (ρ, α) + CRLB covariance
+  └─ Corner detection          →  corners (x, y) + Jacobian covariance
+       │
+       ▼
+associate_landmarks()
+  ├─ Euclidean pre-filter (6.0 m)
+  └─ Mahalanobis gate (D²_M < 5.991)
+       ├─── Matched   →  LandmarkEKFSLAM.update_landmark_observation()
+       └─── Unmatched →  provisional buffer → add_landmark() after 2 obs
+```
+
+### Odometry Prediction Pipeline (10 Hz)
+
+```
+/{robot}/odom  (Odometry, 10 Hz)
+       │
+       ▼
+compute_relative_motion_2d()  →  (δ_d, δ_θ)
+       │
+       ▼
+LandmarkEKFSLAM.predict_with_relative_motion()
+  ├─ Midpoint integration
+  └─ Motion-scaled process noise
+```
+
+### Submap Pipeline (every 50 scans)
+
+```
+Accumulated scan points  (submap-local frame)
+       │
+       ▼
+SubmapStitcher.integrate_submap_to_global_map()
+  ├─ Voxel downsample (0.05 m)
+  ├─ ICP vs global map  →  fitness, transform, R_ICP
+  └─ if accepted: LandmarkEKFSLAM.update()  →  pose correction
+```
+
+### Gazebo–ROS 2 Bridge Configuration
+
+The `config/tb3_bridge.yaml` file maps Gazebo's internal topics to ROS 2. Example entry:
+
+```yaml
+- ros_topic_name: "/tb3_1/scan"
+  gz_topic_name: "/world/maze_world/model/tb3_1/link/base_scan/sensor/lidar/scan"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+```
+
+Similar mappings exist for `/odom` and `/cmd_vel`.
+
+---
+
+## TurtleBot3 Robot Platform
+
+### Platform Overview
+
+The TurtleBot3 Waffle Pi is a differential-drive mobile robot developed by ROBOTIS. It uses two independently actuated drive wheels and a passive rear caster. Differential drive provides in-place rotation with simple, well-characterised kinematics suited to odometry-based dead reckoning.
+
+### Physical Specifications
+
+| Parameter | Value |
+|---|---|
+| Length | 281 mm |
+| Width | 306 mm |
+| Height | 141 mm |
+| Mass | 1.8 kg |
+| Wheelbase | 287 mm |
+| Wheel diameter | 66 mm |
+| Ground clearance | 10 mm |
+
+The centre of mass is at $[-0.064, 0, 0.048]$ m relative to the geometric centre — slightly rear-biased due to battery placement.
+
+### Sensor Suite
+
+#### LiDAR Sensor (HLS-LFCD-LDS)
+
+The robot is equipped with a Hitachi-LG LDS-01 triangulation laser distance sensor.
+
+| Parameter | Value |
+|---|---|
+| Update rate | 10 Hz |
+| Angular coverage | 360° |
+| Angular resolution | 1.0° (360 samples/scan) |
+| Minimum range | 0.12 m |
+| Maximum range | 3.5 m (nominal indoor range) |
+| Accuracy | ±10 mm (1 σ) |
+
+In Gazebo the LiDAR is modelled with additive Gaussian noise: mean 0, standard deviation 0.01 m — consistent with the manufacturer specification. The sensor is mounted at $[-0.064, 0, 0.121]$ m in the robot base frame. All SLAM covariance calculations use $\sigma = 0.01\;\mathrm{m}$.
+
+The sensor publishes `sensor_msgs/LaserScan` to `/{robot}/scan` at 10 Hz with 360 range values, angular limits $[0, 2\pi]$, and range limits $[0.12, 3.5]$ m.
+
+#### Wheel Odometry
+
+Odometry is generated by the Gazebo differential drive plugin, which integrates simulated wheel velocities to produce pose estimates.
+
+| Parameter | Value |
+|---|---|
+| Update rate | 10 Hz |
+| Position noise (σ) | 0.071 m |
+| Orientation noise (σ) | 0.141 rad |
+
+The noise parameters correspond to the `pose_covariance_diagonal` values `[0.005, 0.005, 0.001, 0.001, 0.001, 0.02]` (variances in $[x, y, z, \mathrm{roll}, \mathrm{pitch}, \mathrm{yaw}]$) in the robot SDF model. The 0.141 rad orientation noise reflects the accumulation of differential encoder errors over time.
+
+The odometry frame (`{robot}/odom`) drifts globally. The mapping node's EKF corrects this drift and publishes the `map → {robot}/odom` transform.
+
+**Note:** The system does not use an IMU. The EKF prediction step uses only wheel odometry increments. There is no IMU subscription in `local_submap_generator_feature.py`.
+
+---
+
+## Gazebo Simulation Environment
+
+### Simulation Platform
+
+The system uses Gazebo Harmonic with the Open Dynamics Engine (ODE) physics solver. The simulation runs at an internal timestep of 1 ms. Sensors sample at their configured rates (LiDAR at 10 Hz, odometry at 10 Hz).
+
+### Simulation Plugins
+
+| Plugin | Function |
+|---|---|
+| Physics | Rigid body dynamics and collision detection (ODE, 1 ms timestep) |
+| Scene Broadcaster | Visual state publication for RViz |
+| Sensors | LiDAR ray casting with Gaussian noise |
+| Differential Drive | Converts `cmd_vel` to wheel torques; publishes odometry |
+| GPU LiDAR | GPU-accelerated 360° laser ray casting |
+
+The differential drive plugin implements standard inverse kinematics. Given commanded linear velocity $v$ and angular velocity $\omega$:
+
+$$
+v_L = v - \frac{\omega L}{2}, \qquad v_R = v + \frac{\omega L}{2},
+$$
+
+where $L = 0.287\;\mathrm{m}$ is the wheelbase. PID controllers apply wheel torques to track the commanded speeds. Forward kinematics integrates actual wheel velocities to produce the odometry estimate.
+
+### Maze World Environment
+
+The primary test environment is defined in `autonomous_exploration/worlds/maze.sdf`.
+
+| Property | Value |
+|---|---|
+| Wall height | 2.0 m (prevents LiDAR scanning over walls) |
+| Wall thickness | 0.2 m |
+| Corridor widths | 1.5–3.0 m |
+| Environment type | Indoor maze with multiple rooms, corridors, dead ends, and loops |
+
+The loop topology tests whether the EKF-ICP pipeline maintains global consistency after the robot revisits areas.
+
+---
+
+## System Deployment
+
+### Build Process
+
+```bash
+cd ~/thesis_ws
+colcon build --symlink-install
+source install/setup.bash
+```
+
+`--symlink-install` creates symbolic links to Python files rather than copies. Changes to Python source take effect immediately without rebuilding.
+
+### Launching the System
+
+**Full system (maze world, with navigation and RViz):**
+```bash
+ros2 launch autonomous_exploration full_system.launch.py
+```
+
+**Mapping only (no autonomous navigation):**
+```bash
+ros2 launch autonomous_exploration full_system.launch.py enable_navigation:=false
+```
+
+**Headless (no RViz):**
+```bash
+ros2 launch autonomous_exploration full_system.launch.py use_rviz:=false
+```
+
+### System Monitoring
+
+**List active nodes:**
+```bash
+ros2 node list
+```
+
+**Verify topic publication rates:**
+```bash
+ros2 topic hz /tb3_1/global_map      # ~0.1 Hz during active exploration
+ros2 topic hz /tb3_1/scan            # ~10 Hz
+ros2 topic hz /tb3_1/ekf_pose        # ~10 Hz
+```
+
+**Inspect current EKF pose:**
+```bash
+ros2 topic echo /tb3_1/ekf_pose --once
+```
+
+**Check node subscriptions and publications:**
+```bash
+ros2 node info /local_submap_generator_feature
+ros2 node info /simple_navigation
+```
+
+---
+
+## Performance Characteristics
+
+### Simulation vs. Reality
+
+| Aspect | Simulation | Real World |
+|---|---|---|
+| LiDAR noise | Parametric Gaussian ($\sigma = 0.01\;\mathrm{m}$) | Non-Gaussian, includes bias drift and temperature effects |
+| Wheel slip | Modelled via ODE friction coefficients | Depends on surface, wear, and load distribution |
+| Timing | Deterministic 1 ms physics steps | Variable latency, asynchronous sensor delivery |
+| Repeatability | Identical results for identical inputs | Non-deterministic due to real-world variability |
+
+Simulation provides the controlled, repeatable environment necessary for systematic evaluation of the SLAM and navigation algorithms. The parametric noise models capture the key characteristics — range uncertainty, odometric drift — that the algorithms must handle. The primary limitation is that correlated noise, sensor bias, and surface-dependent wheel slip are not captured by the Gaussian models used.
+
+### Computational Complexity
+
+| Operation | Complexity | Dominant Cost |
+|---|---|---|
+| Feature extraction | $O(N)$ per scan | TLS SVD per segment |
+| Data association | $O(L)$ per feature | Mahalanobis distance per landmark |
+| EKF update | $O(L^2)$ per observation | Full covariance propagation |
+| Covariance conditioning | $O(L^3)$ periodic | Eigendecomposition |
+| ICP (per submap) | $O(P \log P)$ | KDTree correspondence search |
+
+where $N$ is the number of scan points, $L$ is the number of landmarks in the state, and $P$ is the number of points in the submap. The $O(L^2)$ EKF update is the scalability bottleneck; the system is designed for structured indoor environments where $L$ is bounded to hundreds rather than thousands of landmarks.
+
+---
+
+## Documentation Map
+
+| Document | Content |
+|---|---|
+| `00_system_overview.md` | This file — full system description, parameters, deployment |
+| `01_ekf_slam_theory.md` | EKF-SLAM: state representation, prediction, update, Jacobians |
+| `02_landmark_features.md` | Feature extraction: TLS, Hessian form, CRLB covariance, corners |
+| `03_data_association.md` | Data association: Mahalanobis gating, chi-squared test, Jacobians |
+| `05_submap_management.md` | Submap stitching: ICP, Hessian covariance, EKF feedback |
+| `literature_review.md` | Implementation-focused review (algorithms used in this system) |
+| `introduction_literature_review.md` | Broad introduction: general SLAM, EKF theory, uncertainty propagation |
