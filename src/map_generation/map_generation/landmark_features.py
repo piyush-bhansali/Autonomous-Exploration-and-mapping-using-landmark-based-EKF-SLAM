@@ -28,17 +28,17 @@ class LandmarkFeatureExtractor:
         self.lidar_sigma = lidar_noise_sigma
 
     def extract_features(self, scan_msg: LaserScan) -> List[Dict]:
-        points = self._scan_to_cartesian(scan_msg)
+        points = self.scan_to_cartesian(scan_msg)
         if len(points) < self.min_points:
             return []
 
         pts_2d = points[:, :2] if points.shape[1] >= 2 else points
-        lines, corners = self._extract_lines_and_corners(pts_2d)
+        lines, corners = self.extract_lines_and_corners(pts_2d)
 
         features = []
 
         for line in lines:
-            cov = line.get('covariance', self._compute_wall_covariance(line))
+            cov = line.get('covariance', self.compute_wall_covariance(line))
             features.append({
                 'type': 'wall',
                 'rho': line['rho'],
@@ -66,7 +66,7 @@ class LandmarkFeatureExtractor:
 
         return features
 
-    def _scan_to_cartesian(self, scan_msg: LaserScan) -> np.ndarray:
+    def scan_to_cartesian(self, scan_msg: LaserScan) -> np.ndarray:
         ranges = np.array(scan_msg.ranges)
         num_points = len(ranges)
         angles = np.linspace(scan_msg.angle_min, scan_msg.angle_max, num_points)
@@ -85,11 +85,11 @@ class LandmarkFeatureExtractor:
 
         return np.column_stack([x, y])
 
-    def _extract_lines_and_corners(self, points: np.ndarray) -> Tuple[List[Dict], List[Dict]]:
+    def extract_lines_and_corners(self, points: np.ndarray) -> Tuple[List[Dict], List[Dict]]:
         if len(points) < self.min_points:
             return [], []
 
-        continuous_segments = self._split_on_gaps(points)
+        continuous_segments = self.split_on_gaps(points)
 
         all_lines: List[Dict] = []
         all_corners: List[Dict] = []
@@ -98,23 +98,23 @@ class LandmarkFeatureExtractor:
             if len(seg_points) < self.min_points:
                 continue
 
-            grown_segments = self._grow_lines_incremental(seg_points)
-            merged_segments = self._merge_adjacent_lines(grown_segments)
+            grown_segments = self.grow_lines_incremental(seg_points)
+            merged_segments = self.merge_adjacent_lines(grown_segments)
 
             valid_lines = []
             for seg in merged_segments:
-                line = self._make_line_dict(seg)
+                line = self.make_line_dict(seg)
                 if line is not None:
                     valid_lines.append(line)
 
-            corners = self._extract_corners_from_adjacent_lines(valid_lines)
+            corners = self.extract_corners_from_adjacent_lines(valid_lines)
 
             all_lines.extend(valid_lines)
             all_corners.extend(corners)
 
         return all_lines, all_corners
 
-    def _split_on_gaps(self, points: np.ndarray) -> List[Tuple[np.ndarray, int]]:
+    def split_on_gaps(self, points: np.ndarray) -> List[Tuple[np.ndarray, int]]:
         if len(points) < 2:
             return [(points, 0)]
 
@@ -135,7 +135,7 @@ class LandmarkFeatureExtractor:
 
         return segments if segments else [(points, 0)]
 
-    def _grow_lines_incremental(self, points: np.ndarray) -> List[np.ndarray]:
+    def grow_lines_incremental(self, points: np.ndarray) -> List[np.ndarray]:
         n = len(points)
         if n < self.min_points:
             return []
@@ -146,14 +146,14 @@ class LandmarkFeatureExtractor:
 
         while i < n:
             candidate = points[start:i + 1]
-            residual = self._segment_residual_tls(candidate)
+            residual = self.segment_residual_tls(candidate)
 
             if residual <= self.grow_residual_threshold:
                 i += 1
                 continue
 
             # Finalize previous valid segment (exclude violating point i).
-            segment = self._try_finalize_segment(points[start:i])
+            segment = self.try_finalize_segment(points[start:i])
             if segment is not None:
                 segments.append(segment)
 
@@ -163,13 +163,13 @@ class LandmarkFeatureExtractor:
                 break
             i = start + 1
 
-        tail = self._try_finalize_segment(points[start:n])
+        tail = self.try_finalize_segment(points[start:n])
         if tail is not None:
             segments.append(tail)
 
         return segments
 
-    def _fit_line_tls(self, points: np.ndarray):
+    def fit_line_tls(self, points: np.ndarray):
         
         centroid = points.mean(axis=0)
         centered = points - centroid
@@ -179,18 +179,18 @@ class LandmarkFeatureExtractor:
         normal = np.array([-direction[1], direction[0]])  # perpendicular
         return centroid, direction, normal
 
-    def _segment_residual_tls(self, segment_points: np.ndarray) -> float:
+    def segment_residual_tls(self, segment_points: np.ndarray) -> float:
         
         if len(segment_points) < 2:
             return 0.0
         if len(segment_points) == 2:
             return 0.0  # Two points always define a line exactly
 
-        centroid, _, normal = self._fit_line_tls(segment_points)
+        centroid, _, normal = self.fit_line_tls(segment_points)
         dists = np.abs((segment_points - centroid) @ normal)
         return float(np.max(dists))
 
-    def _try_finalize_segment(self, segment_points: np.ndarray) -> Optional[np.ndarray]:
+    def try_finalize_segment(self, segment_points: np.ndarray) -> Optional[np.ndarray]:
         if len(segment_points) < self.min_points:
             return None
 
@@ -200,7 +200,7 @@ class LandmarkFeatureExtractor:
 
         return segment_points
 
-    def _merge_adjacent_lines(self, segments: List[np.ndarray]) -> List[np.ndarray]:
+    def merge_adjacent_lines(self, segments: List[np.ndarray]) -> List[np.ndarray]:
         if len(segments) < 2:
             return segments
 
@@ -208,9 +208,9 @@ class LandmarkFeatureExtractor:
 
         for seg in segments[1:]:
             current = merged[-1]
-            dir_curr = self._segment_direction_endpoints(current)
-            dir_seg = self._segment_direction_endpoints(seg)
-            angle_diff = self._acute_angle_between_dirs(dir_curr, dir_seg)
+            dir_curr = self.segment_direction_endpoints(current)
+            dir_seg = self.segment_direction_endpoints(seg)
+            angle_diff = self.acute_angle_between_dirs(dir_curr, dir_seg)
             endpoint_gap = np.linalg.norm(seg[0] - current[-1])
 
             if len(current) > 0 and len(seg) > 0 and np.allclose(current[-1], seg[0]):
@@ -218,7 +218,7 @@ class LandmarkFeatureExtractor:
             else:
                 candidate = np.vstack([current, seg])
 
-            residual = self._segment_residual_tls(candidate)
+            residual = self.segment_residual_tls(candidate)
 
             if (angle_diff <= self.merge_angle_tol and
                     endpoint_gap <= self.max_gap and
@@ -229,7 +229,7 @@ class LandmarkFeatureExtractor:
 
         return merged
 
-    def _segment_direction_endpoints(self, points: np.ndarray) -> np.ndarray:
+    def segment_direction_endpoints(self, points: np.ndarray) -> np.ndarray:
         if len(points) < 2:
             return np.array([1.0, 0.0])
 
@@ -239,16 +239,16 @@ class LandmarkFeatureExtractor:
             return np.array([1.0, 0.0])
         return delta / norm
 
-    def _acute_angle_between_dirs(self, d1: np.ndarray, d2: np.ndarray) -> float:
+    def acute_angle_between_dirs(self, d1: np.ndarray, d2: np.ndarray) -> float:
         dot = np.clip(np.dot(d1, d2), -1.0, 1.0)
         return np.arccos(abs(dot))
 
-    def _convert_line_to_hessian(self, points: np.ndarray) -> Tuple[float, float]:
+    def convert_line_to_hessian(self, points: np.ndarray) -> Tuple[float, float]:
         # Use TLS centroid and normal so that rho/alpha estimates are consistent
         # with the TLS-based residuals used in grow and merge.  The old
         # endpoint-based midpoint/normal depended on the two noisiest measured
         # points (scan endpoints at grazing angle).
-        centroid, _, normal = self._fit_line_tls(points)
+        centroid, _, normal = self.fit_line_tls(points)
 
         rho = float(np.dot(centroid, normal))
         if rho < 0.0:
@@ -258,13 +258,13 @@ class LandmarkFeatureExtractor:
         alpha = float(np.arctan2(normal[1], normal[0]))
         return rho, alpha
 
-    def _make_line_dict(self, points: np.ndarray) -> Optional[Dict]:
-        segment = self._try_finalize_segment(points)
+    def make_line_dict(self, points: np.ndarray) -> Optional[Dict]:
+        segment = self.try_finalize_segment(points)
         if segment is None:
             return None
 
-        rho, alpha = self._convert_line_to_hessian(segment)
-        direction = self._segment_direction_endpoints(segment)
+        rho, alpha = self.convert_line_to_hessian(segment)
+        direction = self.segment_direction_endpoints(segment)
 
         line = {
             'points': segment,
@@ -275,10 +275,10 @@ class LandmarkFeatureExtractor:
             'rho': rho,
             'alpha': alpha
         }
-        line['covariance'] = self._compute_wall_covariance(line)
+        line['covariance'] = self.compute_wall_covariance(line)
         return line
 
-    def _compute_line_intersection(self, line_a: Dict, line_b: Dict) -> Optional[np.ndarray]:
+    def compute_line_intersection(self, line_a: Dict, line_b: Dict) -> Optional[np.ndarray]:
         rho_a = float(line_a['rho'])
         alpha_a = float(line_a['alpha'])
         rho_b = float(line_b['rho'])
@@ -296,22 +296,22 @@ class LandmarkFeatureExtractor:
 
         return np.linalg.solve(A, b)
 
-    def _extract_corners_from_adjacent_lines(self, lines: List[Dict]) -> List[Dict]:
+    def extract_corners_from_adjacent_lines(self, lines: List[Dict]) -> List[Dict]:
         corners = []
 
         for i in range(1, len(lines)):
             left = lines[i - 1]
             right = lines[i]
 
-            angle = self._acute_angle_between_dirs(left['direction'], right['direction'])
+            angle = self.acute_angle_between_dirs(left['direction'], right['direction'])
             if angle < self.corner_angle:
                 continue
 
-            corner_pos = self._compute_line_intersection(left, right)
+            corner_pos = self.compute_line_intersection(left, right)
             if corner_pos is None:
                 corner_pos = 0.5 * (left['points'][-1] + right['points'][0])
 
-            corner_cov = self._compute_corner_covariance(left, right)
+            corner_cov = self.compute_corner_covariance(left, right)
             if corner_cov is None:
                 continue
 
@@ -323,47 +323,34 @@ class LandmarkFeatureExtractor:
 
         return corners
 
-    def _compute_wall_covariance(self, line: Dict) -> np.ndarray:
+    def compute_wall_covariance(self, line: Dict) -> np.ndarray:
         points = line['points']
         sigma2 = self.lidar_sigma ** 2
 
-        if len(points) < 2:
-            return np.eye(2) * sigma2 * 100.0  # maximum-uncertainty fallback
-
-        rho, alpha = self._convert_line_to_hessian(points)
+        rho, alpha = self.convert_line_to_hessian(points)
 
         cos_a = np.cos(alpha)
         sin_a = np.sin(alpha)
 
-        # Fisher information matrix:  A = Σ Jᵢᵀ Jᵢ   where
-        #   Jᵢ = [∂h/∂ρ,  ∂h/∂α] = [1,  px·sin(α) − py·cos(α)]
-        # and h = ρ − px·cos(α) − py·sin(α) is the perpendicular-distance
-        # constraint.  CRLB covariance is  Cov(ρ,α) = σ²·A⁻¹.
         A = np.zeros((2, 2))
         for px, py in points:
             dr_d_alpha = px * sin_a - py * cos_a
             J = np.array([[1.0, dr_d_alpha]])
             A += J.T @ J
 
-        # Eigenvalue floor on A before inversion.
-        # Using np.linalg.pinv on a near-singular A gives a near-zero
-        # covariance (over-confident) — instead we clamp each eigenvalue of A
-        # to a minimum that corresponds to a maximum variance of ~10·σ² per
-        # parameter.  This keeps the covariance finite and PD.
-        min_eig_A = sigma2 * 0.1   # → max output eigenvalue ≈ 10·σ²
+        min_eig_A = sigma2 * 0.1 
         eigvals, eigvecs = np.linalg.eigh(A)
         eigvals_clamped = np.maximum(eigvals, min_eig_A)
         A_inv = eigvecs @ np.diag(1.0 / eigvals_clamped) @ eigvecs.T
 
         cov = sigma2 * A_inv
 
-        # Output eigenvalue floor: guarantee strict positive-definiteness.
         min_cov_eig = sigma2 * 1e-4
         eigvals_out, eigvecs_out = np.linalg.eigh(cov)
         eigvals_out = np.maximum(eigvals_out, min_cov_eig)
         return eigvecs_out @ np.diag(eigvals_out) @ eigvecs_out.T
 
-    def _compute_corner_covariance(self, left: Dict, right: Dict) -> Optional[np.ndarray]:
+    def compute_corner_covariance(self, left: Dict, right: Dict) -> Optional[np.ndarray]:
         rho_a = float(left['rho'])
         alpha_a = float(left['alpha'])
         rho_b = float(right['rho'])
@@ -375,12 +362,6 @@ class LandmarkFeatureExtractor:
         ])
         b = np.array([rho_a, rho_b])
 
-        # det(A) = sin(α_b − α_a): near zero when walls are nearly parallel.
-        # The previous threshold of 1e-6 was far too loose — walls only 0.003°
-        # apart would pass and produce a geometrically meaningless corner at
-        # ~19 km distance with astronomically large covariance.
-        # Threshold 0.1 ≈ sin(5.7°); the caller already gates on 50°, but this
-        # provides a numerical safety net.
         det = np.linalg.det(A)
         if abs(det) < 0.1:
             return None
@@ -391,10 +372,6 @@ class LandmarkFeatureExtractor:
         except np.linalg.LinAlgError:
             return None
 
-        # First-order Jacobian of corner position wrt wall parameters θ=[ρ_a,α_a,ρ_b,α_b].
-        # Corner: x = A(α)⁻¹ b(ρ).
-        #   ∂x/∂ρ_k  = A⁻¹ · eₖ          (only b changes)
-        #   ∂x/∂α_k  = −A⁻¹·(∂A/∂α_k)·x  (only A changes; ∂b/∂α_k = 0)
         dA_dalpha1 = np.array([
             [-np.sin(alpha_a), np.cos(alpha_a)],
             [0.0, 0.0]
@@ -409,23 +386,18 @@ class LandmarkFeatureExtractor:
         dx_dalpha1 = -A_inv @ (dA_dalpha1 @ x)
         dx_dalpha2 = -A_inv @ (dA_dalpha2 @ x)
 
-        # J shape (2, 4): columns ordered [∂x/∂ρ_a, ∂x/∂α_a, ∂x/∂ρ_b, ∂x/∂α_b]
         J = np.column_stack([dx_drho1, dx_dalpha1, dx_drho2, dx_dalpha2])
 
-        cov1 = left.get('covariance', self._compute_wall_covariance(left))
-        cov2 = right.get('covariance', self._compute_wall_covariance(right))
+        cov1 = left.get('covariance', self.compute_wall_covariance(left))
+        cov2 = right.get('covariance', self.compute_wall_covariance(right))
 
-        # Wall parameters assumed independent (no cross-wall covariance).
         Sigma_theta = np.zeros((4, 4))
         Sigma_theta[:2, :2] = cov1
         Sigma_theta[2:, 2:] = cov2
 
         cov_corner = J @ Sigma_theta @ J.T
 
-        # Numerical fix: first-order propagation can yield a matrix that is not
-        # strictly positive-definite due to floating-point cancellation or
-        # near-singular geometry.  Symmetrize and clamp negative eigenvalues.
-        cov_corner = 0.5 * (cov_corner + cov_corner.T)  # enforce symmetry
+        cov_corner = 0.5 * (cov_corner + cov_corner.T)  
         eigvals, eigvecs = np.linalg.eigh(cov_corner)
         min_cov_eig = (self.lidar_sigma ** 2) * 1e-4
         eigvals = np.maximum(eigvals, min_cov_eig)

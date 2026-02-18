@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 from map_generation.ekf_predict import BaseEKF
+from map_generation.transform_utils import robot_wall_to_map_frame, normalize_angle
 
 
 class LandmarkEKFSLAM(BaseEKF):
-    
+
 
     def __init__(self,
                  landmark_timeout_scans: int = 50,
                  min_observations_for_init: int = 2):
-        
+
         super().__init__()
 
         # Landmark database
@@ -30,27 +31,19 @@ class LandmarkEKFSLAM(BaseEKF):
                     z_y: float,
                     feature: Dict,
                     scan_number: int) -> int:
-       
+
         x_r, y_r, theta_r = self.state[0:3]
 
         R_obs = feature.get('covariance', np.eye(2) * 0.05**2)
 
         if feature['type'] == 'wall':
-            # Wall in Hessian normal form: ρ = x·cos(α) + y·sin(α)
-            rho_r = z_x
-            alpha_r = z_y
-
-            # Transform from robot frame to map frame
-            alpha_m = alpha_r + theta_r
-            alpha_m = np.arctan2(np.sin(alpha_m), np.cos(alpha_m))
-
-            cos_a = np.cos(alpha_m)
-            sin_a = np.sin(alpha_m)
-
-            rho_m = rho_r + x_r * cos_a + y_r * sin_a
+            rho_m, alpha_m = robot_wall_to_map_frame(z_x, z_y, x_r, y_r, theta_r)
 
             # Augment state vector
             self.state = np.append(self.state, [rho_m, alpha_m])
+
+            cos_a = np.cos(alpha_m)
+            sin_a = np.sin(alpha_m)
 
             # Jacobian wrt robot pose
             d_rho_d_theta = -x_r * sin_a + y_r * cos_a
@@ -121,83 +114,62 @@ class LandmarkEKFSLAM(BaseEKF):
 
         return landmark_id
 
-    def update_landmark_observation(self,
-                                    landmark_id: int,
-                                    z_x: float,
-                                    z_y: float,
-                                    scan_number: int,
-                                    measurement_covariance: np.ndarray):
-       
+    def _build_observation(self, landmark_id: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """Build the observation Jacobian H and predicted measurement z_pred for a landmark.
+
+        Returns (H, z_pred) where H is (2, n) and z_pred is (2,), or None if landmark missing.
+        H encodes ∂h/∂state for both robot pose columns and landmark columns.
+        """
         if landmark_id not in self.landmarks:
-            return
+            return None
 
         lm_data = self.landmarks[landmark_id]
         idx = lm_data['state_index']
-
-        # Update observation count and timestamp
-        lm_data['observations'] += 1
-        lm_data['last_seen'] = scan_number
-
-        # Robot pose
         x_r, y_r, theta_r = self.state[0:3]
-
-        # Observation Jacobian
         n = len(self.state)
         H = np.zeros((2, n))
 
         if lm_data['feature_type'] == 'wall':
-            # Wall in Hessian form
             lm_rho = self.state[idx]
             lm_alpha = self.state[idx + 1]
 
             # Predicted observation in robot frame
             rho_pred = lm_rho - (x_r * np.cos(lm_alpha) + y_r * np.sin(lm_alpha))
-            alpha_pred = lm_alpha - theta_r
-            alpha_pred = np.arctan2(np.sin(alpha_pred), np.cos(alpha_pred))
-
+            alpha_pred = normalize_angle(lm_alpha - theta_r)
             z_pred = np.array([rho_pred, alpha_pred])
-            z_obs = np.array([z_x, z_y])
-
-            innovation = z_obs - z_pred
-            innovation[1] = np.arctan2(np.sin(innovation[1]), np.cos(innovation[1]))
 
             # ∂h/∂robot_pose
             H[0, 0] = -np.cos(lm_alpha)
             H[0, 1] = -np.sin(lm_alpha)
             H[0, 2] = 0.0
-
             H[1, 0] = 0.0
             H[1, 1] = 0.0
             H[1, 2] = -1.0
 
             # ∂h/∂landmark
-            H[0, idx] = 1.0
-            H[0, idx+1] = x_r * np.sin(lm_alpha) - y_r * np.cos(lm_alpha)
+            H[0, idx]     = 1.0
+            H[0, idx + 1] = x_r * np.sin(lm_alpha) - y_r * np.cos(lm_alpha)
+            H[1, idx]     = 0.0
+            H[1, idx + 1] = 1.0
 
-            H[1, idx] = 0.0
-            H[1, idx+1] = 1.0
         else:
-            # Corner landmark
             lm_x = self.state[idx]
             lm_y = self.state[idx + 1]
 
-            # Predicted observation (landmark in robot frame)
             dx = lm_x - x_r
             dy = lm_y - y_r
 
-            cos_theta = np.cos(-theta_r)
-            sin_theta = np.sin(-theta_r)
+            cos_neg = np.cos(-theta_r)
+            sin_neg = np.sin(-theta_r)
 
-            z_pred_x = cos_theta * dx - sin_theta * dy
-            z_pred_y = sin_theta * dx + cos_theta * dy
+            z_pred = np.array([
+                cos_neg * dx - sin_neg * dy,
+                sin_neg * dx + cos_neg * dy
+            ])
 
-            # Innovation
-            innovation = np.array([z_x - z_pred_x, z_y - z_pred_y])
-
-            # Jacobian ∂h/∂robot_pose
+            # ∂h/∂robot_pose  (using c = cos θ, s = sin θ)
             c = np.cos(theta_r)
             s = np.sin(theta_r)
-
             H[0, 0] = -c
             H[0, 1] = -s
             H[0, 2] = -s * dx + c * dy
@@ -206,12 +178,41 @@ class LandmarkEKFSLAM(BaseEKF):
             H[1, 1] = -c
             H[1, 2] = -c * dx - s * dy
 
-            # Jacobian ∂h/∂landmark
-            H[0, idx] = cos_theta
-            H[0, idx+1] = -sin_theta
+            # ∂h/∂landmark
+            H[0, idx]     = cos_neg
+            H[0, idx + 1] = -sin_neg
+            H[1, idx]     = sin_neg
+            H[1, idx + 1] = cos_neg
 
-            H[1, idx] = sin_theta
-            H[1, idx+1] = cos_theta
+        return H, z_pred
+
+    def update_landmark_observation(self,
+                                    landmark_id: int,
+                                    z_x: float,
+                                    z_y: float,
+                                    scan_number: int,
+                                    measurement_covariance: np.ndarray):
+
+        if landmark_id not in self.landmarks:
+            return
+
+        lm_data = self.landmarks[landmark_id]
+
+        # Update observation count and timestamp
+        lm_data['observations'] += 1
+        lm_data['last_seen'] = scan_number
+
+        result = self._build_observation(landmark_id)
+        if result is None:
+            return
+        H, z_pred = result
+
+        z_obs = np.array([z_x, z_y])
+        innovation = z_obs - z_pred
+
+        # Angle-wrap the angular component for wall observations
+        if lm_data['feature_type'] == 'wall':
+            innovation[1] = normalize_angle(innovation[1])
 
         # Innovation covariance
         S = H @ self.P @ H.T + measurement_covariance
@@ -236,11 +237,13 @@ class LandmarkEKFSLAM(BaseEKF):
         except np.linalg.LinAlgError:
             return
 
+        n = len(self.state)
+
         # State update
         self.state = self.state + K @ innovation
 
         # Normalize robot orientation
-        self.state[2] = np.arctan2(np.sin(self.state[2]), np.cos(self.state[2]))
+        self.state[2] = normalize_angle(self.state[2])
 
         # Normalize all wall landmarks: enforce rho >= 0.
         # After EKF updates rho can drift negative, which flips the Hessian normal
@@ -251,10 +254,7 @@ class LandmarkEKFSLAM(BaseEKF):
                 i = lm_data['state_index']
                 if self.state[i] < 0.0:
                     self.state[i] = -self.state[i]
-                    self.state[i + 1] = np.arctan2(
-                        np.sin(self.state[i + 1] + np.pi),
-                        np.cos(self.state[i + 1] + np.pi)
-                    )
+                    self.state[i + 1] = normalize_angle(self.state[i + 1] + np.pi)
 
         # Covariance update (Joseph form)
         I = np.eye(n)
@@ -267,7 +267,7 @@ class LandmarkEKFSLAM(BaseEKF):
         self.landmark_update_count += 1
 
     def prune_landmarks(self, current_scan_number: int) -> List[int]:
-      
+
         to_remove = []
 
         for lm_id, lm_data in self.landmarks.items():
@@ -313,7 +313,7 @@ class LandmarkEKFSLAM(BaseEKF):
                theta: float,
                measurement_covariance: np.ndarray,
                measurement_type: str = "icp"):
-      
+
         if not self.initialized:
             return
 
@@ -323,7 +323,7 @@ class LandmarkEKFSLAM(BaseEKF):
 
         # Innovation with angle normalization
         innovation = z - z_pred
-        innovation[2] = np.arctan2(np.sin(innovation[2]), np.cos(innovation[2]))
+        innovation[2] = normalize_angle(innovation[2])
 
         H = np.zeros((3, n))
         H[0:3, 0:3] = np.eye(3)
@@ -340,7 +340,7 @@ class LandmarkEKFSLAM(BaseEKF):
 
         # State update
         self.state = self.state + K @ innovation
-        self.state[2] = np.arctan2(np.sin(self.state[2]), np.cos(self.state[2]))
+        self.state[2] = normalize_angle(self.state[2])
 
         # Covariance update (Joseph form)
         I = np.eye(n)

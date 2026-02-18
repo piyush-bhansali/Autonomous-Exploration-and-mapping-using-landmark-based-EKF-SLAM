@@ -35,26 +35,58 @@ def transform_matrix_to_pose(T):
     return (x, y, theta)
 
 
+def invert_transform_2d(T: np.ndarray) -> np.ndarray:
+    """Closed-form inverse of a 3x3 2D homogeneous transform matrix.
+
+    For T = [[c, -s, x], [s, c, y], [0, 0, 1]],
+    T^{-1} = [[c, s, -(c*x + s*y)], [-s, c, s*x - c*y], [0, 0, 1]].
+    """
+    c, s = T[0, 0], T[1, 0]
+    x, y = T[0, 2], T[1, 2]
+    return np.array([
+        [ c,  s, -(c * x + s * y)],
+        [-s,  c,   s * x - c * y ],
+        [ 0,  0,   1.0            ]
+    ])
+
+
+def rotate_point_2d(point: np.ndarray, x_r: float, y_r: float, theta_r: float) -> np.ndarray:
+    """Transform a 2D point from robot frame to map frame."""
+    c, s = np.cos(theta_r), np.sin(theta_r)
+    return np.array([
+        c * point[0] - s * point[1] + x_r,
+        s * point[0] + c * point[1] + y_r
+    ])
+
+
+def robot_wall_to_map_frame(rho_r: float, alpha_r: float,
+                             x_r: float, y_r: float, theta_r: float):
+    """Convert a wall observation from robot frame to map frame.
+
+    Returns (rho_m, alpha_m) in canonical form (rho_m >= 0).
+    """
+    alpha_m = normalize_angle(alpha_r + theta_r)
+    rho_m = rho_r + x_r * np.cos(alpha_m) + y_r * np.sin(alpha_m)
+    if rho_m < 0.0:
+        rho_m = -rho_m
+        alpha_m = normalize_angle(alpha_m + np.pi)
+    return rho_m, alpha_m
+
+
 def compute_map_to_odom_transform(ekf_state, odom_pose):
-    
-    # Extract poses
+
     x_map, y_map, theta_map = ekf_state
     x_odom, y_odom, theta_odom = odom_pose
 
-    # Build transformation matrices
     T_map_to_base = pose_to_transform_matrix(x_map, y_map, theta_map)
     T_odom_to_base = pose_to_transform_matrix(x_odom, y_odom, theta_odom)
 
-    # Compute inverse: T_base_to_odom
-    T_base_to_odom = np.linalg.inv(T_odom_to_base)
+    # Closed-form inverse of T_odom_to_base
+    T_base_to_odom = invert_transform_2d(T_odom_to_base)
 
-    # Compute map → odom transform
     T_map_to_odom = T_map_to_base @ T_base_to_odom
 
-    # Extract pose from transform
-    x_correction, y_correction, theta_correction = transform_matrix_to_pose(T_map_to_odom)
-
-    return (x_correction, y_correction, theta_correction)
+    return transform_matrix_to_pose(T_map_to_odom)
 
 
 def compute_relative_motion_2d(pose_current, pose_previous):

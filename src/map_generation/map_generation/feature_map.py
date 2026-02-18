@@ -56,15 +56,24 @@ class FeatureMap:
         min_proj = min(current_start_proj, current_end_proj, new_start_proj, new_end_proj)
         max_proj = max(current_start_proj, current_end_proj, new_start_proj, new_end_proj)
 
-        line_tangent = np.array([-np.sin(alpha), np.cos(alpha)])
-
         line_point = wall['rho'] * np.array([np.cos(alpha), np.sin(alpha)])
 
-        wall['start_point'] = line_point + min_proj * line_tangent
-        wall['end_point'] = line_point + max_proj * line_tangent
+        wall['start_point'] = line_point + min_proj * wall_tangent
+        wall['end_point'] = line_point + max_proj * wall_tangent
 
         
         wall['observation_count'] += 1
+
+    def update_wall_hessian(self, landmark_id: int, rho: float, alpha: float):
+        """Sync the stored Hessian parameters (rho, alpha) for a wall landmark.
+
+        Called after each EKF wall update so that generate_point_cloud and
+        update_wall_endpoints always use the latest EKF-corrected parameters.
+        """
+        if landmark_id not in self.walls:
+            return
+        self.walls[landmark_id]['rho'] = rho
+        self.walls[landmark_id]['alpha'] = alpha
 
     def update_corner_position(self, landmark_id: int, new_position: np.ndarray):
         
