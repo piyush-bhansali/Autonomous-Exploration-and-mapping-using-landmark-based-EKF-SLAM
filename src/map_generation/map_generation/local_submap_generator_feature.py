@@ -505,13 +505,14 @@ class LocalSubmapGeneratorFeature(Node):
                 start_pose=self.submap_start_pose,
                 end_pose=end_pose,
                 scan_count=scan_count,
-                transformation_matrix=T_local_to_world
+                transformation_matrix=T_local_to_world,
+                feature_map=self.slam_manager.get_feature_map()
             )
 
             if success:
                 # Apply pose correction if provided
                 if pose_correction is not None:
-                    if pose_correction.get('type') == 'submap_icp':
+                    if pose_correction.get('type') in ('submap_icp', 'submap_feature'):
                         self._apply_pose_correction(
                             dx=pose_correction['dx'],
                             dy=pose_correction['dy'],
