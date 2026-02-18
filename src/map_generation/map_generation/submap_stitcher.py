@@ -190,6 +190,14 @@ class SubmapStitcher:
             'covariance': covariance
         }
 
+        print(
+            f"[SubmapStitcher] SVD align | "
+            f"shared_walls={len(shared_ids)}  pairs={len(all_pairs)}  "
+            f"cond={condition_number:.1f}  "
+            f"dx={dx:.4f}m  dy={dy:.4f}m  dtheta={np.degrees(dtheta):.3f}deg  "
+            f"cov_xy={cov_xy:.2e}  cov_th={cov_th:.2e}"
+        )
+
         return True, pose_correction
 
     def _accumulate_walls(self, feature_map, R: np.ndarray, t: np.ndarray):

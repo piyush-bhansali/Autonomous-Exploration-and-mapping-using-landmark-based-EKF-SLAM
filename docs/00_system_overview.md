@@ -1,6 +1,6 @@
 # System Overview
 
-This thesis presents an autonomous indoor mapping system that integrates real-time feature-based SLAM with ICP-based global map stitching. The system uses an Extended Kalman Filter (EKF) as the core state estimator, fusing wheel odometry with geometric landmark observations to maintain a joint estimate of robot pose and map. A separate navigation module provides frontier-based exploration with RRT* path planning and Pure Pursuit path tracking, enabling the robot to explore unknown environments autonomously. The system is implemented in Python using ROS 2 Jazzy as the middleware framework, with the TurtleBot3 Waffle Pi as the robot platform and Gazebo Harmonic for simulation.
+This thesis presents an autonomous indoor mapping system that integrates real-time feature-based SLAM with feature-based SVD global map stitching. The system uses an Extended Kalman Filter (EKF) as the core state estimator, fusing wheel odometry with geometric landmark observations to maintain a joint estimate of robot pose and map. A separate navigation module provides frontier-based exploration with RRT* path planning and Pure Pursuit path tracking, enabling the robot to explore unknown environments autonomously. The system is implemented in Python using ROS 2 Jazzy as the middleware framework, with the TurtleBot3 Waffle Pi as the robot platform and Gazebo Harmonic for simulation.
 
 ---
 
@@ -27,7 +27,7 @@ The Mapping Module implements the complete SLAM pipeline centred around the `loc
 
 **EKF-SLAM.** The `LandmarkEKFSLAM` class maintains a joint state vector of robot pose and all confirmed landmarks. Each scan produces: an odometry-based prediction step using midpoint integration, a data association step using nearest-neighbour Mahalanobis gating, and an EKF update step for each matched landmark using the Joseph form covariance update. After every update, wall landmarks are normalised to enforce $\rho \geq 0$.
 
-**Submap Generation and Integration.** After every 50 scans, the accumulated point cloud is passed to `SubmapStitcher`. The submap is voxel-downsampled and registered against the global map using point-to-point ICP. The ICP covariance is computed from the Gauss–Newton Hessian ($\mathbf{R}_{\mathrm{ICP}} = \sigma^2 \mathbf{A}^{-1}$) and injected into the EKF as a direct pose observation to correct odometric drift.
+**Submap Generation and Integration.** After every 50 scans, the accumulated point cloud is passed to `SubmapStitcher`. The submap is voxel-downsampled and registered against the global map using feature-based SVD alignment: wall landmarks shared between the new submap and the global wall registry are used as correspondences, and a one-shot SVD rigid body solve yields the correction. The SVD covariance ($\mathbf{R}_{\mathrm{SVD}} = \mathrm{diag}(\sigma^2/\Sigma_1, \sigma^2/\Sigma_1, \sigma^2/(N\bar{d}^2))$) is injected into the EKF as a direct pose observation to correct odometric drift.
 
 ### Navigation Module Architecture
 
@@ -65,7 +65,7 @@ The Navigation Module implements a finite state machine for autonomous explorati
 
 **Wall Normalisation.** After every EKF update all wall landmarks are checked. If $\rho_i < 0$, both $\rho_i$ and $\alpha_i$ are flipped. This prevents sign drift from causing the same physical wall to be re-entered as a duplicate landmark.
 
-**Hessian ICP Covariance.** The ICP covariance is computed from the Gauss–Newton Hessian of the point-to-point alignment cost, giving a geometry-aware $3 \times 3$ covariance in $[x, y, \theta]$ space. In featureless corridors the eigenvalue along the corridor direction is large, automatically downweighting that component in the EKF update.
+**SVD Feature Covariance.** The submap alignment covariance is computed from the SVD singular values of the cross-covariance matrix and the spatial spread of the matched point pairs, giving a geometry-aware $3 \times 3$ covariance in $[x, y, \theta]$ space. In featureless corridors the smaller singular value is near zero and the condition number exceeds the degeneracy threshold, so alignment is rejected rather than producing an unreliable correction.
 
 **GPU Acceleration.** All point cloud operations in `SubmapStitcher` use the Open3D tensor API. CUDA is used where available; the system falls back to CPU automatically.
 
@@ -91,12 +91,12 @@ The Navigation Module implements a finite state machine for autonomous explorati
 |---|---|---|---|
 | Middleware | ROS 2 | Jazzy | Robot communication framework |
 | Simulator | Gazebo | Harmonic | Physics-based simulation |
-| Point Cloud | Open3D | 0.18+ | GPU-accelerated ICP and voxel operations |
+| Point Cloud | Open3D | 0.18+ | GPU-accelerated voxel operations and tensor point clouds |
 | Clustering | scikit-learn | Latest | DBSCAN frontier clustering |
 | Geometry | Shapely | Latest | Convex hull frontier boundary computation |
 | Numerical | NumPy / SciPy | Latest | Matrix operations, KDTree |
 
-There is no GTSAM dependency. Loop closure and pose graph optimisation are not implemented. Global consistency is maintained solely through the EKF cross-covariance structure and periodic ICP submap corrections.
+There is no GTSAM dependency. Loop closure and pose graph optimisation are not implemented. Global consistency is maintained solely through the EKF cross-covariance structure and periodic feature-based SVD submap corrections.
 
 ### Hardware Requirements
 
@@ -233,8 +233,10 @@ Accumulated scan points  (submap-local frame)
        ▼
 SubmapStitcher.integrate_submap_to_global_map()
   ├─ Voxel downsample (0.05 m)
-  ├─ ICP vs global map  →  fitness, transform, R_ICP
-  └─ if accepted: LandmarkEKFSLAM.update()  →  pose correction
+  ├─ Feature SVD align (shared landmark IDs → overlap pairs → SVD solve)
+  │    ├─ success: apply correction_4x4 + LandmarkEKFSLAM.update()
+  │    └─ fail (degenerate / no shared walls): use EKF pose as-is
+  └─ Concatenate + voxel downsample global map
 ```
 
 ### Gazebo–ROS 2 Bridge Configuration
@@ -344,7 +346,7 @@ The primary test environment is defined in `autonomous_exploration/worlds/maze.s
 | Corridor widths | 1.5–3.0 m |
 | Environment type | Indoor maze with multiple rooms, corridors, dead ends, and loops |
 
-The loop topology tests whether the EKF-ICP pipeline maintains global consistency after the robot revisits areas.
+The loop topology tests whether the EKF-SVD pipeline maintains global consistency after the robot revisits areas.
 
 ---
 
@@ -425,9 +427,9 @@ Simulation provides the controlled, repeatable environment necessary for systema
 | Data association | $O(L)$ per feature | Mahalanobis distance per landmark |
 | EKF update | $O(L^2)$ per observation | Full covariance propagation |
 | Covariance conditioning | $O(L^3)$ periodic | Eigendecomposition |
-| ICP (per submap) | $O(P \log P)$ | KDTree correspondence search |
+| SVD alignment (per submap) | $O(W \cdot n_s)$ | $W$ shared walls, $n_s$ samples per wall; SVD on 2×2 matrix |
 
-where $N$ is the number of scan points, $L$ is the number of landmarks in the state, and $P$ is the number of points in the submap. The $O(L^2)$ EKF update is the scalability bottleneck; the system is designed for structured indoor environments where $L$ is bounded to hundreds rather than thousands of landmarks.
+where $N$ is the number of scan points, $L$ is the number of landmarks in the state, $W$ is the number of shared wall landmarks, and $n_s = 8$ is the number of overlap sample points per wall. The $O(L^2)$ EKF update is the scalability bottleneck; the system is designed for structured indoor environments where $L$ is bounded to hundreds rather than thousands of landmarks.
 
 ---
 
@@ -439,6 +441,6 @@ where $N$ is the number of scan points, $L$ is the number of landmarks in the st
 | `01_ekf_slam_theory.md` | EKF-SLAM: state representation, prediction, update, Jacobians |
 | `02_landmark_features.md` | Feature extraction: TLS, Hessian form, CRLB covariance, corners |
 | `03_data_association.md` | Data association: Mahalanobis gating, chi-squared test, Jacobians |
-| `05_submap_management.md` | Submap stitching: ICP, Hessian covariance, EKF feedback |
+| `05_submap_management.md` | Submap stitching: feature-based SVD alignment, SVD covariance, EKF feedback |
 | `literature_review.md` | Implementation-focused review (algorithms used in this system) |
 | `introduction_literature_review.md` | Broad introduction: general SLAM, EKF theory, uncertainty propagation |

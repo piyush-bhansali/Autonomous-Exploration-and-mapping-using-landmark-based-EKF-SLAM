@@ -1,6 +1,6 @@
 # Uncertainty Quantification and Map Confidence
 
-> **Note:** This document describes uncertainty quantification for the **feature-based mapping pipeline** (including ICP-based submap stitching corrections).
+> **Note:** This document describes uncertainty quantification for the **feature-based mapping pipeline** (including feature-based SVD submap stitching corrections).
 
 ## Table of Contents
 1. [Introduction](#1-introduction)

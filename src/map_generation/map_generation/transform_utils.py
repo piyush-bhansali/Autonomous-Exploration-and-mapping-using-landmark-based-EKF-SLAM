@@ -36,11 +36,7 @@ def transform_matrix_to_pose(T):
 
 
 def invert_transform_2d(T: np.ndarray) -> np.ndarray:
-    """Closed-form inverse of a 3x3 2D homogeneous transform matrix.
-
-    For T = [[c, -s, x], [s, c, y], [0, 0, 1]],
-    T^{-1} = [[c, s, -(c*x + s*y)], [-s, c, s*x - c*y], [0, 0, 1]].
-    """
+    
     c, s = T[0, 0], T[1, 0]
     x, y = T[0, 2], T[1, 2]
     return np.array([
@@ -51,7 +47,7 @@ def invert_transform_2d(T: np.ndarray) -> np.ndarray:
 
 
 def rotate_point_2d(point: np.ndarray, x_r: float, y_r: float, theta_r: float) -> np.ndarray:
-    """Transform a 2D point from robot frame to map frame."""
+    
     c, s = np.cos(theta_r), np.sin(theta_r)
     return np.array([
         c * point[0] - s * point[1] + x_r,
@@ -61,10 +57,7 @@ def rotate_point_2d(point: np.ndarray, x_r: float, y_r: float, theta_r: float) -
 
 def robot_wall_to_map_frame(rho_r: float, alpha_r: float,
                              x_r: float, y_r: float, theta_r: float):
-    """Convert a wall observation from robot frame to map frame.
-
-    Returns (rho_m, alpha_m) in canonical form (rho_m >= 0).
-    """
+    
     alpha_m = normalize_angle(alpha_r + theta_r)
     rho_m = rho_r + x_r * np.cos(alpha_m) + y_r * np.sin(alpha_m)
     if rho_m < 0.0:
@@ -109,7 +102,6 @@ def compute_relative_motion_2d(pose_current, pose_previous):
 
     return (delta_d, delta_theta)
 
-
 def numpy_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud2:
     
     header = Header()
@@ -138,21 +130,17 @@ def numpy_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud
 
     return msg
 
-
 def quaternion_to_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
    
     rotation = Rotation.from_quat([qx, qy, qz, qw])
-    # Extract Euler angles in ZYX convention (yaw, pitch, roll)
     euler = rotation.as_euler('zyx', degrees=False)
-    return euler[0]  # Return yaw (z-axis rotation)
-
+    return euler[0]  
 
 def yaw_to_quaternion(yaw: float) -> tuple:
     
     rotation = Rotation.from_euler('z', yaw, degrees=False)
     quat = rotation.as_quat()  # Returns [x, y, z, w]
     return (quat[0], quat[1], quat[2], quat[3])
-
 
 def quaternion_to_rotation_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
    
