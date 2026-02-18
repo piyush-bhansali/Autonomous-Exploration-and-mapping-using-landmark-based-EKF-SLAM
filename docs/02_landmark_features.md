@@ -303,8 +303,8 @@ $$
 |---|---|---|
 | `grow_residual_threshold` | 0.03 m | Split threshold during incremental growth ($\approx 3\sigma$) |
 | `min_points_per_line` | 10 | Minimum supporting points for a valid segment |
-| `min_line_length` | 0.5 m | Minimum segment length |
-| `merge_angle_tol` | 0.35 rad | Maximum angular difference for merge |
+| `min_line_length` | 0.3 m | Minimum segment length |
+| `merge_angle_tol` | 0.22 rad | Maximum angular difference for merge |
 | `merge_rho_tolerance` | 0.15 m | Maximum TLS residual of merged candidate |
 | `corner_angle_threshold` | 50° | Minimum intersection angle for a valid corner |
 | `max_gap` | 0.2 m | Maximum gap for gap detection and merge proximity |

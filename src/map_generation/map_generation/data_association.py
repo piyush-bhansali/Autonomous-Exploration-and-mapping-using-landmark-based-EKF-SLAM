@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from map_generation.transform_utils import robot_wall_to_map_frame, normalize_angle
 
 
@@ -10,9 +10,11 @@ def associate_landmarks(
     ekf_slam,
     chi_sq_gate: float = 5.99,
     max_euclidean_dist: float = 6.0,
-    wall_angle_tolerance: float = 0.349066,  
-    wall_rho_tolerance: float = 0.5,  
-    return_extension_info: bool = False
+    wall_angle_tolerance: float = 0.349066,
+    wall_rho_tolerance: float = 0.5,
+    return_extension_info: bool = False,
+    feature_map=None,
+    max_gap_ext: float = 0.5
 ) -> Tuple[List[Tuple[int, int]], List[int], Dict]:
 
     matched = []
@@ -93,6 +95,30 @@ def associate_landmarks(
                 continue
 
             if mahal_dist_sq < chi_sq_gate and mahal_dist_sq < best_mahal_sq:
+
+                if (feature_map is not None
+                        and feature['type'] == 'wall'
+                        and feature.get('start_point') is not None
+                        and feature.get('end_point') is not None):
+                    wall_data = feature_map.walls.get(landmark_id)
+                    if wall_data and wall_data.get('t_min') is not None:
+                        c_r, s_r = np.cos(theta_r), np.sin(theta_r)
+                        R_rob = np.array([[c_r, -s_r], [s_r, c_r]])
+                        obs_s = R_rob @ feature['start_point'] + np.array([x_r, y_r])
+                        obs_e = R_rob @ feature['end_point']   + np.array([x_r, y_r])
+
+                        alpha   = wall_data['alpha']
+                        tangent = np.array([-np.sin(alpha), np.cos(alpha)])
+
+                        sto_lo = wall_data['t_min']   # directly stored — no projection needed
+                        sto_hi = wall_data['t_max']
+                        obs_lo = min(np.dot(obs_s, tangent), np.dot(obs_e, tangent))
+                        obs_hi = max(np.dot(obs_s, tangent), np.dot(obs_e, tangent))
+
+                        gap = max(0.0, max(obs_lo - sto_hi, sto_lo - obs_hi))
+                        if gap > max_gap_ext:
+                            continue  # spatially separated — skip this candidate
+
                 best_mahal_sq = mahal_dist_sq
                 best_landmark_id = landmark_id
 

@@ -118,7 +118,11 @@ $$
 d_\perp = \rho_m - (x_r\cos\alpha_m + y_r\sin\alpha_m).
 $$
 
-The wall is a candidate if $|d_\perp| \leq \tau_{\mathrm{spatial}}$ (default: 5.0 m, larger than the LiDAR range of 3.5 m).
+The wall is a candidate if $|d_\perp| \leq \tau_{\mathrm{spatial}}$ (default: 6.0 m, larger than the LiDAR range of 3.5 m).
+
+**Additional wall gates (implementation defaults):**
+- **Angle gate:** $|\hat{\alpha}_r - \alpha_r| \leq 0.349066$ rad ($\approx 20^\circ$).
+- **Rho gate:** $|\rho_m - \rho_m^{\mathrm{obs}}| \leq 0.5$ m, where $\rho_m^{\mathrm{obs}}$ is the observed wall transformed to map frame.
 
 ### 5.2 Predicted Observation
 

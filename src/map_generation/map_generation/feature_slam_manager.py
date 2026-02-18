@@ -40,6 +40,7 @@ class FeatureSLAMManager:
         self.max_euclidean_dist = 6.0
         self.wall_angle_tolerance = 0.349066
         self.wall_rho_tolerance = 0.5
+        self.max_gap_ext = 0.5  # metres — observations gapped beyond this from stored endpoints are rejected as a new landmark
 
         # Statistics
         self.total_scans_processed = 0
@@ -66,7 +67,7 @@ class FeatureSLAMManager:
         if len(observed_features) == 0:
             return self._empty_stats()
 
-        # Data association with wall extension info
+        # Data association with wall extension info and gap check
         matched, unmatched, extension_info = associate_landmarks(
             observed_features,
             self.ekf,
@@ -74,7 +75,9 @@ class FeatureSLAMManager:
             max_euclidean_dist=self.max_euclidean_dist,
             wall_angle_tolerance=self.wall_angle_tolerance,
             wall_rho_tolerance=self.wall_rho_tolerance,
-            return_extension_info=True
+            return_extension_info=True,
+            feature_map=self.feature_map,
+            max_gap_ext=self.max_gap_ext
         )
 
         # Process matched features: EKF update + feature map extension
@@ -88,6 +91,11 @@ class FeatureSLAMManager:
 
         # Update statistics
         self.total_scans_processed += 1
+
+        # Build per-feature landmark ID map for visualisation (None = unmatched)
+        feature_ids = [None] * len(observed_features)
+        for feat_idx, landmark_id in matched:
+            feature_ids[feat_idx] = landmark_id
 
         # Return processing statistics
         num_walls_stored, num_corners_stored = self.feature_map.get_feature_count()
@@ -107,7 +115,8 @@ class FeatureSLAMManager:
             'num_landmarks': len(self.ekf.landmarks),
             'num_walls_stored': num_walls_stored,
             'num_corners_stored': num_corners_stored,
-            'observed_features': observed_features
+            'observed_features': observed_features,
+            'feature_ids': feature_ids
         }
 
     def _process_matched_features(self, observed_features: List[Dict],
@@ -126,15 +135,6 @@ class FeatureSLAMManager:
                     scan_number=self.ekf.current_scan_number,
                     measurement_covariance=feature['covariance']
                 )
-
-                # Sync updated Hessian parameters back to FeatureMap
-                if landmark_id in self.ekf.landmarks:
-                    lm_idx = self.ekf.landmarks[landmark_id]['state_index']
-                    self.feature_map.update_wall_hessian(
-                        landmark_id,
-                        rho=float(self.ekf.state[lm_idx]),
-                        alpha=float(self.ekf.state[lm_idx + 1])
-                    )
 
             elif feature['type'] == 'corner':
                 self.ekf.update_landmark_observation(
@@ -161,6 +161,21 @@ class FeatureSLAMManager:
                     landmark_id=landmark_id,
                     new_start=ext['new_start'],
                     new_end=ext['new_end']
+                )
+
+        # Sync ALL wall Hessian parameters to feature_map after the EKF update
+        # batch. The rho normalisation loop inside update_landmark_observation
+        # iterates over every wall in the EKF state, so updating landmark B can
+        # flip landmark A's alpha by π.  Without this full sync, feature_map
+        # retains the pre-flip alpha for A, causing a ~180° angle prediction
+        # error on the next scan and forcing A to be re-created as a new landmark.
+        for lm_id, lm_data in self.ekf.landmarks.items():
+            if lm_data['feature_type'] == 'wall' and lm_id in self.feature_map.walls:
+                lm_idx = lm_data['state_index']
+                self.feature_map.update_wall_hessian(
+                    lm_id,
+                    rho=float(self.ekf.state[lm_idx]),
+                    alpha=float(self.ekf.state[lm_idx + 1])
                 )
 
     def _process_unmatched_features(self, observed_features: List[Dict],

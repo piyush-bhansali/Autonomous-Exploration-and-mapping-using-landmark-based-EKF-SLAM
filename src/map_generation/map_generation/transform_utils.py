@@ -142,7 +142,3 @@ def yaw_to_quaternion(yaw: float) -> tuple:
     quat = rotation.as_quat()  # Returns [x, y, z, w]
     return (quat[0], quat[1], quat[2], quat[3])
 
-def quaternion_to_rotation_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
-   
-    rotation = Rotation.from_quat([qx, qy, qz, qw])
-    return rotation.as_matrix()

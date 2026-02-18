@@ -50,41 +50,53 @@ class SubmapStitcher:
                                           n_samples: int = 8) -> List[Tuple[np.ndarray, np.ndarray]]:
         """Compute point-pair correspondences from the overlapping section of two matched walls.
 
-        Both walls are expressed in (approximate) map frame. Uses the target wall's
-        Hessian direction as canonical so that target points lie exactly on the
-        EKF-corrected global line.
+        src_wall comes from feature_map (EKF map frame); tgt_wall from global_walls
+        (globally corrected frame). Both store extents as (t_min, t_max) scalars
+        along their own wall tangent.
+
+        Overlap interval: src extents are projected onto the target tangent for
+        comparison, since tgt t_min/t_max are already in target tangent coords.
+
+        Each correspondence point is generated using its wall's OWN tangent, so
+        p_src lies exactly on the source wall and p_tgt exactly on the target wall
+        — eliminating the cross-frame geometric bias from the old shared-tangent scheme.
 
         Returns a list of (p_src, p_tgt) pairs, each a 2D np.ndarray.
         """
         alpha_tgt = float(tgt_wall['alpha'])
         alpha_src = float(src_wall['alpha'])
 
-        tangent = np.array([-np.sin(alpha_tgt), np.cos(alpha_tgt)])
-        normal_tgt = np.array([np.cos(alpha_tgt), np.sin(alpha_tgt)])
-        normal_src = np.array([np.cos(alpha_src), np.sin(alpha_src)])
-
-        s_start = np.asarray(src_wall['start_point'], dtype=float)
-        s_end   = np.asarray(src_wall['end_point'],   dtype=float)
-        t_start = np.asarray(tgt_wall['start_point'], dtype=float)
-        t_end   = np.asarray(tgt_wall['end_point'],   dtype=float)
-
-        # Project all four endpoints onto the tangent axis
-        ts0, ts1 = np.dot(s_start, tangent), np.dot(s_end, tangent)
-        tt0, tt1 = np.dot(t_start, tangent), np.dot(t_end, tangent)
-
-        t_lo = max(min(ts0, ts1), min(tt0, tt1))
-        t_hi = min(max(ts0, ts1), max(tt0, tt1))
-
-        if t_hi - t_lo < 0.3:
-            return []   # Insufficient overlap
+        tangent_tgt = np.array([-np.sin(alpha_tgt), np.cos(alpha_tgt)])
+        tangent_src = np.array([-np.sin(alpha_src), np.cos(alpha_src)])
+        normal_tgt  = np.array([ np.cos(alpha_tgt), np.sin(alpha_tgt)])
+        normal_src  = np.array([ np.cos(alpha_src), np.sin(alpha_src)])
 
         rho_tgt = float(tgt_wall['rho'])
         rho_src = float(src_wall['rho'])
 
+        # Target interval is directly available in target tangent coordinates
+        tt_lo = float(tgt_wall['t_min'])
+        tt_hi = float(tgt_wall['t_max'])
+
+        # Project source extents (src tangent coords) onto target tangent
+        # so the overlap interval is expressed in a single coordinate system
+        line_pt_src = rho_src * normal_src
+        src_pt_lo   = line_pt_src + float(src_wall['t_min']) * tangent_src
+        src_pt_hi   = line_pt_src + float(src_wall['t_max']) * tangent_src
+        ts_lo = np.dot(src_pt_lo, tangent_tgt)
+        ts_hi = np.dot(src_pt_hi, tangent_tgt)
+
+        t_lo = max(min(ts_lo, ts_hi), tt_lo)
+        t_hi = min(max(ts_lo, ts_hi), tt_hi)
+
+        if t_hi - t_lo < 0.3:
+            return []   # Insufficient overlap
+
         pairs = []
         for t in np.linspace(t_lo, t_hi, n_samples):
-            p_tgt = rho_tgt * normal_tgt + t * tangent
-            p_src = rho_src * normal_src + t * tangent
+            # Each point is generated using its own wall geometry — no cross-frame mixing
+            p_tgt = rho_tgt * normal_tgt + t * tangent_tgt   # exactly on target wall
+            p_src = rho_src * normal_src + t * tangent_src   # exactly on source wall
             pairs.append((p_src, p_tgt))
 
         return pairs
@@ -146,9 +158,8 @@ class SubmapStitcher:
             src_wall = feature_map.walls[lm_id]
             tgt_wall = self.global_walls[lm_id]
 
-            # Skip if endpoints are None (wall seen but not yet extended)
-            if (src_wall.get('start_point') is None or src_wall.get('end_point') is None or
-                    tgt_wall.get('start_point') is None or tgt_wall.get('end_point') is None):
+            # Skip if extents not yet set (wall seen but no endpoint extension yet)
+            if src_wall.get('t_min') is None or tgt_wall.get('t_min') is None:
                 continue
 
             pairs = self._compute_overlap_correspondences(src_wall, tgt_wall)
@@ -203,62 +214,72 @@ class SubmapStitcher:
     def _accumulate_walls(self, feature_map, R: np.ndarray, t: np.ndarray):
         """Apply correction (R, t) to current submap walls and upsert into global_walls.
 
-        For existing landmark IDs: extend the endpoint extent.
+        Wall extents in feature_map are stored as (t_min, t_max) scalars; they are
+        reconstructed as 2D endpoints, corrected, then stored back as t_min/t_max
+        in the global wall's own tangent coordinate system.
+
+        For existing landmark IDs: extend the tangential extent.
         For new IDs: insert directly.
         """
+        dtheta = float(np.arctan2(R[1, 0], R[0, 0]))
+
         for lm_id, wall in feature_map.walls.items():
-            if wall.get('start_point') is None or wall.get('end_point') is None:
+            if wall.get('t_min') is None or wall.get('t_max') is None:
                 continue
 
-            # Apply correction to endpoints
-            start_corr = R @ np.asarray(wall['start_point'], dtype=float) + t
-            end_corr   = R @ np.asarray(wall['end_point'],   dtype=float) + t
+            # Reconstruct 2D endpoints from stored scalar extents
+            alpha_src   = float(wall['alpha'])
+            rho_src     = float(wall['rho'])
+            tangent_src = np.array([-np.sin(alpha_src), np.cos(alpha_src)])
+            normal_src  = np.array([ np.cos(alpha_src), np.sin(alpha_src)])
+            line_pt_src = rho_src * normal_src
+            start_raw   = line_pt_src + float(wall['t_min']) * tangent_src
+            end_raw     = line_pt_src + float(wall['t_max']) * tangent_src
 
-            # Corrected Hessian params (alpha shifts by dtheta, rho recomputed)
-            dtheta = float(np.arctan2(R[1, 0], R[0, 0]))
+            # Apply SVD correction
+            start_corr = R @ start_raw + t
+            end_corr   = R @ end_raw   + t
+
+            # Corrected Hessian params
             alpha_corr = float(np.arctan2(
-                np.sin(wall['alpha'] + dtheta),
-                np.cos(wall['alpha'] + dtheta)
+                np.sin(alpha_src + dtheta),
+                np.cos(alpha_src + dtheta)
             ))
-            normal = np.array([np.cos(alpha_corr), np.sin(alpha_corr)])
-            # rho from corrected centroid
+            normal_corr  = np.array([ np.cos(alpha_corr), np.sin(alpha_corr)])
+            tangent_corr = np.array([-np.sin(alpha_corr), np.cos(alpha_corr)])
             centroid_corr = 0.5 * (start_corr + end_corr)
-            rho_corr = float(np.dot(centroid_corr, normal))
+            rho_corr = float(np.dot(centroid_corr, normal_corr))
             if rho_corr < 0.0:
-                rho_corr = -rho_corr
-                alpha_corr = float(np.arctan2(
+                rho_corr    = -rho_corr
+                alpha_corr  = float(np.arctan2(
                     np.sin(alpha_corr + np.pi),
                     np.cos(alpha_corr + np.pi)
                 ))
-                normal = -normal
+                normal_corr  = -normal_corr
+                tangent_corr = -tangent_corr
+
+            # Project corrected endpoints onto corrected wall tangent → store as scalars
+            t_s = float(np.dot(start_corr, tangent_corr))
+            t_e = float(np.dot(end_corr,   tangent_corr))
+            t_min_corr = min(t_s, t_e)
+            t_max_corr = max(t_s, t_e)
 
             if lm_id not in self.global_walls:
                 self.global_walls[lm_id] = {
-                    'rho': rho_corr,
+                    'rho':   rho_corr,
                     'alpha': alpha_corr,
-                    'start_point': start_corr,
-                    'end_point': end_corr
+                    't_min': t_min_corr,
+                    't_max': t_max_corr
                 }
             else:
-                # Extend existing endpoint extent along the stored wall's tangent
-                existing = self.global_walls[lm_id]
-                alpha_e = float(existing['alpha'])
+                # Extend existing extent along the stored global wall's tangent
+                existing  = self.global_walls[lm_id]
+                alpha_e   = float(existing['alpha'])
                 tangent_e = np.array([-np.sin(alpha_e), np.cos(alpha_e)])
-
-                projs = [
-                    np.dot(existing['start_point'], tangent_e),
-                    np.dot(existing['end_point'],   tangent_e),
-                    np.dot(start_corr,              tangent_e),
-                    np.dot(end_corr,                tangent_e),
-                ]
-                t_min, t_max = min(projs), max(projs)
-
-                normal_e = np.array([np.cos(alpha_e), np.sin(alpha_e)])
-                line_pt = existing['rho'] * normal_e
-                tangent_e_vec = tangent_e
-
-                existing['start_point'] = line_pt + t_min * tangent_e_vec
-                existing['end_point']   = line_pt + t_max * tangent_e_vec
+                proj_s = float(np.dot(start_corr, tangent_e))
+                proj_e = float(np.dot(end_corr,   tangent_e))
+                existing['t_min'] = min(existing['t_min'], proj_s, proj_e)
+                existing['t_max'] = max(existing['t_max'], proj_s, proj_e)
 
     # ------------------------------------------------------------------
     # Global map management
@@ -270,7 +291,6 @@ class SubmapStitcher:
                                         start_pose: dict,
                                         end_pose: dict,
                                         scan_count: int,
-                                        transformation_matrix: np.ndarray,
                                         feature_map=None) -> Tuple[bool, Optional[dict]]:
 
         pcd_tensor = self.process_submap(points, submap_id)
@@ -292,9 +312,8 @@ class SubmapStitcher:
         identity_t = np.zeros(2)
 
         if submap_id == 0:
-            transform_tensor = o3c.Tensor(transformation_matrix, dtype=o3c.float32, device=self.device)
-            pcd_world_tensor = pcd_tensor.transform(transform_tensor)
-            self.global_map_tensor = pcd_world_tensor
+            # Points already in map frame — place directly into global map
+            self.global_map_tensor = pcd_tensor
 
             submap_data = {
                 'id': submap_id,
@@ -302,7 +321,6 @@ class SubmapStitcher:
                 'pose_start': start_pose,
                 'pose_end': end_pose,
                 'pose_center': pose_center,
-                'global_transform': transformation_matrix,
                 'scan_count': scan_count,
                 'timestamp_created': time.time()
             }
@@ -316,14 +334,14 @@ class SubmapStitcher:
 
         # ------ Submap > 0: attempt feature-based alignment ------
 
-        global_transform = transformation_matrix
         pose_correction = None
+        pcd_aligned_tensor = pcd_tensor   # default: points already in map frame
 
         if feature_map is not None and self.global_walls:
             success, pose_correction = self.feature_align_submaps(feature_map)
 
             if success:
-                # Build corrected 4×4 transform from SVD result
+                # Apply SVD correction to map-frame points
                 dx      = pose_correction['dx']
                 dy      = pose_correction['dy']
                 dtheta  = pose_correction['dtheta']
@@ -333,7 +351,8 @@ class SubmapStitcher:
                 correction_4x4[0, 0] = c;  correction_4x4[0, 1] = -s;  correction_4x4[0, 3] = dx
                 correction_4x4[1, 0] = s;  correction_4x4[1, 1] =  c;  correction_4x4[1, 3] = dy
 
-                global_transform = correction_4x4 @ transformation_matrix
+                transform_tensor = o3c.Tensor(correction_4x4, dtype=o3c.float32, device=self.device)
+                pcd_aligned_tensor = pcd_tensor.transform(transform_tensor)
 
                 # Accumulate walls with the SVD correction applied
                 R_2x2 = np.array([[c, -s], [s, c]])
@@ -347,16 +366,12 @@ class SubmapStitcher:
             if feature_map is not None:
                 self._accumulate_walls(feature_map, identity_R, identity_t)
 
-        transform_tensor = o3c.Tensor(global_transform, dtype=o3c.float32, device=self.device)
-        pcd_aligned_tensor = pcd_tensor.transform(transform_tensor)
-
         submap_data = {
             'id': submap_id,
             'point_cloud': pcd_tensor,
             'pose_start': start_pose,
             'pose_end': end_pose,
             'pose_center': pose_center,
-            'global_transform': global_transform,
             'scan_count': scan_count,
             'timestamp_created': time.time()
         }

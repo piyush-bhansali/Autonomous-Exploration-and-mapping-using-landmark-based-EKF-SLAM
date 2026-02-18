@@ -1,30 +1,38 @@
 #!/usr/bin/env python3
 
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 class FeatureMap:
-    
+
 
     def __init__(self):
-       
+
         self.walls = {}  # landmark_id -> wall_data
         self.corners = {}  # landmark_id -> corner_data
 
     def add_wall(self, landmark_id: int, rho: float, alpha: float, start_point: np.ndarray,
                  end_point: np.ndarray):
-       
+        """Add a new wall landmark.
+
+        Endpoints are stored as scalar extents (t_min, t_max) along the wall
+        tangent [-sin(alpha), cos(alpha)], so they remain consistent with
+        (rho, alpha) without needing a separate re-projection step.
+        """
+        tangent = np.array([-np.sin(alpha), np.cos(alpha)])
+        t_s = float(np.dot(start_point, tangent))
+        t_e = float(np.dot(end_point,   tangent))
         self.walls[landmark_id] = {
-            'rho': rho,
+            'rho':   rho,
             'alpha': alpha,
-            'start_point': np.array(start_point),
-            'end_point': np.array(end_point),
+            't_min': min(t_s, t_e),
+            't_max': max(t_s, t_e),
             'observation_count': 1
         }
 
     def add_corner(self, landmark_id: int, position: np.ndarray):
-       
+
         self.corners[landmark_id] = {
             'position': np.array(position),
             'observation_count': 1
@@ -32,51 +40,43 @@ class FeatureMap:
 
     def update_wall_endpoints(self, landmark_id: int, new_start: np.ndarray,
                                new_end: np.ndarray):
-       
+        """Extend the stored wall extent to cover new observation endpoints."""
         if landmark_id not in self.walls:
             return
 
         wall = self.walls[landmark_id]
+        alpha   = wall['alpha']
+        tangent = np.array([-np.sin(alpha), np.cos(alpha)])
 
-        # If endpoints were reset (None), initialize them with new observation
-        if wall['start_point'] is None or wall['end_point'] is None:
-            wall['start_point'] = new_start
-            wall['end_point'] = new_end
-            wall['observation_count'] += 1
-            return
+        new_t_s = float(np.dot(new_start, tangent))
+        new_t_e = float(np.dot(new_end,   tangent))
+        new_t_lo = min(new_t_s, new_t_e)
+        new_t_hi = max(new_t_s, new_t_e)
 
-        alpha = wall['alpha']
-        wall_tangent = np.array([-np.sin(alpha), np.cos(alpha)])
+        # If extents not yet initialised (after a reset), set from new observation
+        if wall['t_min'] is None or wall['t_max'] is None:
+            wall['t_min'] = new_t_lo
+            wall['t_max'] = new_t_hi
+        else:
+            wall['t_min'] = min(wall['t_min'], new_t_lo)
+            wall['t_max'] = max(wall['t_max'], new_t_hi)
 
-        current_start_proj = np.dot(wall['start_point'], wall_tangent)
-        current_end_proj = np.dot(wall['end_point'], wall_tangent)
-        new_start_proj = np.dot(new_start, wall_tangent)
-        new_end_proj = np.dot(new_end, wall_tangent)
-
-        min_proj = min(current_start_proj, current_end_proj, new_start_proj, new_end_proj)
-        max_proj = max(current_start_proj, current_end_proj, new_start_proj, new_end_proj)
-
-        line_point = wall['rho'] * np.array([np.cos(alpha), np.sin(alpha)])
-
-        wall['start_point'] = line_point + min_proj * wall_tangent
-        wall['end_point'] = line_point + max_proj * wall_tangent
-
-        
         wall['observation_count'] += 1
 
     def update_wall_hessian(self, landmark_id: int, rho: float, alpha: float):
-        """Sync the stored Hessian parameters (rho, alpha) for a wall landmark.
+        """Sync the EKF-corrected Hessian parameters (rho, alpha) for a wall.
 
-        Called after each EKF wall update so that generate_point_cloud and
-        update_wall_endpoints always use the latest EKF-corrected parameters.
+        t_min/t_max are scalar extents along the wall tangent and remain
+        geometrically consistent across Hessian updates — no re-projection needed.
         """
         if landmark_id not in self.walls:
             return
-        self.walls[landmark_id]['rho'] = rho
-        self.walls[landmark_id]['alpha'] = alpha
+        wall = self.walls[landmark_id]
+        wall['rho']   = rho
+        wall['alpha'] = alpha
 
     def update_corner_position(self, landmark_id: int, new_position: np.ndarray):
-        
+
         if landmark_id not in self.corners:
             return
 
@@ -84,30 +84,55 @@ class FeatureMap:
         corner['position'] = new_position
         corner['observation_count'] += 1
 
+    def get_wall_endpoints(self, landmark_id: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """Reconstruct 2D start/end points from stored (rho, alpha, t_min, t_max).
+
+        Returns (start_point, end_point) or None if extents not yet set.
+        """
+        if landmark_id not in self.walls:
+            return None
+        wall = self.walls[landmark_id]
+        if wall['t_min'] is None or wall['t_max'] is None:
+            return None
+        alpha   = wall['alpha']
+        rho     = wall['rho']
+        tangent = np.array([-np.sin(alpha), np.cos(alpha)])
+        normal  = np.array([ np.cos(alpha), np.sin(alpha)])
+        line_pt = rho * normal
+        return (line_pt + wall['t_min'] * tangent,
+                line_pt + wall['t_max'] * tangent)
+
     def generate_point_cloud(self, spacing: float = 0.05) -> np.ndarray:
-        
+
         points = []
 
         # Generate points from walls
         for wall_id, wall in self.walls.items():
-            start = wall['start_point']
-            end = wall['end_point']
+            t_min = wall['t_min']
+            t_max = wall['t_max']
 
-            # Compute wall length
-            length = np.linalg.norm(end - start)
+            # Skip walls whose extents were reset to None (start of new submap)
+            if t_min is None or t_max is None:
+                continue
+
+            alpha   = wall['alpha']
+            rho     = wall['rho']
+            tangent = np.array([-np.sin(alpha), np.cos(alpha)])
+            normal  = np.array([ np.cos(alpha), np.sin(alpha)])
+            line_pt = rho * normal
+
+            start = line_pt + t_min * tangent
+            end   = line_pt + t_max * tangent
+            length = t_max - t_min
 
             if length < 1e-6:
-                # Degenerate wall - just add start point
                 points.append([start[0], start[1], 0.0])
                 continue
 
-            # Number of points to interpolate
             num_points = max(2, int(np.ceil(length / spacing)))
-
-            # Interpolate points along wall
             for i in range(num_points):
-                t = i / (num_points - 1)  # Parameter from 0 to 1
-                point = start + t * (end - start)
+                u = i / (num_points - 1)
+                point = start + u * (end - start)
                 points.append([point[0], point[1], 0.0])
 
         # Add corner points
@@ -116,7 +141,6 @@ class FeatureMap:
             points.append([pos[0], pos[1], 0.0])
 
         if len(points) == 0:
-            # Return empty array with correct shape
             return np.zeros((0, 3))
 
         return np.array(points)
@@ -126,18 +150,18 @@ class FeatureMap:
         return len(self.walls), len(self.corners)
 
     def remove_landmark(self, landmark_id: int):
-       
-        # Remove from walls if present
+
         if landmark_id in self.walls:
             del self.walls[landmark_id]
 
-        # Remove from corners if present
         if landmark_id in self.corners:
             del self.corners[landmark_id]
 
     def reset_wall_endpoints(self):
-        
-        for wall_id, wall in self.walls.items():
-            
-            wall['start_point'] = None
-            wall['end_point'] = None
+        """Reset stored extents so fresh geometry is built for the next submap.
+
+        EKF landmarks and Hessian parameters (rho, alpha) are preserved.
+        """
+        for wall in self.walls.values():
+            wall['t_min'] = None
+            wall['t_max'] = None

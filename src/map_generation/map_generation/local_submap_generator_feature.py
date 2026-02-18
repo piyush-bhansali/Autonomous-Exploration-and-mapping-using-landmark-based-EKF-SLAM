@@ -24,7 +24,6 @@ from map_generation.transform_utils import (
     quaternion_to_yaw,
     yaw_to_quaternion,
     numpy_to_pointcloud2,
-    quaternion_to_rotation_matrix
 )
 from map_generation.evaluation_utils import (
     ConfidenceTracker,
@@ -399,7 +398,8 @@ class LocalSubmapGeneratorFeature(Node):
             stats['observed_features'],
             msg.header.stamp,
             self.feature_markers_pub,
-            self.robot_name
+            self.robot_name,
+            feature_ids=stats.get('feature_ids')
         )
 
         # Log statistics
@@ -468,22 +468,6 @@ class LocalSubmapGeneratorFeature(Node):
             # Log confidence metrics for thesis analysis
             self.confidence_tracker.log_confidence(self.submap_id, confidence_metrics)
 
-            # Transform points from map frame to submap local frame
-            # Submap local frame is defined by submap_start_pose
-            R_world_to_local = quaternion_to_rotation_matrix(
-                self.submap_start_pose['qx'], self.submap_start_pose['qy'],
-                self.submap_start_pose['qz'], self.submap_start_pose['qw']
-            ).T  # Transpose for inverse rotation
-
-            t_world = np.array([
-                self.submap_start_pose['x'],
-                self.submap_start_pose['y'],
-                self.submap_start_pose.get('z', 0.0)
-            ])
-
-            # Transform: p_local = R_world_to_local @ (p_map - t_world)
-            points_local = (R_world_to_local @ (points_map_frame - t_world).T).T
-
             # Publish current submap for visualization (in map frame)
             submap_msg = numpy_to_pointcloud2(
                 points_map_frame,
@@ -492,20 +476,13 @@ class LocalSubmapGeneratorFeature(Node):
             )
             self.current_submap_pub.publish(submap_msg)
 
-            # Create transformation matrix for stitcher (local to world)
-            R_local_to_world = R_world_to_local.T
-            T_local_to_world = np.eye(4)
-            T_local_to_world[0:3, 0:3] = R_local_to_world
-            T_local_to_world[0:3, 3] = t_world
-
-            # Integrate into global map
+            # Integrate into global map — points are already in EKF map frame
             success, pose_correction = self.stitcher.integrate_submap_to_global_map(
-                points=points_local,
+                points=points_map_frame,
                 submap_id=self.submap_id,
                 start_pose=self.submap_start_pose,
                 end_pose=end_pose,
                 scan_count=scan_count,
-                transformation_matrix=T_local_to_world,
                 feature_map=self.slam_manager.get_feature_map()
             )
 

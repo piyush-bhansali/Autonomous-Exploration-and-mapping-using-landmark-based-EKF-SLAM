@@ -39,17 +39,21 @@ At 1 Hz scan rate this corresponds to approximately 50 seconds of travel. This d
 
 ### 2.2 Point Accumulation
 
-Scan points are expressed in the robot body frame at the time of acquisition. Before accumulation each scan is transformed into the submap-local frame, which is anchored at the robot pose when the submap was initialised, $(x_0, y_0, \theta_0)$.
+Submaps are built from the **FeatureMap geometry**, not raw scan points. The `FeatureMap` stores walls and corners in the **EKF map frame**; a point cloud is generated from these features (5 cm spacing) and then expressed in a **submap-local frame** anchored at the submap start pose $(x_0, y_0, \theta_0)$.
 
-Let the current robot pose be $(x_r, y_r, \theta_r)$ in the map frame. The relative pose of the current scan with respect to the submap origin is
+Let $\mathbf{p}^{\mathrm{map}}$ be a point generated from the FeatureMap in the map frame. The submap-local coordinates are computed as
 
 $$
-\Delta x = x_r - x_0, \quad \Delta y = y_r - y_0, \quad \Delta\theta = \theta_r - \theta_0.
+\mathbf{p}^{\mathrm{local}} = \mathbf{R}(\theta_0)^\top \left(\mathbf{p}^{\mathrm{map}} - \mathbf{t}_0\right),
 $$
 
-Each scan point $\mathbf{p}^{\mathrm{robot}}$ is transformed to the submap frame by the rotation $\mathbf{R}(\theta_r)$ followed by translation, then expressed relative to the submap origin. In practice the implementation passes a 4×4 transformation matrix $\mathbf{T}_{\mathrm{submap}}$ computed from the EKF state at scan time.
+where $\mathbf{t}_0 = [x_0,\; y_0]^\top$ is the submap origin in the map frame. This corresponds exactly to the implementation:
 
-All accumulated points are stored in the submap-local frame. When the submap is finalised the full transformation $\mathbf{T}_{\mathrm{submap}}^{\mathrm{map}}$ (start pose in the map frame) is used to project the submap into the global map frame.
+```
+p_local = R_world_to_local @ (p_map - t_world)
+```
+
+All submap points are stored in this **local frame**. When the submap is finalised, the corresponding transform $\mathbf{T}_{\mathrm{local}}^{\mathrm{map}}$ is used to project it into the global map frame.
 
 ### 2.3 Voxel Downsampling
 
@@ -73,7 +77,7 @@ $$
 \mathcal{L}_{\mathrm{shared}} = \mathcal{L}_{\mathrm{new}} \cap \mathcal{L}_{\mathrm{global}}.
 $$
 
-Each shared ID provides one pair of corresponding walls: the new submap's version (in approximate map frame via EKF pose) and the globally-corrected version stored in `global_walls`.
+Each shared ID provides one pair of corresponding walls: the new submap's version (in the **current EKF map frame**) and the globally-corrected version stored in `global_walls` (in the **global map frame**). The SVD alignment estimates the rigid transform between these two frames.
 
 ### 3.3 Overlap Section Sampling
 
@@ -83,7 +87,7 @@ $$
 \hat{\mathbf{t}} = [-\sin\alpha_{\mathrm{tgt}},\; \cos\alpha_{\mathrm{tgt}}]^\top.
 $$
 
-Each wall's endpoints are projected onto $\hat{\mathbf{t}}$. The overlap interval is
+Each wall's endpoints are projected onto $\hat{\mathbf{t}}$. Because the source and target walls live in different frames, this overlap is an **approximation** that assumes the two frames are already roughly aligned. The overlap interval is
 
 $$
 [t_{\mathrm{lo}},\; t_{\mathrm{hi}}] = \bigl[\max(\min_s, \min_g),\; \min(\max_s, \max_g)\bigr],
