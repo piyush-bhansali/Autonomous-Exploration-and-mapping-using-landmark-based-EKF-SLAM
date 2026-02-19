@@ -245,7 +245,7 @@ $$
 
 where $\mathbf{J} = \partial g / \partial \mathbf{x}$ is the Jacobian evaluated at the mean of $\mathbf{x}$. This is a first-order Taylor approximation; it is exact when $g$ is linear and accurate when the uncertainty in $\mathbf{x}$ is small relative to the curvature of $g$.
 
-Error propagation is used throughout the system: corner covariance is propagated from wall covariances through the Jacobian of the line-line intersection formula; ICP covariance is propagated from individual point residuals through the Gauss–Newton Jacobian; landmark initialisation covariance is propagated from observation covariance through the inverse observation model Jacobian.
+Error propagation is used throughout the system: corner covariance is propagated from wall covariances through the Jacobian of the line-line intersection formula; submap alignment covariance is derived from the SVD singular values and point spread; landmark initialisation covariance is propagated from observation covariance through the inverse observation model Jacobian.
 
 ### 8.3 Total Least Squares and Singular Value Decomposition
 
@@ -307,7 +307,7 @@ The literature establishes several principles that guide the design of the syste
 
 **Gate conservatively.** A false positive association is more damaging than a false negative (Neira & Tardós, 2001). The Mahalanobis gate at 95% chi-squared confidence is the primary filter for association decisions.
 
-**Use Hessian-based covariance for ICP.** Censi's (2007) formula gives a geometry-aware ICP covariance from the Gauss–Newton Hessian. It automatically reflects the direction-dependent reliability of the alignment, providing calibrated weights when ICP corrections are fused into the EKF.
+**Use geometry-aware covariance for submap alignment.** The system derives a pose covariance from SVD singular values and the spatial spread of matched wall points. This reflects direction-dependent reliability and provides calibrated weights when alignment corrections are fused into the EKF.
 
 ---
 

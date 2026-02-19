@@ -1,6 +1,6 @@
 # Coordinate Frames and Transform Management
 
-> **Note:** This document describes coordinate frame conventions for the **feature-based mapping pipeline** with ICP submap stitching.
+> **Note:** This document describes coordinate frame conventions for the **feature-based mapping pipeline** with feature-based SVD submap stitching.
 
 ## Table of Contents
 1. [Introduction](#1-introduction)
@@ -441,4 +441,4 @@ Current core documentation files:
 - `literature_review.md` — Academic background for comparative study
 - `00_system_overview.md` — System architecture overview
 
-These technical documents provide supplementary mathematical and theoretical foundations for feature-based SLAM with ICP-assisted submap stitching.
+These technical documents provide supplementary mathematical and theoretical foundations for feature-based SLAM with SVD-based submap stitching.

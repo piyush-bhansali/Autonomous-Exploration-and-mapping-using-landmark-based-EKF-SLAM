@@ -27,7 +27,7 @@ The Mapping Module implements the complete SLAM pipeline centred around the `loc
 
 **EKF-SLAM.** The `LandmarkEKFSLAM` class maintains a joint state vector of robot pose and all confirmed landmarks. Each scan produces: an odometry-based prediction step using midpoint integration, a data association step using nearest-neighbour Mahalanobis gating, and an EKF update step for each matched landmark using the Joseph form covariance update. After every update, wall landmarks are normalised to enforce $\rho \geq 0$.
 
-**Submap Generation and Integration.** After every 50 scans, the current **FeatureMap** (walls + corners in the EKF map frame) is converted to a point cloud (5 cm spacing) and stored in a submap-local frame anchored at the submap start pose. The submap is voxel-downsampled and registered against the global map using feature-based SVD alignment: wall landmarks shared between the new submap and the global wall registry are used as correspondences, and a one-shot SVD rigid body solve yields a correction that maps the **current EKF map frame → global map frame**. The SVD covariance ($\mathbf{R}_{\mathrm{SVD}} = \mathrm{diag}(\sigma^2/\Sigma_1, \sigma^2/\Sigma_1, \sigma^2/(N\bar{d}^2))$) is injected into the EKF as a direct pose observation to correct odometric drift.
+**Submap Generation and Integration.** After every 50 scans, the current **FeatureMap** (walls + corners in the EKF map frame) is converted to a point cloud (5 cm spacing) and passed directly to the stitcher in the map frame. Wall arc-length extents ($t_{\min}$, $t_{\max}$) are never reset at submap boundaries — they accumulate monotonically across all observations, so every wall always contributes geometry to the point cloud from its very first observation onward. The submap is voxel-downsampled and registered against the global map using feature-based SVD alignment: wall landmarks shared between the new submap and the global wall registry are used as correspondences, and a one-shot SVD rigid body solve yields a correction that maps the **current EKF map frame → global map frame**. The SVD covariance ($\mathbf{R}_{\mathrm{SVD}} = \mathrm{diag}(\sigma^2/\Sigma_1, \sigma^2/\Sigma_1, \sigma^2/(N\bar{d}^2))$) is injected into the EKF as a direct pose observation to correct odometric drift.
 
 ### Navigation Module Architecture
 
@@ -208,7 +208,7 @@ associate_landmarks()
   ├─ Euclidean pre-filter (6.0 m)
   └─ Mahalanobis gate (D²_M < 5.991)
        ├─── Matched   →  LandmarkEKFSLAM.update_landmark_observation()
-       └─── Unmatched →  provisional buffer → add_landmark() after 2 obs
+       └─── Unmatched →  add_landmark() (low-observation landmarks pruned later)
 ```
 
 ### Odometry Prediction Pipeline (10 Hz)
@@ -228,7 +228,10 @@ LandmarkEKFSLAM.predict_with_relative_motion()
 ### Submap Pipeline (every 50 scans)
 
 ```
-Accumulated scan points  (submap-local frame)
+FeatureMap  (map frame, wall t_min/t_max extents never reset — persistent)
+       │
+       ▼  generate_point_cloud(spacing=0.05 m)
+Point cloud
        │
        ▼
 SubmapStitcher.integrate_submap_to_global_map()

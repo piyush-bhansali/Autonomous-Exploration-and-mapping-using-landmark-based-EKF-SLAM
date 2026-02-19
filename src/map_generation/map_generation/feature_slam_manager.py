@@ -272,9 +272,6 @@ class FeatureSLAMManager:
     def generate_point_cloud(self, spacing: float = 0.05) -> np.ndarray:
         return self.feature_map.generate_point_cloud(spacing=spacing)
 
-    def reset_wall_endpoints_for_new_submap(self):
-        self.feature_map.reset_wall_endpoints()
-
     def is_initialized(self) -> bool:
         """Check if EKF is initialized."""
         return self.ekf.initialized

@@ -530,10 +530,6 @@ class LocalSubmapGeneratorFeature(Node):
             self.scans_in_current_submap = 0
             self.submap_start_pose = end_pose
 
-            # Reset wall endpoints for fresh geometry in next submap
-            # (EKF landmarks and covariances persist)
-            self.slam_manager.reset_wall_endpoints_for_new_submap()
-
     def shutdown(self):
         """Clean shutdown"""
         if self.submap_id > 0:

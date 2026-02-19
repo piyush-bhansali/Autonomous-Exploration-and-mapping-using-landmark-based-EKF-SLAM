@@ -575,14 +575,13 @@ Applied after each prediction and update.
 ### 7.1 Purpose
 
 FeatureMap stores geometric parameters separate from EKF state:
-- Wall endpoints (for visualization and overlap checking)
-- Wall points (original LiDAR points on wall)
+- Wall Hessian parameters $(\rho, \alpha)$ and tangential extents $(t_{\min}, t_{\max})$
 - Corner positions
 - Observation counts
 
 **Why separate?**
 - EKF stores parametric representation ($\rho, \alpha$ for walls)
-- FeatureMap stores geometric details (endpoints, points)
+- FeatureMap stores geometric **extents** for visualization and overlap checks
 - Enables segment overlap validation
 - Facilitates point cloud generation
 
@@ -590,21 +589,18 @@ FeatureMap stores geometric parameters separate from EKF state:
 
 When a wall is re-observed and matched:
 
-1. Get existing endpoints: $[\mathbf{s}_{old}, \mathbf{e}_{old}]$
-2. Get new endpoints: $[\mathbf{s}_{new}, \mathbf{e}_{new}]$
-3. Project onto wall tangent
-4. Take min/max projections:
+1. Get existing extents $(t_{\min}, t_{\max})$ along the wall tangent
+2. Transform new observation endpoints to map frame and project onto the wall tangent
+3. Take min/max projections:
    $$
    \begin{align}
    p_{min} &= \min(p_{s,old}, p_{e,old}, p_{s,new}, p_{e,new}) \\
    p_{max} &= \max(p_{s,old}, p_{e,old}, p_{s,new}, p_{e,new})
    \end{align}
    $$
+4. Update $(t_{\min}, t_{\max})$ with the new min/max
 
-5. Reconstruct extended endpoints from projections
-6. Merge point sets (up to 500 points max)
-
-**Effect:** Walls grow as robot explores, capturing full extent.
+**Effect:** Walls grow as robot explores, capturing full extent while remaining consistent with the current $(\rho, \alpha)$.
 
 ### 7.3 Point Cloud Generation
 
@@ -616,6 +612,7 @@ def generate_point_cloud(spacing=0.05):
 
     # Interpolate along walls
     for wall in walls:
+        # Reconstruct endpoints from (rho, alpha, t_min, t_max)
         length = ||end - start||
         num_points = ceil(length / spacing)
         for i in range(num_points):
@@ -861,11 +858,12 @@ class LocalSubmapGenerator(Node):
 | File | Purpose |
 |------|---------|
 | `feature_slam_manager.py` | Main SLAM orchestrator |
-| `ekf_slam.py` | EKF implementation |
+| `ekf_predict.py` | EKF prediction (odometry) |
+| `ekf_update_feature.py` | EKF update (landmarks + pose correction) |
 | `landmark_features.py` | Feature extraction |
 | `data_association.py` | Matching algorithm |
 | `feature_map.py` | Geometric feature storage |
-| `local_submap_generator.py` | ROS2 node |
+| `local_submap_generator_feature.py` | ROS2 mapping node |
 
 ## 13. Conclusion
 

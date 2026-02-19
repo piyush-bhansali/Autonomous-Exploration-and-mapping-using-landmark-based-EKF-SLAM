@@ -93,6 +93,7 @@ for each observed feature z:
 
     for each existing landmark m_j of matching type:
         1. Spatial gate: if distance(robot, m_j) > τ_spatial, skip
+        1.5. Wall gap gate: if wall extents exist and gap > max_gap_ext, skip
         2. Compute predicted observation ẑ_j = h(x_r, m_j)
         3. Compute innovation  ν = z − ẑ_j  (angles wrapped to [−π, π])
         4. Compute Jacobian H and innovation covariance S = H P H^T + R
@@ -123,6 +124,9 @@ The wall is a candidate if $|d_\perp| \leq \tau_{\mathrm{spatial}}$ (default: 6.
 **Additional wall gates (implementation defaults):**
 - **Angle gate:** $|\hat{\alpha}_r - \alpha_r| \leq 0.349066$ rad ($\approx 20^\circ$).
 - **Rho gate:** $|\rho_m - \rho_m^{\mathrm{obs}}| \leq 0.5$ m, where $\rho_m^{\mathrm{obs}}$ is the observed wall transformed to map frame.
+ - **Gap gate (extent overlap):** if the wall has stored extents, the observed segment must overlap or be within a small gap of the existing extent. The implementation uses a maximum allowable gap of `max_gap_ext = 0.5 m` along the wall tangent. Segments beyond this gap are treated as **new landmarks** to avoid bridging doorways/openings.
+
+**Extent representation.** Wall extents are stored as scalar limits $(t_{\min}, t_{\max})$ along the wall tangent $\hat{\mathbf{t}} = [-\sin\alpha,\; \cos\alpha]^\top$. When an observed wall segment is matched, its endpoints are transformed to map frame and projected onto $\hat{\mathbf{t}}$ for the gap check and for endpoint extension.
 
 ### 5.2 Predicted Observation
 

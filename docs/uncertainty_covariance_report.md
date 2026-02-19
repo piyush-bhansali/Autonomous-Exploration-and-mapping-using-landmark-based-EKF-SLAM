@@ -1,11 +1,11 @@
 # Uncertainty Quantification in Feature-Based EKF-SLAM
-## Wall, Corner, and ICP Covariance — Theory, Derivation, and Implementation
+## Wall, Corner, and SVD Alignment Covariance — Theory, Derivation, and Implementation
 
 ---
 
-## Introduction: Uncertainty in Landmarks and ICP
+## Introduction: Uncertainty in Landmarks and Submap Alignment
 
-This report treats uncertainty as a first-class output of the mapping stack, not an afterthought. In feature-based EKF-SLAM, every landmark estimate (walls and corners) and every scan-matching correction (ICP pose update) is only as reliable as the geometry and data that produced it. A short, clean wall segment seen at a shallow angle carries high uncertainty in orientation; a long, well-populated wall yields tight angular estimates but still has range uncertainty. Corners inherit and combine the uncertainty of their two parent walls. ICP pose updates behave similarly: they can be highly confident when the point cloud has rich, well-conditioned structure, and nearly singular when the scene is symmetric or dominated by a single direction.
+This report treats uncertainty as a first-class output of the mapping stack, not an afterthought. In feature-based EKF-SLAM, every landmark estimate (walls and corners) and every submap alignment correction (feature-based SVD pose update) is only as reliable as the geometry and data that produced it. A short, clean wall segment seen at a shallow angle carries high uncertainty in orientation; a long, well-populated wall yields tight angular estimates but still has range uncertainty. Corners inherit and combine the uncertainty of their two parent walls. SVD alignment updates behave similarly: they can be highly confident when the shared-wall geometry is well conditioned, and weak when the scene is symmetric or dominated by a single direction.
 
 The EKF uses these covariances to decide how strongly to trust each observation. Over-confident covariances cause inconsistency and filter divergence; over-conservative covariances waste information and slow convergence. For that reason this system computes covariances directly from the data geometry (via Fisher information / Gauss–Newton Hessians and first-order propagation) rather than using a fixed noise matrix. The rest of this document derives those expressions and explains how they are regularised for numerical stability before being injected into the EKF.
 
@@ -17,7 +17,7 @@ The EKF uses these covariances to decide how strongly to trust each observation.
    - 2.1.1 Connecting CRLB, FIM, and Gauss–Newton Hessian
    - 2.2 First-Order Error Propagation
    - 2.3 Landmark Detection Uncertainty
-   - 2.4 Uncertainty in ICP
+   - 2.4 Uncertainty in Submap Alignment
    - 2.5 Positive Definiteness and Numerical Conditioning
 3. [Wall Landmark Covariance](#3-wall-landmark-covariance)
    - 3.1 Hessian Normal Form
@@ -31,18 +31,18 @@ The EKF uses these covariances to decide how strongly to trust each observation.
    - 4.2 First-Order Jacobian
    - 4.3 Error Propagation
    - 4.4 Geometric Interpretation
-5. [ICP Pose Covariance](#5-icp-pose-covariance)
-   - 5.1 ICP Cost Function
-   - 5.2 Gauss–Newton Hessian
-   - 5.3 2D Jacobian Derivation
+5. [SVD Submap Alignment Covariance](#5-svd-submap-alignment-covariance)
+   - 5.1 Alignment Setup
+   - 5.2 Overlap Correspondences
+   - 5.3 SVD Solve
    - 5.4 Covariance Formula
-   - 5.5 Geometric Interpretation
-   - 5.6 Minimum Inlier Guard
+   - 5.5 Degeneracy Check
+   - 5.6 Geometric Interpretation
 6. [EKF Integration](#6-ekf-integration)
    - 6.1 Landmark Initialisation
    - 6.2 Observation Update
    - 6.3 Joseph-Form Covariance Update
-   - 6.4 ICP Pose Correction Injection
+   - 6.4 SVD Pose Correction Injection
 7. [Consistency of the Noise Model](#7-consistency-of-the-noise-model)
 8. [Summary Table](#8-summary-table)
 
@@ -59,10 +59,10 @@ Both kinds matter equally. An EKF that carries accurate covariances
 
 1. weights new measurements correctly (small innovation covariance **S** = **HPH**ᵀ + **R** when the filter is confident, large when it is not),
 2. rejects outliers reliably via Mahalanobis gating,
-3. propagates corrections coherently (an ICP correction to the robot pose shifts all correlated landmark estimates in the same direction),
+3. propagates corrections coherently (a submap SVD correction to the robot pose shifts all correlated landmark estimates in the same direction),
 4. avoids the filter inconsistency that arises when **P** is over-optimistic — a well-known failure mode of EKF-SLAM (Julier & Uhlmann, 2001).
 
-The measurement noise matrix **R** for each feature type must therefore be computed carefully. Using a fixed diagonal **R** ignores the geometry of the measurement and is either systematically over-confident or under-confident depending on the wall orientation, number of points, and ICP convergence quality. This system computes **R** analytically for all three feature types.
+The measurement noise matrix **R** for each feature type must therefore be computed carefully. Using a fixed diagonal **R** ignores the geometry of the measurement and is either systematically over-confident or under-confident depending on the wall orientation, number of points, and submap alignment quality. This system computes **R** analytically for all three feature types.
 
 ---
 
@@ -94,7 +94,7 @@ The CRLB covariance is then:
 Cov(θ) = σ² A⁻¹
 ```
 
-This is the formula used for both wall covariance and ICP covariance in this system. It is exact when the measurement model is linear; for nonlinear models it is a first-order approximation.
+This is the formula used for both wall covariance and the submap alignment covariance in this system. It is exact when the measurement model is linear; for nonlinear models it is a first-order approximation.
 
 **Why this is better than a fixed R**: A fixed **R** = σ² **I** assigns the same uncertainty regardless of whether 3 or 300 points were used to fit the feature, and regardless of the geometric arrangement of those points. The CRLB formula naturally gives smaller uncertainty when many points are available (large **A**, small **A**⁻¹), and larger uncertainty when the geometry is degenerate (small eigenvalue in **A**, large eigenvalue in **A**⁻¹).
 
@@ -130,7 +130,7 @@ Under these conditions, **I(θ) = H_GN**, so the CRLB becomes:
 Cov(θ̂) ≥ I(θ)⁻¹  ≈  (Jᵀ R⁻¹ J)⁻¹
 ```
 
-This is the covariance formula used throughout this report. It assumes an unbiased estimator, a correct Gaussian noise model, and a first-order linearisation around the converged solution (residuals near zero). When these assumptions are violated (wrong correspondences, local minima, or unmodeled dynamics), the covariance becomes optimistic. The wall and ICP covariance derivations in Sections 3 and 5 apply this exact chain from likelihood → FIM → Gauss–Newton → CRLB.
+This is the covariance formula used throughout this report. It assumes an unbiased estimator, a correct Gaussian noise model, and a first-order linearisation around the converged solution (residuals near zero). When these assumptions are violated (wrong correspondences, local minima, or unmodeled dynamics), the covariance becomes optimistic. The wall and SVD alignment covariance derivations in Sections 3 and 5 apply this exact chain from likelihood → FIM → Gauss–Newton → CRLB.
 
 ### 2.2 First-Order Error Propagation
 
@@ -150,11 +150,11 @@ Landmark detection introduces its own uncertainty before any covariance is compu
 
 In this pipeline, residual thresholding, minimum points/length gates, and corner angle thresholds determine which features enter the estimator. These decisions are discrete and do not appear in the CRLB/FIM/Gauss–Newton covariance, which assumes a correct association and models only sensor noise and geometry for a given fitted feature. As a result, the reported covariances should be interpreted as conditional on successful detection.
 
-### 2.4 Uncertainty in ICP
+### 2.4 Uncertainty in Submap Alignment
 
-The uncertainty of the ICP pose estimate is captured by its covariance, which describes how the estimated [x, y, θ] varies under measurement noise and geometry. How accurate this covariance is depends on which error sources are modeled. High-fidelity approaches such as Monte Carlo simulation can capture more effects but are too expensive for real-time mapping. In this system we use an analytic estimate derived from the Gauss–Newton Hessian (or, equivalently, the Fisher information) of the ICP cost around the convergence point. This yields a fast, geometry-aware covariance that is consistent with the Cramér–Rao bound.
+The uncertainty of the **SVD submap alignment** is captured by its covariance, which describes how the estimated [x, y, θ] correction varies under measurement noise and geometry. High-fidelity approaches such as Monte Carlo simulation can capture more effects but are too expensive for real-time mapping. In this system we use an analytic estimate derived from the SVD singular values and the spatial spread of the matched wall points. This yields a fast, geometry-aware covariance that is consistent with the Cramér–Rao intuition: well-conditioned geometry yields tight uncertainty, while degenerate geometry yields large uncertainty.
 
-Two common analytic families exist in the literature: Hessian-based methods and correspondence-based formulations. Both linearise the ICP objective around the solution and compute covariance from the resulting Jacobian matrix, which means the estimate is primarily driven by sensor noise and the configuration of inlier correspondences. Errors from wrong correspondences, local minima, and dynamic objects are not explicitly modeled, so the covariance should be interpreted as a best-case estimate conditioned on the final ICP alignment.
+The estimate is primarily driven by sensor noise and the configuration of shared-wall correspondences. Errors from wrong associations, local minima, or dynamic objects are not explicitly modeled, so the covariance should be interpreted as a best-case estimate conditioned on the final SVD alignment.
 
 ### 2.5 Positive Definiteness and Numerical Conditioning
 
@@ -458,123 +458,82 @@ The corner covariance captures three coupled geometric effects:
 
 ---
 
-## 5. ICP Pose Covariance
+## 5. SVD Submap Alignment Covariance
 
-**Source**: `submap_stitcher.py:91–157` (`_compute_icp_covariance`)
+**Source**: `submap_stitcher.py:90–240` (`feature_align_submaps`, `_svd_align`)
 
-### 5.1 ICP Cost Function
+### 5.1 Alignment Setup
 
-Point-to-point ICP (Besl & McKay, 1992) solves for the rigid transformation **T** = (**R**, **t**) that minimises the sum of squared correspondence distances:
+Submap alignment uses shared **wall landmark IDs** as correspondences. Each shared ID provides a pair of walls:
 
-```
-E(R, t) = Σᵢ ‖ R pᵢ + t − qᵢ ‖²
-```
+- **Source**: the current `FeatureMap` wall in the **EKF map frame**.
+- **Target**: the corresponding `global_walls` entry in the **global map frame**.
 
-where (pᵢ, qᵢ) are matched point pairs from the source and target clouds within the maximum correspondence distance. At convergence **T**★ = (**R**★, **t**★) is the ICP solution.
+The alignment estimates the rigid transform that maps source → target using a one-shot SVD solve on constructed point pairs.
 
-In 2D, the rigid transform has three degrees of freedom: [x, y, θ]. Let **δ** = [δx, δy, δθ] be a small perturbation around the converged solution. The residual at correspondence i under this perturbation is:
+### 5.2 Overlap Correspondences
 
-```
-rᵢ(δ) = R(θ★ + δθ) pᵢ + [x★ + δx, y★ + δy]ᵀ − qᵢ
-```
+Each wall stores scalar extents $(t_{\min}, t_{\max})$ along its own tangent. To build point pairs:
 
-Linearising in **δ** around the solution:
-
-```
-rᵢ(δ) ≈ rᵢ(0) + Jᵢ δ
-```
-
-The residual at the solution is rᵢ(0) ≈ **0** (ICP minimised it). The Jacobian is what determines the covariance.
-
-### 5.2 Gauss–Newton Hessian
-
-The Gauss–Newton approximation to the Hessian of E at the solution is:
+1. Reconstruct the source wall endpoints from $(\rho, \alpha, t_{\min}, t_{\max})$.
+2. Project the source extents onto the **target** tangent to compute a 1D overlap interval.
+3. Sample $n_{\text{samples}} = 8$ values $t_k$ in the overlap.
+4. Generate a point on **each wall’s own geometry**:
 
 ```
-H_GN = Σᵢ Jᵢᵀ Jᵢ   ∈ ℝ³ˣ³
+p_src = ρ_src * n̂_src + t_k * t̂_src
+p_tgt = ρ_tgt * n̂_tgt + t_k * t̂_tgt
 ```
 
-The covariance of the ICP pose estimate is (Censi, 2007):
+If the overlap length is < 0.3 m, the wall pair is skipped.
+
+### 5.3 SVD Solve
+
+Given matched pairs $\{(\mathbf{p}_i^{\mathrm{src}}, \mathbf{p}_i^{\mathrm{tgt}})\}$, compute centroids and the 2×2 cross-covariance:
 
 ```
-Cov(δx, δy, δθ) = σ² H_GN⁻¹ = σ² A⁻¹
+H = Σ_i (p_i^src − c_src) (p_i^tgt − c_tgt)ᵀ
 ```
 
-This is the same CRLB formula as for the wall, but now in the 3D space of 2D rigid motions.
-
-### 5.3 2D Jacobian Derivation
-
-For a single matched pair (p_s, q_t) where p_s ∈ ℝ² is the source point and q_t ∈ ℝ² is the target point, the residual after applying transform [x, y, θ] to p_s is:
+SVD: `H = U Σ Vᵀ`. The rigid transform is:
 
 ```
-r(x, y, θ) = R(θ) p_s + [x, y]ᵀ − q_t
+R = V D Uᵀ    (reflection guard)
+t = c_tgt − R c_src
 ```
 
-where **R**(θ) = [[cos θ, −sin θ], [sin θ, cos θ]].
-
-Taking partial derivatives:
+The condition number is:
 
 ```
-∂r/∂x = [1, 0]ᵀ    (only the translation x component shifts residual)
-∂r/∂y = [0, 1]ᵀ
-∂r/∂θ = (dR/dθ) p_s = [ −sin θ  −cos θ ] p_s = dp/dθ
-                        [  cos θ  −sin θ ]
-```
-
-The Jacobian row is therefore:
-
-```
-Jᵢ = [ ∂rᵢ/∂x  ∂rᵢ/∂y  ∂rᵢ/∂θ ]
-
-   = [ −1    0   −(dR/dθ · p_s)[0] ]   ∈ ℝ²ˣ³
-     [  0   −1   −(dR/dθ · p_s)[1] ]
-```
-
-The signs are negative because the residual is defined as (transformed source) − (target): a positive perturbation in x shifts the source point right, decreasing a residual that was previously at zero. The third column is the derivative of the rotated source point with respect to θ.
-
-**Implementation** (`submap_stitcher.py:110–141`):
-```python
-dR_dtheta = np.array([[-s, -c], [c, -s]])    # dR/dθ at ICP solution θ
-
-for p_s, p_t in zip(src_inliers, tgt_inliers):
-    dp_dtheta = dR_dtheta @ p_s
-
-    J = np.array([
-        [-1.0,  0.0, -dp_dtheta[0]],
-        [ 0.0, -1.0, -dp_dtheta[1]]
-    ])
-
-    A += J.T @ J
+κ = Σ₀ / (Σ₁ + ε)
 ```
 
 ### 5.4 Covariance Formula
 
-After accumulating **A** over all inlier correspondences:
+The alignment covariance is derived from the SVD singular values and the spatial spread of source points:
 
 ```
-C_ICP = σ² A⁻¹   ∈ ℝ³ˣ³,   in [x, y, θ] space
+σ² = lidar_noise_sigma²
+cov_xy = σ² / (Σ₁ + 1e-6)
+cov_θ  = σ² / (N * mean_sq_dist + 1e-6)
+R_SVD  = diag([cov_xy, cov_xy, cov_θ])
 ```
 
-where σ = 0.01 m is the LDS-01 range noise standard deviation (same value used for wall covariance, maintaining a consistent sensor noise model across the entire system).
+where `mean_sq_dist` is the mean squared distance of source points from their centroid, and `N` is the number of point pairs.
 
-If **A** is singular (rank-deficient), `np.linalg.pinv` is used as a fallback, which gives the minimum-norm pseudo-inverse. This situation arises in degenerate environments (e.g. a perfectly uniform corridor with no features to constrain translation along the corridor axis) and produces a very large covariance in the unconstrained direction. The EKF then appropriately down-weights the ICP correction along that axis.
+### 5.5 Degeneracy Check
 
-### 5.5 Geometric Interpretation
+If there are fewer than 3 point pairs, or if the condition number exceeds 100, the alignment is rejected and **no pose correction** is injected into the EKF.
 
-The third column of **J** contains `−(dR/dθ · p_s)`, which is the velocity of the source point when the robot rotates. For source points far from the rotation centre this column has a large magnitude, which means rotational misalignment is observable and the angular covariance Var(δθ) will be small. For source points near the rotation centre the angular sensitivity is low and Var(δθ) grows.
+### 5.6 Geometric Interpretation
 
-| ICP scenario | A structure | Implication |
+| SVD scenario | Geometry | Implication |
 |---|---|---|
-| Corner / room intersection | All three eigenvalues large | All pose components well-constrained; small C_ICP |
-| Flat wall, motion perpendicular | Translation along wall poorly constrained | Large eigenvalue for that axis in C_ICP |
-| Featureless corridor | One translation eigenvalue near zero | Near-singular A; very large Var in corridor direction |
-| Few correspondences (N < 6) | A unreliable | Return None; ICP update skipped entirely |
+| Multiple walls with varied angles | Well-conditioned | Small covariance |
+| Parallel walls (corridor) | One singular value small | High κ → reject |
+| Few pairs / short overlap | Weak constraints | Large cov_θ |
 
-This geometry-dependence is the key motivation for computing C_ICP rather than using a fixed measurement noise for the ICP pose correction.
-
-### 5.6 Minimum Inlier Guard
-
-If fewer than 6 inlier correspondences survive the distance filter, `_compute_icp_covariance` returns `None`. 6 is the minimum required to make the 3×3 matrix **A** full-rank in a non-degenerate 2D environment (3 DOF × 2 rows per correspondence = 6 constraints needed in the worst case). Returning `None` causes the EKF update for the ICP correction to be skipped, preventing an unreliable alignment from corrupting the filter state.
+This geometry-dependence is the key motivation for computing **R_SVD** rather than using a fixed measurement noise for the submap pose correction.
 
 ---
 
@@ -655,15 +614,15 @@ self.P = I_KH @ self.P @ I_KH.T + K @ measurement_covariance @ K.T
 
 The Joseph form guarantees symmetry and positive semi-definiteness regardless of numerical errors in **K** and **H**, which is critical for long-duration EKF-SLAM where thousands of updates accumulate.
 
-### 6.4 ICP Pose Correction Injection
+### 6.4 SVD Pose Correction Injection
 
-When a submap ICP returns a correction [dx, dy, dθ] and covariance **C_ICP** ∈ ℝ³ˣ³, it is injected into the EKF as a direct observation of the robot pose. The observation model is the identity on the pose sub-state:
+When the submap SVD returns a correction [dx, dy, dθ] and covariance **R_SVD** ∈ ℝ³ˣ³, it is injected into the EKF as a direct observation of the robot pose. The observation model is the identity on the pose sub-state:
 
 ```
-H_ICP = [I₃  0 ... 0]   ∈ ℝ³ˣⁿ
+H_SVD = [I₃  0 ... 0]   ∈ ℝ³ˣⁿ
 ```
 
-The standard EKF update then propagates the correction to every landmark through the cross-covariance terms **P**_{robot, landmark}. This is the mechanism by which global consistency is maintained: a correction to the robot pose shifts all correlated landmarks coherently. The weight given to the ICP correction is determined by **C_ICP** — degenerate environments where ICP is poorly constrained automatically receive lower weight.
+The standard EKF update then propagates the correction to every landmark through the cross-covariance terms **P**_{robot, landmark}. This is the mechanism by which global consistency is maintained: a correction to the robot pose shifts all correlated landmarks coherently. The weight given to the correction is determined by **R_SVD** — degenerate alignments are automatically down-weighted (or rejected entirely).
 
 ---
 
@@ -690,9 +649,8 @@ There is a subtle point for wall covariance: the perpendicular-distance residual
 | Wall covariance (CRLB) | **C_w** = σ² **A**⁻¹ | 2×2 | `landmark_features.py:358` |
 | Corner Jacobian | **J** = [∂x/∂ρₐ, ∂x/∂αₐ, ∂x/∂ρ_b, ∂x/∂α_b] | 2×4 | `landmark_features.py:413` |
 | Corner covariance | **C_c** = **J** Σ_θ **J**ᵀ | 2×2 | `landmark_features.py:423` |
-| ICP Jacobian | Jᵢ = [−I₂, −(dR/dθ)p_s] | 2×3 | `submap_stitcher.py:136–139` |
-| ICP Hessian | **A** = Σᵢ Jᵢᵀ Jᵢ | 3×3 | `submap_stitcher.py:141` |
-| ICP covariance (Censi) | **C_ICP** = σ² **A**⁻¹ | 3×3 | `submap_stitcher.py:151` |
+| SVD cross-covariance | **H** = Σ (p_src − c_src)(p_tgt − c_tgt)ᵀ | 2×2 | `submap_stitcher.py:_svd_align` |
+| SVD covariance | **R_SVD** = diag(σ²/(Σ₁+ε), σ²/(Σ₁+ε), σ²/(N·d̄²+ε)) | 3×3 | `submap_stitcher.py:feature_align_submaps` |
 | EKF update covariance | **P** ← (**I**−**KH**)**P**(**I**−**KH**)ᵀ + **KRK**ᵀ | n×n | `ekf_update_feature.py:262` |
 | Sensor noise σ | 0.01 m (LDS-01 spec) | — | all three |
 
@@ -700,9 +658,9 @@ There is a subtle point for wall covariance: the perpendicular-distance residual
 
 ## References
 
-1. **Besl, P. J., & McKay, N. D. (1992).** "A Method for Registration of 3-D Shapes." *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 14(2), 239–256.
+1. **Arun, K. S., Huang, T. S., & Blostein, S. D. (1987).** "Least-Squares Fitting of Two 3-D Point Sets." *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 9(5), 698–700.
 
-2. **Censi, A. (2007).** "An Accurate Closed-Form Estimate of ICP's Covariance." *Proceedings of IEEE ICRA*, pp. 3167–3172.
+2. **Horn, B. K. P. (1987).** "Closed-Form Solution of Absolute Orientation Using Unit Quaternions." *Journal of the Optical Society of America A*, 4(4), 629–642.
 
 3. **Kay, S. M. (1993).** *Fundamentals of Statistical Signal Processing, Volume I: Estimation Theory*. Prentice Hall.
 

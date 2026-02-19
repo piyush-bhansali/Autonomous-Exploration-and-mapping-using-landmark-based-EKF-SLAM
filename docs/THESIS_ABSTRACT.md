@@ -14,10 +14,10 @@ where $\mathbf{A} = \sum_i \mathbf{J}_i^\top \mathbf{J}_i$ is the Fisher informa
 
 State estimation is performed by an Extended Kalman Filter (EKF). The state vector contains the robot pose $(x, y, \theta)$ and all landmark parameters jointly, so that a single observation updates both the observed landmark and every other landmark through the cross-covariance structure. At each scan, odometry increments propagate the state through a midpoint-integration motion model with motion-scaled process noise. Landmarks are matched to observations using nearest-neighbour association with Mahalanobis-distance gating at the 95% chi-squared confidence level ($\chi^2_{0.05}(2) = 5.99$ for 2-DOF features). After each EKF update, wall parameters are normalised to enforce $\rho \geq 0$, preventing sign drift that would cause a previously observed wall to fail the association gate and be re-entered as a duplicate.
 
-Global consistency is maintained by a submap-stitching layer. Every $N$ scans the accumulated local point cloud is registered against the growing global map using point-to-point ICP. The alignment covariance is computed from the Gauss–Newton Hessian of the ICP cost function,
+Global consistency is maintained by a submap-stitching layer. Every $N$ scans the FeatureMap point cloud (in the EKF map frame) is registered against the growing global map using **feature-based SVD alignment** of shared wall landmarks. The alignment covariance is derived from the SVD singular values and the spatial spread of the matched points,
 
-$$\mathbf{R}_{\mathrm{ICP}} = \sigma^2\,\mathbf{A}_{\mathrm{ICP}}^{-1},$$
+$$\mathbf{R}_{\mathrm{SVD}} = \mathrm{diag}\!\left(\frac{\sigma^2}{\Sigma_1},\; \frac{\sigma^2}{\Sigma_1},\; \frac{\sigma^2}{N\bar{d}^2}\right),$$
 
-making it geometry-aware: low uncertainty along well-constrained directions and high uncertainty in degenerate directions such as along a featureless corridor. The ICP pose correction is injected into the EKF as a direct pose observation, propagating the correction to all correlated landmarks.
+making it geometry-aware: low uncertainty along well-constrained directions and high uncertainty in degenerate directions such as along a featureless corridor. The SVD pose correction is injected into the EKF as a direct pose observation, propagating the correction to all correlated landmarks.
 
 The system is implemented as a ROS 2 node in Python, tested on TurtleBot3 in structured indoor environments. Performance is assessed using the absolute trajectory error (ATE), landmark map accuracy, point cloud quality, and filter consistency via the normalised estimation error squared (NEES).

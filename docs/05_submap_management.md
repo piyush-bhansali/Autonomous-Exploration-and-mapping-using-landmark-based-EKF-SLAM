@@ -13,9 +13,9 @@
 
 ## 1. Introduction
 
-The EKF operates in a local coordinate frame and accumulates drift over long trajectories. A separate submap-stitching layer corrects this drift by aligning accumulated local point clouds against the growing global map using shared landmark correspondences.
+The EKF operates in a local coordinate frame and accumulates drift over long trajectories. A separate submap-stitching layer corrects this drift by aligning FeatureMap-derived point clouds (expressed in the EKF map frame) against the growing global map using shared landmark correspondences.
 
-Every $N$ scans, the local point cloud is declared a complete submap. The submap is registered to the global map using feature-based SVD alignment: wall segments shared between the new submap and the accumulated global wall registry are used as correspondences, and a one-shot SVD rigid body solve yields the correction transform. The resulting pose correction is fed back into the EKF as a direct pose observation, propagating the correction to all correlated landmarks.
+Every $N$ scans, the FeatureMap point cloud is declared a complete submap. The submap is registered to the global map using feature-based SVD alignment: wall segments shared between the new submap and the accumulated global wall registry are used as correspondences, and a one-shot SVD rigid body solve yields the correction transform. The resulting pose correction is fed back into the EKF as a direct pose observation, propagating the correction to all correlated landmarks.
 
 The submap layer serves two purposes:
 1. It builds and maintains a metric point cloud map of the environment.
@@ -35,25 +35,13 @@ $$
 n_{\mathrm{scans}} \geq N_{\mathrm{threshold}}, \qquad N_{\mathrm{threshold}} = 50.
 $$
 
-At 1 Hz scan rate this corresponds to approximately 50 seconds of travel. This duration is short enough that odometric drift within a single submap is small (typically < 0.05 m).
+At 10 Hz scan rate this corresponds to approximately 5 seconds of travel. This duration is short enough that odometric drift within a single submap is small (typically < 0.05 m).
 
 ### 2.2 Point Accumulation
 
-Submaps are built from the **FeatureMap geometry**, not raw scan points. The `FeatureMap` stores walls and corners in the **EKF map frame**; a point cloud is generated from these features (5 cm spacing) and then expressed in a **submap-local frame** anchored at the submap start pose $(x_0, y_0, \theta_0)$.
+Submaps are built from the **FeatureMap geometry**, not raw scan points. The `FeatureMap` stores walls and corners in the **EKF map frame**; a point cloud is generated from these features (5 cm spacing) and passed directly to the stitcher in the map frame. There is no separate submap-local frame in the current implementation.
 
-Let $\mathbf{p}^{\mathrm{map}}$ be a point generated from the FeatureMap in the map frame. The submap-local coordinates are computed as
-
-$$
-\mathbf{p}^{\mathrm{local}} = \mathbf{R}(\theta_0)^\top \left(\mathbf{p}^{\mathrm{map}} - \mathbf{t}_0\right),
-$$
-
-where $\mathbf{t}_0 = [x_0,\; y_0]^\top$ is the submap origin in the map frame. This corresponds exactly to the implementation:
-
-```
-p_local = R_world_to_local @ (p_map - t_world)
-```
-
-All submap points are stored in this **local frame**. When the submap is finalised, the corresponding transform $\mathbf{T}_{\mathrm{local}}^{\mathrm{map}}$ is used to project it into the global map frame.
+Wall arc-length extents ($t_{\min}$, $t_{\max}$) in `feature_map.walls` are **never reset** at submap boundaries — they accumulate monotonically across the full runtime of each landmark. As a result, the point cloud generated at each submap boundary reflects the complete observed coverage of every wall, not just what was seen in the most recent 50-scan window. This benefits SVD alignment (more overlap available immediately) and the data association gap check (always active, with no vulnerability window at submap boundaries). Submap confidence values are derived from the EKF covariance and are unaffected by this design.
 
 ### 2.3 Voxel Downsampling
 
@@ -65,7 +53,7 @@ Before alignment each submap is voxel-downsampled at $v = 0.05$ m. This reduces 
 
 ### 3.1 Overview
 
-The alignment exploits the wall landmarks already maintained by the EKF. When a submap is finalised, the `FeatureMap` associated with the current submap holds wall endpoints in the (approximate) map frame. The `SubmapStitcher` maintains a `global_walls` registry — a dictionary keyed by landmark ID containing the globally-aligned Hessian parameters and endpoints accumulated from all previous submaps.
+The alignment exploits the wall landmarks already maintained by the EKF. When a submap is finalised, the `FeatureMap` associated with the current submap holds wall parameters and extents in the (approximate) map frame. The `SubmapStitcher` maintains a `global_walls` registry — a dictionary keyed by landmark ID containing the globally-aligned Hessian parameters and tangential extents accumulated from all previous submaps.
 
 Because each wall landmark carries a unique, persistent integer ID assigned by the EKF, finding correspondences between the new submap and the global registry requires only a set intersection — no descriptor matching or nearest-neighbour search.
 
@@ -87,22 +75,22 @@ $$
 \hat{\mathbf{t}} = [-\sin\alpha_{\mathrm{tgt}},\; \cos\alpha_{\mathrm{tgt}}]^\top.
 $$
 
-Each wall's endpoints are projected onto $\hat{\mathbf{t}}$. Because the source and target walls live in different frames, this overlap is an **approximation** that assumes the two frames are already roughly aligned. The overlap interval is
+Each wall stores scalar extents $(t_{\min}, t_{\max})$ along its **own** tangent. The target extents are already in the target tangent coordinate system. The source extents are first reconstructed into 2D points and then projected onto the target tangent so both are compared in a single coordinate system. This overlap is an **approximation** that assumes the two frames are already roughly aligned. The overlap interval is
 
 $$
 [t_{\mathrm{lo}},\; t_{\mathrm{hi}}] = \bigl[\max(\min_s, \min_g),\; \min(\max_s, \max_g)\bigr],
 $$
 
-where $\min_s, \max_s$ and $\min_g, \max_g$ are the projected endpoint extents of the source and global wall, respectively. If $t_{\mathrm{hi}} - t_{\mathrm{lo}} < 0.3\;\mathrm{m}$ the wall pair is skipped (insufficient overlap).
+where $\min_s, \max_s$ and $\min_g, \max_g$ are the projected **tangent extents** of the source and global wall, respectively. If $t_{\mathrm{hi}} - t_{\mathrm{lo}} < 0.3\;\mathrm{m}$ the wall pair is skipped (insufficient overlap).
 
-From the overlap interval, $n_{\mathrm{samples}} = 8$ uniformly-spaced parameter values $t_k$ are drawn. Each yields a matched point pair:
+From the overlap interval, $n_{\mathrm{samples}} = 8$ uniformly-spaced parameter values $t_k$ are drawn. Each yields a matched point pair generated **on each wall's own geometry**:
 
 $$
-\mathbf{p}_k^{\mathrm{src}} = \rho_{\mathrm{src}}\,\hat{\mathbf{n}}_{\mathrm{src}} + t_k\,\hat{\mathbf{t}}, \qquad
-\mathbf{p}_k^{\mathrm{tgt}} = \rho_{\mathrm{tgt}}\,\hat{\mathbf{n}}_{\mathrm{tgt}} + t_k\,\hat{\mathbf{t}},
+\mathbf{p}_k^{\mathrm{src}} = \rho_{\mathrm{src}}\,\hat{\mathbf{n}}_{\mathrm{src}} + t_k\,\hat{\mathbf{t}}_{\mathrm{src}}, \qquad
+\mathbf{p}_k^{\mathrm{tgt}} = \rho_{\mathrm{tgt}}\,\hat{\mathbf{n}}_{\mathrm{tgt}} + t_k\,\hat{\mathbf{t}}_{\mathrm{tgt}},
 $$
 
-where $\hat{\mathbf{n}} = [\cos\alpha,\; \sin\alpha]^\top$ is the Hessian normal. All pairs from all shared walls are collected into a single set $\mathcal{P}$.
+where $\hat{\mathbf{n}} = [\cos\alpha,\; \sin\alpha]^\top$ and $\hat{\mathbf{t}} = [-\sin\alpha,\; \cos\alpha]^\top$. All pairs from all shared walls are collected into a single set $\mathcal{P}$.
 
 ### 3.4 SVD Rigid Body Solve
 
@@ -210,13 +198,7 @@ $$
 \mathbf{T}_{\mathrm{corr}} = \begin{bmatrix} \mathbf{R}^*_{2\times2} & \mathbf{t}^*_{2\times1} \\ \mathbf{0} & 1 \end{bmatrix}_{4\times4},
 $$
 
-and the globally-aligned transform is
-
-$$
-\mathbf{T}_{\mathrm{global}} = \mathbf{T}_{\mathrm{corr}}\,\mathbf{T}_{\mathrm{EKF}},
-$$
-
-where $\mathbf{T}_{\mathrm{EKF}}$ is the 4×4 transform from the current EKF pose.
+This correction maps points in the **EKF map frame** into the **global map frame** for the current submap. There is no additional submap-local transform in the current implementation; the correction is applied directly to the map-frame points before fusion.
 
 ### 5.2 EKF Integration
 
@@ -226,7 +208,7 @@ Because the EKF state includes all landmark parameters, the pose correction prop
 
 ### 5.3 Fallback Behaviour
 
-If fewer than 3 point pairs are available (`_svd_align` returns `None`), or if the condition number exceeds 100, no pose correction is sent to the EKF. The submap is still integrated into the global map using the EKF pose transform, maintaining map coverage. The EKF covariance continues to grow to reflect the lack of a global correction.
+If fewer than 3 point pairs are available (`_svd_align` returns `None`), or if the condition number exceeds 100, no pose correction is sent to the EKF. The submap is still integrated into the global map **without correction**, maintaining map coverage. The EKF covariance continues to grow to reflect the lack of a global correction.
 
 ---
 
@@ -236,7 +218,7 @@ If fewer than 3 point pairs are available (`_svd_align` returns `None`), or if t
 
 The global map is an Open3D tensor point cloud (`o3d.t.geometry.PointCloud`). The tensor API supports GPU acceleration via CUDA where available, falling back to CPU automatically.
 
-In addition to the point cloud, the stitcher maintains `global_walls: Dict[int, Dict]` — a registry of globally-aligned wall parameters keyed by landmark ID. Each entry stores `{rho, alpha, start_point, end_point}` in the map frame. This registry is used for overlap computation in subsequent submap alignments.
+In addition to the point cloud, the stitcher maintains `global_walls: Dict[int, Dict]` — a registry of globally-aligned wall parameters keyed by landmark ID. Each entry stores `{rho, alpha, t_min, t_max}` where $t_{\min}, t_{\max}$ are scalar extents along the wall tangent. This registry is used for overlap computation in subsequent submap alignments.
 
 ### 6.2 Incremental Update
 
@@ -248,7 +230,7 @@ $$
 
 The merged map is then voxel-downsampled at $v = 0.05\;\mathrm{m}$ to maintain constant point density and prevent unbounded memory growth.
 
-The global wall registry is updated via `_accumulate_walls`: the correction $(R^*, t^*)$ is applied to the new submap's wall endpoints before insertion. For existing landmark IDs the endpoint extent is extended along the stored wall's tangent direction; for new IDs the entry is inserted directly.
+The global wall registry is updated via `_accumulate_walls`: the correction $(R^*, t^*)$ is applied to the new submap's wall extents before insertion. For existing landmark IDs the tangential extent is extended; for new IDs the entry is inserted directly.
 
 ### 6.3 Dirty Cache
 

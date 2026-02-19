@@ -54,7 +54,7 @@ Google Cartographer (Hess et al., 2016) is a more recent dense approach that use
 
 Hector SLAM (Kohlbrecher et al., 2011) avoids odometry entirely and relies on scan-to-map matching using a Gauss–Newton optimiser. It performs well when the sensor rate is high, but accumulates drift in symmetric environments where the scan matching has a weak signal. It also does not maintain uncertainty estimates for individual features.
 
-Dense methods were not chosen for this thesis because they do not produce the kind of structured, uncertainty-annotated landmark map that EKF-SLAM requires. They also do not provide a natural mechanism for propagating a pose correction to individual landmarks via cross-covariance — a key property used by the ICP feedback step in this system.
+Dense methods were not chosen for this thesis because they do not produce the kind of structured, uncertainty-annotated landmark map that EKF-SLAM requires. They also do not provide a natural mechanism for propagating a pose correction to individual landmarks via cross-covariance — a key property used by the feature-based SVD feedback step in this system.
 
 ### 3.2 Graph-Based SLAM
 
@@ -72,7 +72,7 @@ The weakness of particle filters for this system is sample degeneracy. When the 
 
 EKF-SLAM (Dissanayake et al., 2001) maintains a single joint Gaussian over the robot pose and all landmark parameters. Every observation updates both the relevant landmark and all other states through the cross-covariance structure. The update cost is O(n²) per observation because the full covariance matrix must be updated. This limits scalability to environments with a few hundred landmarks, which is entirely sufficient for typical indoor rooms and corridors.
 
-EKF-SLAM was chosen for this thesis because it provides a mathematically principled way to represent and propagate uncertainty, it admits exact closed-form updates, and it integrates naturally with geometry-aware measurement covariances derived from the Fisher information matrix. The cross-covariance structure also means that an ICP-based pose correction propagates consistently to every landmark — a key requirement for the global consistency layer.
+EKF-SLAM was chosen for this thesis because it provides a mathematically principled way to represent and propagate uncertainty, it admits exact closed-form updates, and it integrates naturally with geometry-aware measurement covariances derived from the Fisher information matrix. The cross-covariance structure also means that a global SVD-based pose correction propagates consistently to every landmark — a key requirement for the global consistency layer.
 
 ---
 
@@ -212,31 +212,27 @@ EKF-SLAM accumulates drift as the robot moves. Each prediction step increases th
 
 A global consistency correction layer is needed to control drift. This layer periodically aligns the accumulated point cloud against the growing map and feeds the resulting pose correction back to the EKF.
 
-### 8.2 Iterative Closest Point
+### 8.2 Feature-Based SVD Alignment
 
-Besl and McKay (1992) introduced the Iterative Closest Point (ICP) algorithm for aligning point clouds. The algorithm alternately finds the nearest-point correspondence for each source point in the target cloud and computes the rigid transformation that minimises the sum of squared correspondence distances. This repeats until convergence.
-
-ICP was chosen because it is well-established, computationally efficient for moderate point cloud sizes, and produces a transformation with a clear geometric interpretation. More recent variants such as point-to-plane ICP (Chen & Medioni, 1992) and Normal Distributions Transform (Biber & Strasser, 2003) can converge faster and handle curved surfaces better. However, for flat-walled indoor environments, point-to-point ICP is sufficient and simpler to implement with a reliable covariance estimate.
-
-The system uses Open3D's tensor-based ICP implementation, which exploits vectorised operations and optional GPU acceleration (Zhou et al., 2018). The initial guess for ICP is taken from the current EKF pose estimate, which keeps the starting alignment close enough to the true transformation that ICP converges to the correct minimum rather than a local one.
+Given a set of corresponding point pairs, the rigid alignment problem in 2D has a closed-form solution using the SVD of the cross-covariance matrix (Arun et al., 1987; Horn, 1987). This thesis uses a **feature-based SVD alignment** rather than dense ICP. Wall landmarks shared between the current submap and the global wall registry provide correspondences, and overlap sampling on each wall yields point pairs for the SVD solve. This avoids nearest-neighbour matching and exploits the stability of persistent landmark IDs.
 
 ### 8.3 Submap Approach
 
-Rather than running ICP on every scan, the system accumulates points into a submap of 50 scans before attempting alignment. This approach is inspired by submap hierarchies used in larger systems (Bosse et al., 2004). Accumulating 50 scans before alignment has two advantages. First, the source point cloud is denser and the ICP has more correspondences, which produces a more reliable and well-conditioned alignment. Second, ICP runs less frequently, reducing its computational impact on the overall pipeline.
+Rather than aligning after every scan, the system accumulates a submap of 50 scans before attempting alignment. This approach is inspired by submap hierarchies used in larger systems (Bosse et al., 2004). Accumulating 50 scans before alignment yields denser geometry and reduces the frequency of global corrections, lowering computational load.
 
-At 1 Hz scan rate, 50 scans correspond to approximately 50 seconds of travel. Odometric drift over 50 seconds in a slow-moving indoor robot is typically less than 0.05 m, which keeps the initial ICP guess within the algorithm's convergence basin.
+At a 10 Hz scan rate, 50 scans correspond to approximately 5 seconds of travel. Odometric drift over 5 seconds in a slow-moving indoor robot is typically small (often < 0.05 m), which keeps the feature-based SVD alignment well conditioned.
 
-### 8.4 ICP Covariance
+### 8.4 SVD Alignment Covariance
 
-A naive implementation would use a fixed covariance for all ICP corrections. This is wrong for the same reason that a fixed wall covariance is wrong: the reliability of an ICP alignment depends heavily on the scene geometry. In a corner-rich room, ICP constrains all three pose degrees of freedom well. In a long featureless corridor, ICP can constrain only the cross-corridor translation and heading, while position along the corridor remains nearly unconstrained.
+A naive implementation would use a fixed covariance for all global corrections. This is wrong for the same reason that a fixed wall covariance is wrong: the reliability of a submap alignment depends heavily on scene geometry. In a corner-rich room, the alignment constrains all three pose degrees of freedom well; in a long featureless corridor, translation along the corridor is weakly constrained.
 
-Censi (2007) derived a closed-form covariance estimate for ICP from the Gauss–Newton Hessian of the cost function. This accumulates the sensitivity of each correspondence to small perturbations in the transformation parameters. The resulting covariance matrix captures the geometric degeneracy of the scene: it has a large eigenvalue in the direction that ICP cannot constrain, and a small eigenvalue in well-constrained directions. The EKF then automatically down-weights the correction in the degenerate direction, which is the correct behaviour without requiring any additional logic.
+The implementation derives a geometry-aware covariance directly from the SVD singular values and the spatial spread of the matched point pairs. The weaker singular value captures the worst-constrained translation direction, and the point spread captures rotational observability. The EKF then automatically down-weights corrections in degenerate configurations.
 
-### 8.5 Why ICP Over Loop Closure
+### 8.5 Why SVD Over Loop Closure
 
 Full loop closure methods such as Scan Context (Kim & Kim, 2018) or bag-of-words visual approaches detect when the robot has returned to a previously visited location and add a global constraint to the map. Loop closure dramatically reduces long-range drift but requires a separate place recognition module and a global map optimiser such as g2o or iSAM2.
 
-For the environments targeted in this thesis — single rooms and short corridors — the robot rarely traverses loops long enough to accumulate significant drift. The ICP submap correction provides sufficient global consistency at much lower implementation complexity. Loop closure would be the natural extension for larger environments.
+For the environments targeted in this thesis — single rooms and short corridors — the robot rarely traverses loops long enough to accumulate significant drift. The feature-based SVD submap correction provides sufficient global consistency at much lower implementation complexity. Loop closure would be the natural extension for larger environments.
 
 ---
 
@@ -304,7 +300,7 @@ This thesis integrates these components into a single end-to-end system on the T
 
 2. **CRLB wall and corner covariance**: Deriving measurement covariances from the Fisher information accumulated over the supporting scan points, rather than from fit residuals or fixed values, to produce geometry-aware measurement noise.
 
-3. **Censi ICP covariance for EKF feedback**: Computing the ICP pose covariance from the Gauss–Newton Hessian and injecting it into the EKF as a weighted pose observation, so that degenerate ICP alignments are automatically down-weighted.
+3. **SVD alignment covariance for EKF feedback**: Computing the submap pose covariance from SVD singular values and injecting it into the EKF as a weighted pose observation, so that degenerate alignments are automatically down-weighted.
 
 4. **Joseph-form EKF with wall normalisation**: Using the numerically stable Joseph covariance update and enforcing the ρ ≥ 0 canonical form after every state update to prevent sign-drift-induced landmark duplication.
 

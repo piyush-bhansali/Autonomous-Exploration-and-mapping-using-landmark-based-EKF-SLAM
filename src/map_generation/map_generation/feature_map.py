@@ -157,11 +157,3 @@ class FeatureMap:
         if landmark_id in self.corners:
             del self.corners[landmark_id]
 
-    def reset_wall_endpoints(self):
-        """Reset stored extents so fresh geometry is built for the next submap.
-
-        EKF landmarks and Hessian parameters (rho, alpha) are preserved.
-        """
-        for wall in self.walls.values():
-            wall['t_min'] = None
-            wall['t_max'] = None
