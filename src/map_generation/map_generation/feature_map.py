@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple
 
 
 class FeatureMap:
@@ -9,17 +9,12 @@ class FeatureMap:
 
     def __init__(self):
 
-        self.walls = {}  # landmark_id -> wall_data
-        self.corners = {}  # landmark_id -> corner_data
+        self.walls = {}  
+        self.corners = {}  
 
     def add_wall(self, landmark_id: int, rho: float, alpha: float, start_point: np.ndarray,
                  end_point: np.ndarray):
-        """Add a new wall landmark.
-
-        Endpoints are stored as scalar extents (t_min, t_max) along the wall
-        tangent [-sin(alpha), cos(alpha)], so they remain consistent with
-        (rho, alpha) without needing a separate re-projection step.
-        """
+       
         tangent = np.array([-np.sin(alpha), np.cos(alpha)])
         t_s = float(np.dot(start_point, tangent))
         t_e = float(np.dot(end_point,   tangent))
@@ -40,7 +35,7 @@ class FeatureMap:
 
     def update_wall_endpoints(self, landmark_id: int, new_start: np.ndarray,
                                new_end: np.ndarray):
-        """Extend the stored wall extent to cover new observation endpoints."""
+       
         if landmark_id not in self.walls:
             return
 
@@ -64,11 +59,7 @@ class FeatureMap:
         wall['observation_count'] += 1
 
     def update_wall_hessian(self, landmark_id: int, rho: float, alpha: float):
-        """Sync the EKF-corrected Hessian parameters (rho, alpha) for a wall.
-
-        t_min/t_max are scalar extents along the wall tangent and remain
-        geometrically consistent across Hessian updates — no re-projection needed.
-        """
+       
         if landmark_id not in self.walls:
             return
         wall = self.walls[landmark_id]
@@ -83,24 +74,6 @@ class FeatureMap:
         corner = self.corners[landmark_id]
         corner['position'] = new_position
         corner['observation_count'] += 1
-
-    def get_wall_endpoints(self, landmark_id: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        """Reconstruct 2D start/end points from stored (rho, alpha, t_min, t_max).
-
-        Returns (start_point, end_point) or None if extents not yet set.
-        """
-        if landmark_id not in self.walls:
-            return None
-        wall = self.walls[landmark_id]
-        if wall['t_min'] is None or wall['t_max'] is None:
-            return None
-        alpha   = wall['alpha']
-        rho     = wall['rho']
-        tangent = np.array([-np.sin(alpha), np.cos(alpha)])
-        normal  = np.array([ np.cos(alpha), np.sin(alpha)])
-        line_pt = rho * normal
-        return (line_pt + wall['t_min'] * tangent,
-                line_pt + wall['t_max'] * tangent)
 
     def generate_point_cloud(self, spacing: float = 0.05) -> np.ndarray:
 
@@ -146,7 +119,7 @@ class FeatureMap:
         return np.array(points)
 
     def get_feature_count(self) -> Tuple[int, int]:
-        """Get number of walls and corners."""
+       
         return len(self.walls), len(self.corners)
 
     def remove_landmark(self, landmark_id: int):
@@ -156,4 +129,3 @@ class FeatureMap:
 
         if landmark_id in self.corners:
             del self.corners[landmark_id]
-

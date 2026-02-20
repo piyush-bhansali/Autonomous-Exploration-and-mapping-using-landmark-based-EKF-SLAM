@@ -138,9 +138,9 @@ $$\mathbf{T}_{\text{map}}^{\text{robot}} = \begin{bmatrix} \cos\theta_r & -\sin\
 
 where $(x_r, y_r, \theta_r)$ is the EKF robot state.
 
-### 2.3 Global Corrected Frame (`global_walls`)
+### 2.3 Global Wall Registry (`global_walls`)
 
-The `SubmapStitcher` maintains a separate registry `global_walls` in which wall parameters have had SVD-computed pose corrections applied geometrically. This registry persists across all submap boundaries and serves as the stable reference for subsequent SVD alignment. Both `feature_map.walls` and `global_walls` are intended to represent the same physical map frame; the small residual difference between them — introduced by the odometric drift accumulated over a 50-scan window — is precisely what the SVD measures and corrects each time a submap is finalised. After each SVD cycle and EKF pose correction, the two structures re-converge. The distinction is therefore temporal (current drifted estimate vs. last corrected reference) rather than a permanent frame separation.
+The `SubmapStitcher` maintains a persistent registry `global_walls` — a dictionary keyed by landmark ID storing the Hessian parameters $(\rho, \alpha)$ and arc-length extents $(t_{\min}, t_{\max})$ as they stood after the most recent SVD correction. This registry is **not a separate coordinate frame**; it lives in the same map frame as `feature_map.walls`. The small numerical difference between the two structures arises from odometric drift accumulated over the current 50-scan window: `feature_map.walls` holds the EKF's current (slightly drifted) estimate, while `global_walls` holds the last corrected snapshot. The SVD alignment each cycle measures this drift and feeds the correction back into the EKF, after which both structures represent the same physical reality. The distinction is therefore one of **metadata freshness** — current estimate vs. last corrected reference — not a difference in coordinate frame.
 
 ### 2.4 Odom Frame and TF Chain
 
@@ -804,11 +804,11 @@ This design has three direct benefits:
 
 3. **Simplified architecture.** The distinction between `feature_map.walls` and `global_walls` is now purely temporal: `feature_map.walls` holds the EKF's current (potentially drifted) estimate of each wall, and `global_walls` holds the last SVD-corrected reference. The `t_min is None` guard in `generate_point_cloud()` and `data_association.py` remains as a cold-start guard for the initial period before any wall has been observed at all, but never fires during normal submap transitions.
 
-Confidence values attached to each submap are computed from the EKF covariance matrix at the submap boundary — they are independent of wall extent geometry and are unaffected by this design choice.
+Confidence values attached to each submap are computed from the summed landmark information (trace of each landmark covariance inverse) at the submap boundary — they are independent of wall extent geometry and are unaffected by this design choice.
 
 ### 11.3 Global Wall Registry
 
-`SubmapStitcher.global_walls` maps `landmark_id → {rho, alpha, t_min, t_max}` in the globally corrected frame. This registry persists across all submap boundaries. For the first submap, walls are seeded directly from the `FeatureMap` (no correction). For subsequent submaps, the registry is updated (extended or newly inserted) after applying the SVD correction.
+`SubmapStitcher.global_walls` maps `landmark_id → {rho, alpha, t_min, t_max}`, storing the last SVD-corrected landmark parameters for each wall. This registry is not a separate coordinate frame — it lives in the same map frame as `feature_map.walls`. It persists across all submap boundaries. For the first submap, walls are seeded directly from the `FeatureMap` (no correction applied yet). For subsequent submaps, the registry is updated (extents extended or new walls inserted) after applying the SVD drift correction.
 
 The registry enables feature-based alignment without re-matching: landmark IDs are permanent within the EKF lifetime, so the intersection `feature_map.walls.keys() ∩ global_walls.keys()` immediately identifies shared walls without a descriptor search.
 

@@ -5,6 +5,9 @@ import numpy as np
 from typing import Dict
 
 
+CONF_TAU = 1e6
+
+
 class ConfidenceTracker:
     
     def __init__(self, csv_file_path: str, logger=None):
@@ -37,6 +40,35 @@ class ConfidenceTracker:
             self.csv_file.close()
 
 
+def _landmark_information_sum(ekf_slam) -> float:
+    
+    if not hasattr(ekf_slam, 'landmarks'):
+        return 0.0
+
+    info_sum = 0.0
+
+    for lm_data in ekf_slam.landmarks.values():
+        idx = lm_data.get('state_index')
+        if idx is None:
+            continue
+
+        if idx + 1 >= ekf_slam.P.shape[0]:
+            continue
+
+        P_lm = ekf_slam.P[idx:idx + 2, idx:idx + 2]
+        if P_lm.shape != (2, 2):
+            continue
+
+        try:
+            I_lm = np.linalg.inv(P_lm)
+        except np.linalg.LinAlgError:
+            I_lm = np.linalg.pinv(P_lm)
+
+        info_sum += float(np.trace(I_lm))
+
+    return float(info_sum)
+
+
 def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int) -> Dict:
     
     if not ekf_initialized:
@@ -52,17 +84,12 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
 
     robot_uncertainty = np.trace(P_robot)
 
-    try:
-        I_robot = np.linalg.inv(P_robot)
+    information = _landmark_information_sum(ekf_slam)
 
-        information = np.trace(I_robot)
-
-        confidence = 1.0 - np.exp(-information / 10.0)
-
-    except np.linalg.LinAlgError:
-        
-        information = 0.0
+    if information <= 0.0:
         confidence = 0.0
+    else:
+        confidence = 1.0 - np.exp(-information / CONF_TAU)
 
     num_landmarks = len(ekf_slam.landmarks) if hasattr(ekf_slam, 'landmarks') else 0
 

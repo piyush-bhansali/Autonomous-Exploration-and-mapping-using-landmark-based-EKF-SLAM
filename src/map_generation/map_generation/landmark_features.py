@@ -10,7 +10,7 @@ class LandmarkFeatureExtractor:
     def __init__(self,
                  min_points_per_line: int = 5,
                  min_line_length: float = 0.3,
-                 corner_angle_threshold: float = 50.0,
+                 corner_angle_threshold: float = 45.0,
                  max_gap: float = 0.2,
                  lidar_noise_sigma: float = 0.01,
                  merge_angle_tolerance: float = 0.350,
@@ -184,7 +184,7 @@ class LandmarkFeatureExtractor:
         if len(segment_points) < 2:
             return 0.0
         if len(segment_points) == 2:
-            return 0.0  # Two points always define a line exactly
+            return 0.0 
 
         centroid, _, normal = self.fit_line_tls(segment_points)
         dists = np.abs((segment_points - centroid) @ normal)
@@ -244,10 +244,7 @@ class LandmarkFeatureExtractor:
         return np.arccos(abs(dot))
 
     def convert_line_to_hessian(self, points: np.ndarray) -> Tuple[float, float]:
-        # Use TLS centroid and normal so that rho/alpha estimates are consistent
-        # with the TLS-based residuals used in grow and merge.  The old
-        # endpoint-based midpoint/normal depended on the two noisiest measured
-        # points (scan endpoints at grazing angle).
+       
         centroid, _, normal = self.fit_line_tls(points)
 
         rho = float(np.dot(centroid, normal))

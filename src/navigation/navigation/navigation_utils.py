@@ -2,7 +2,7 @@
 
 
 import numpy as np
-from sensor_msgs.msg import LaserScan, PointCloud2
+from sensor_msgs.msg import PointCloud2
 
 
 def calculate_path_length(path: list) -> float:
@@ -25,42 +25,6 @@ def find_nearest_waypoint_index(path: np.ndarray, robot_pos: np.ndarray, lookahe
 
     return target_idx
 
-
-def convert_scan_to_points(scan: LaserScan) -> np.ndarray:
-    
-    ranges = np.array(scan.ranges)
-    angle_min = scan.angle_min
-    angle_increment = scan.angle_increment
-
-    valid_mask = np.isfinite(ranges) & (ranges > scan.range_min) & (ranges < scan.range_max)
-
-    num_readings = len(ranges)
-    angles = angle_min + np.arange(num_readings) * angle_increment
-
-    x = ranges * np.cos(angles)
-    y = ranges * np.sin(angles)
-
-    points = np.column_stack([x[valid_mask], y[valid_mask]])
-
-    return points
-
-
-def transform_points_to_global(points: np.ndarray, robot_pos: np.ndarray, robot_yaw: float) -> np.ndarray:
-    
-    if points is None or len(points) == 0:
-        return np.array([]).reshape(0, 2)
-
-    # Rotation matrix
-    cos_yaw = np.cos(robot_yaw)
-    sin_yaw = np.sin(robot_yaw)
-
-    # Apply rotation and translation
-    x_global = robot_pos[0] + points[:, 0] * cos_yaw - points[:, 1] * sin_yaw
-    y_global = robot_pos[1] + points[:, 0] * sin_yaw + points[:, 1] * cos_yaw
-
-    points_global = np.column_stack([x_global, y_global])
-
-    return points_global
 
 
 def parse_pointcloud2(msg: PointCloud2) -> np.ndarray:

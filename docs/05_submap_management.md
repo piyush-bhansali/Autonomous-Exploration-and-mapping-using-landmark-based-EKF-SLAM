@@ -65,7 +65,7 @@ $$
 \mathcal{L}_{\mathrm{shared}} = \mathcal{L}_{\mathrm{new}} \cap \mathcal{L}_{\mathrm{global}}.
 $$
 
-Each shared ID provides one pair of corresponding walls: the new submap's version (in the **current EKF map frame**) and the globally-corrected version stored in `global_walls` (in the **global map frame**). The SVD alignment estimates the rigid transform between these two frames.
+Each shared ID provides one pair of corresponding walls: the new submap's version (current EKF estimate, carrying the drift accumulated since the last correction) and the last SVD-corrected parameters stored in `global_walls` (same map frame). The SVD alignment measures the small odometric drift that has built up over the 50-scan window and produces a within-frame correction — there is only one map frame in this system.
 
 ### 3.3 Overlap Section Sampling
 
@@ -75,7 +75,7 @@ $$
 \hat{\mathbf{t}} = [-\sin\alpha_{\mathrm{tgt}},\; \cos\alpha_{\mathrm{tgt}}]^\top.
 $$
 
-Each wall stores scalar extents $(t_{\min}, t_{\max})$ along its **own** tangent. The target extents are already in the target tangent coordinate system. The source extents are first reconstructed into 2D points and then projected onto the target tangent so both are compared in a single coordinate system. This overlap is an **approximation** that assumes the two frames are already roughly aligned. The overlap interval is
+Each wall stores scalar extents $(t_{\min}, t_{\max})$ along its **own** tangent. The target extents are already in the target tangent coordinate system. The source extents are first reconstructed into 2D points and then projected onto the target tangent so both are compared in a single coordinate system. This overlap is an **approximation** that assumes the accumulated drift is small relative to wall length, which holds in practice over a 50-scan window. The overlap interval is
 
 $$
 [t_{\mathrm{lo}},\; t_{\mathrm{hi}}] = \bigl[\max(\min_s, \min_g),\; \min(\max_s, \max_g)\bigr],
@@ -198,7 +198,7 @@ $$
 \mathbf{T}_{\mathrm{corr}} = \begin{bmatrix} \mathbf{R}^*_{2\times2} & \mathbf{t}^*_{2\times1} \\ \mathbf{0} & 1 \end{bmatrix}_{4\times4},
 $$
 
-This correction maps points in the **EKF map frame** into the **global map frame** for the current submap. There is no additional submap-local transform in the current implementation; the correction is applied directly to the map-frame points before fusion.
+This correction accounts for the small odometric drift in the EKF pose accumulated over the 50-scan window. Both source and target live in the single map frame; the SVD transform is a within-frame drift correction, not a mapping between two distinct frames. There is no additional submap-local transform in the current implementation; the correction is applied directly to the map-frame points before fusion.
 
 ### 5.2 EKF Integration
 

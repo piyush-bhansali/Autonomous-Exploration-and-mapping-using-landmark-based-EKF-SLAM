@@ -25,8 +25,8 @@ class FeatureSLAMManager:
         self.feature_extractor = LandmarkFeatureExtractor(
             min_points_per_line=10,
             min_line_length=0.3,
-            corner_angle_threshold=50.0,
-            max_gap=0.2,
+            corner_angle_threshold=45.0,
+            max_gap=0.15,
             merge_angle_tolerance=0.22,
             merge_rho_tolerance=0.15,
             grow_residual_threshold=0.03
@@ -40,13 +40,12 @@ class FeatureSLAMManager:
         self.max_euclidean_dist = 6.0
         self.wall_angle_tolerance = 0.349066
         self.wall_rho_tolerance = 0.5
-        self.max_gap_ext = 0.5  # metres — observations gapped beyond this from stored endpoints are rejected as a new landmark
-
+        self.max_gap_ext = 0.5  
         # Statistics
         self.total_scans_processed = 0
 
     def initialize_pose(self, x: float, y: float, theta: float):
-        """Initialize robot pose in EKF."""
+       
         self.ekf.initialize(x, y, theta)
 
     def predict_motion(self, delta_d: float, delta_theta: float):
@@ -163,12 +162,6 @@ class FeatureSLAMManager:
                     new_end=ext['new_end']
                 )
 
-        # Sync ALL wall Hessian parameters to feature_map after the EKF update
-        # batch. The rho normalisation loop inside update_landmark_observation
-        # iterates over every wall in the EKF state, so updating landmark B can
-        # flip landmark A's alpha by π.  Without this full sync, feature_map
-        # retains the pre-flip alpha for A, causing a ~180° angle prediction
-        # error on the next scan and forcing A to be re-created as a new landmark.
         for lm_id, lm_data in self.ekf.landmarks.items():
             if lm_data['feature_type'] == 'wall' and lm_id in self.feature_map.walls:
                 lm_idx = lm_data['state_index']

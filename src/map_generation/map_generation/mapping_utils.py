@@ -12,15 +12,7 @@ def publish_global_map(
     clock,
     frame_id
 ) -> None:
-    """
-    Publish global map point cloud.
-
-    Args:
-        global_points: (N x 3) numpy array of points
-        publisher: ROS2 publisher for PointCloud2
-        clock: ROS2 clock for timestamp
-        frame_id: Frame ID for the point cloud (typically 'map')
-    """
+    
     if global_points is not None and len(global_points) > 0:
         pc2_msg = numpy_to_pointcloud2(
             global_points,

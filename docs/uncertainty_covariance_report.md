@@ -466,8 +466,8 @@ The corner covariance captures three coupled geometric effects:
 
 Submap alignment uses shared **wall landmark IDs** as correspondences. Each shared ID provides a pair of walls:
 
-- **Source**: the current `FeatureMap` wall in the **EKF map frame**.
-- **Target**: the corresponding `global_walls` entry in the **global map frame**.
+- **Source**: the current `FeatureMap` wall (EKF estimate, may carry the drift accumulated over the 50-scan window).
+- **Target**: the corresponding `global_walls` entry (last SVD-corrected metadata, same map frame).
 
 The alignment estimates the rigid transform that maps source → target using a one-shot SVD solve on constructed point pairs.
 

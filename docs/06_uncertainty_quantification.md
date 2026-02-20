@@ -242,7 +242,7 @@ $$
 \text{confidence} = 1 - \exp\left(-\frac{\mathcal{I}}{\tau}\right)
 $$
 
-Where $\tau = 10$ is a scaling parameter.
+Where $\tau$ is a scaling parameter (for submap confidence we use $\tau = 10^6$).
 
 **Properties:**
 - $\mathcal{I} = 0$ (infinite uncertainty) → confidence = 0
@@ -252,26 +252,20 @@ Where $\tau = 10$ is a scaling parameter.
 
 ### 3.3 Submap Confidence
 
-For each submap, we compute:
+For each submap, we compute confidence from **landmark covariances** (not robot pose):
 
 $$
-c_{\text{submap}} = f(\mathbf{P}_{rr}, N_{\text{landmarks}})
+c_{\text{submap}} = 1 - \exp\left(-\frac{\sum_i \text{tr}(\mathbf{I}_{\ell_i})}{\tau}\right)
 $$
 
 Where:
-- $\mathbf{P}_{rr}$: Robot pose covariance at submap creation
-- $N_{\text{landmarks}}$: Number of landmarks observed in submap
-
-**Extended Formula:**
-
-$$
-\text{confidence}_{\text{submap}} = 1 - \exp\left(-\frac{\text{tr}(\mathbf{I}_{rr}) + \alpha N_{\text{landmarks}}}{\tau}\right)
-$$
+- $\mathbf{I}_{\ell_i} = \mathbf{P}_{\ell_i}^{-1}$ is the 2×2 information matrix of landmark $i$
+- $\mathbf{P}_{\ell_i}$ is the 2×2 landmark covariance block in the EKF state
+- $\tau = 10^6$ is a scaling constant tuned to avoid saturation
 
 **Rationale:**
-- More landmarks → more constraints → higher confidence
-- Lower robot uncertainty → higher confidence
-- Parameter $\alpha$ weights landmark contribution (e.g., 0.1)
+- Better-constrained landmarks → higher information → higher confidence
+- More reliable landmarks increase confidence without depending solely on robot pose
 
 ---
 
