@@ -312,7 +312,7 @@ class LandmarkEKFSLAM(BaseEKF):
                y: float,
                theta: float,
                measurement_covariance: np.ndarray,
-               measurement_type: str = "icp"):
+               measurement_type: str = "pose_measurement"):
 
         if not self.initialized:
             return

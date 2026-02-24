@@ -2,7 +2,7 @@
 
 
 import numpy as np
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, LaserScan
 
 
 def calculate_path_length(path: list) -> float:

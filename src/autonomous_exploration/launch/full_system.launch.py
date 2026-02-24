@@ -298,7 +298,7 @@ def generate_launch_description():
         LogInfo(msg='========================================'),
         LogInfo(msg=['World: ', world_name]),
         LogInfo(msg=f'Robots: {NUM_ROBOTS}'),
-        LogInfo(msg='Mapping Mode: feature (with ICP submap stitching)'),
+        LogInfo(msg='Mapping Mode: feature (with SVD-based submap stitching)'),
         LogInfo(msg='========================================'),
 
         # Core system

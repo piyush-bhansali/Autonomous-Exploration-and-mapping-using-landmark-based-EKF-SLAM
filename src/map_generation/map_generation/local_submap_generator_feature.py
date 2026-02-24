@@ -489,12 +489,12 @@ class LocalSubmapGeneratorFeature(Node):
             if success:
                 # Apply pose correction if provided
                 if pose_correction is not None:
-                    if pose_correction.get('type') in ('submap_icp', 'submap_feature'):
+                    if pose_correction.get('type') == 'submap_feature':
                         self._apply_pose_correction(
                             dx=pose_correction['dx'],
                             dy=pose_correction['dy'],
                             dtheta=pose_correction['dtheta'],
-                            measurement_type='icp',
+                            measurement_type='submap_alignment',
                             measurement_covariance=pose_correction.get('covariance')
                         )
 

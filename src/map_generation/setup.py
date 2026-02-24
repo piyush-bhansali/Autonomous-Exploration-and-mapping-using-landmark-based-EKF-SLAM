@@ -18,7 +18,7 @@ setup(
     zip_safe=True,
     maintainer='piyush',
     maintainer_email='piyushbhansali8@gmail.com',
-    description='SLAM mapping with EKF fusion and ICP corrections',
+    description='SLAM mapping with EKF fusion and SVD-based feature alignment',
     license='Apache-2.0',
     extras_require={
         'test': [
