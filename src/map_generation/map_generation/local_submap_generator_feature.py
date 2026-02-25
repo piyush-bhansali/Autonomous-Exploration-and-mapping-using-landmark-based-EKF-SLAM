@@ -598,7 +598,7 @@ class LocalSubmapGeneratorFeature(Node):
             if success:
                 # Apply pose correction if provided
                 if pose_correction is not None:
-                    if pose_correction.get('type') == 'submap_feature':
+                    if pose_correction.get('type') == 'point_cloud_icp':
                         self._apply_pose_correction(
                             dx=pose_correction['dx'],
                             dy=pose_correction['dy'],

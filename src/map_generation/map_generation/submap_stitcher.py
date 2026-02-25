@@ -41,170 +41,88 @@ class SubmapStitcher:
         return pcd_tensor
 
     # ------------------------------------------------------------------
-    # Feature-based alignment
+    # Point Cloud ICP Alignment
     # ------------------------------------------------------------------
 
-    def _compute_overlap_correspondences(self,
-                                          src_wall: Dict,
-                                          tgt_wall: Dict,
-                                          n_samples: int = 8) -> List[Tuple[np.ndarray, np.ndarray]]:
-        """Compute point-pair correspondences from the overlapping section of two matched walls.
+    def point_cloud_icp_align(self,
+                              source_tensor: o3d.t.geometry.PointCloud,
+                              target_tensor: o3d.t.geometry.PointCloud,
+                              initial_guess: np.ndarray = None) -> Tuple[bool, Optional[Dict]]:
+        """Align submap to global map using Open3D's ICP black box.
 
-        src_wall comes from feature_map (EKF map frame); tgt_wall from global_walls
-        (globally corrected frame). Both store extents as (t_min, t_max) scalars
-        along their own wall tangent.
+        Uses Open3D's optimized ICP implementation which handles:
+        - Nearest neighbor correspondence search
+        - Iterative refinement
+        - SVD-based transformation estimation
 
-        Overlap interval: src extents are projected onto the target tangent for
-        comparison, since tgt t_min/t_max are already in target tangent coords.
+        Args:
+            source_tensor: Source point cloud (submap) as Open3D tensor
+            target_tensor: Target point cloud (global map) as Open3D tensor
+            initial_guess: Initial 4x4 transformation (default: identity)
 
-        Each correspondence point is generated using its wall's OWN tangent, so
-        p_src lies exactly on the source wall and p_tgt exactly on the target wall
-        — eliminating the cross-frame geometric bias from the old shared-tangent scheme.
-
-        Returns a list of (p_src, p_tgt) pairs, each a 2D np.ndarray.
+        Returns:
+            (success, pose_correction_dict or None)
         """
-        alpha_tgt = float(tgt_wall['alpha'])
-        alpha_src = float(src_wall['alpha'])
-
-        tangent_tgt = np.array([-np.sin(alpha_tgt), np.cos(alpha_tgt)])
-        tangent_src = np.array([-np.sin(alpha_src), np.cos(alpha_src)])
-        normal_tgt  = np.array([ np.cos(alpha_tgt), np.sin(alpha_tgt)])
-        normal_src  = np.array([ np.cos(alpha_src), np.sin(alpha_src)])
-
-        rho_tgt = float(tgt_wall['rho'])
-        rho_src = float(src_wall['rho'])
-
-        # Target interval is directly available in target tangent coordinates
-        tt_lo = float(tgt_wall['t_min'])
-        tt_hi = float(tgt_wall['t_max'])
-
-        # Project source extents (src tangent coords) onto target tangent
-        # so the overlap interval is expressed in a single coordinate system
-        line_pt_src = rho_src * normal_src
-        src_pt_lo   = line_pt_src + float(src_wall['t_min']) * tangent_src
-        src_pt_hi   = line_pt_src + float(src_wall['t_max']) * tangent_src
-        ts_lo = np.dot(src_pt_lo, tangent_tgt)
-        ts_hi = np.dot(src_pt_hi, tangent_tgt)
-
-        t_lo = max(min(ts_lo, ts_hi), tt_lo)
-        t_hi = min(max(ts_lo, ts_hi), tt_hi)
-
-        if t_hi - t_lo < 0.3:
-            return []   # Insufficient overlap
-
-        pairs = []
-        for t in np.linspace(t_lo, t_hi, n_samples):
-            # Each point is generated using its own wall geometry — no cross-frame mixing
-            p_tgt = rho_tgt * normal_tgt + t * tangent_tgt   # exactly on target wall
-            p_src = rho_src * normal_src + t * tangent_src   # exactly on source wall
-            pairs.append((p_src, p_tgt))
-
-        return pairs
-
-    def _svd_align(self, pairs: List[Tuple[np.ndarray, np.ndarray]]) -> Optional[Tuple]:
-        """Solve for the 2D rigid body transform (R, t) that maps source to target.
-
-        Uses SVD on the cross-covariance matrix of centred point pairs.
-        Returns (R_2x2, t_2d, condition_number) or None if underdetermined.
-        """
-        if len(pairs) < 3:
-            return None
-
-        src_pts = np.array([p[0] for p in pairs])   # (N, 2)
-        tgt_pts = np.array([p[1] for p in pairs])   # (N, 2)
-
-        c_src = src_pts.mean(axis=0)
-        c_tgt = tgt_pts.mean(axis=0)
-
-        q_src = src_pts - c_src
-        q_tgt = tgt_pts - c_tgt
-
-        # 2×2 cross-covariance
-        H = q_src.T @ q_tgt   # (2, 2)
-
-        U, S, Vt = np.linalg.svd(H)
-
-        # Reflection guard (det check)
-        d = np.linalg.det(Vt.T @ U.T)
-        D = np.diag([1.0, np.sign(d)])
-        R = Vt.T @ D @ U.T
-
-        t = c_tgt - R @ c_src
-
-        condition_number = float(S[0]) / (float(S[1]) + 1e-9)
-
-        return R, t, condition_number, S
-
-    def feature_align_submaps(self, feature_map) -> Tuple[bool, Optional[Dict]]:
-        """Attempt to align a new submap against the accumulated global walls.
-
-        Uses shared landmark IDs as correspondences — no re-matching needed.
-        The overlap section of each matched wall pair provides point pairs;
-        SVD gives the rigid correction in one shot.
-
-        Returns (success, pose_correction_dict or None).
-        """
-        if not feature_map or not self.global_walls:
+        if len(source_tensor.point.positions) < 20 or len(target_tensor.point.positions) < 20:
+            print("[SubmapStitcher] ICP failed: insufficient points")
             return False, None
 
-        shared_ids = set(feature_map.walls.keys()) & set(self.global_walls.keys())
+        if initial_guess is None:
+            initial_guess = np.eye(4)
 
-        if not shared_ids:
+        # Convert initial guess to tensor
+        init_transform = o3c.Tensor(initial_guess, dtype=o3c.float32, device=self.device)
+
+        # Run ICP using Open3D's optimized implementation
+        reg_result = o3d.t.pipelines.registration.icp(
+            source=source_tensor,
+            target=target_tensor,
+            max_correspondence_distance=0.03,  # 3σ odometry drift
+            init_source_to_target=init_transform,
+            estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
+            criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
+                max_iteration=50,
+                relative_fitness=1e-6,
+                relative_rmse=1e-6
+            )
+        )
+
+        # Check convergence quality
+        if reg_result.fitness < 0.3:
+            print(f"[SubmapStitcher] ICP failed: low fitness ({reg_result.fitness:.3f} < 0.3)")
             return False, None
 
-        all_pairs: List[Tuple[np.ndarray, np.ndarray]] = []
-
-        for lm_id in shared_ids:
-            src_wall = feature_map.walls[lm_id]
-            tgt_wall = self.global_walls[lm_id]
-
-            # Skip if extents not yet set (wall seen but no endpoint extension yet)
-            if src_wall.get('t_min') is None or tgt_wall.get('t_min') is None:
-                continue
-
-            pairs = self._compute_overlap_correspondences(src_wall, tgt_wall)
-            all_pairs.extend(pairs)
-
-        result = self._svd_align(all_pairs)
-        if result is None:
+        if reg_result.inlier_rmse > 0.05:
+            print(f"[SubmapStitcher] ICP failed: high RMSE ({reg_result.inlier_rmse:.4f} > 0.05)")
             return False, None
 
-        R, t, condition_number, S = result
+        # Extract transformation matrix
+        T = reg_result.transformation.cpu().numpy()
+        dx = float(T[0, 3])
+        dy = float(T[1, 3])
+        dtheta = float(np.arctan2(T[1, 0], T[0, 0]))
 
-        # Corridor degeneracy check: all walls parallel → one singular value near zero
-        if condition_number > 100.0:
-            return False, None
+        # Compute covariance from ICP statistics
+        # Heuristic based on fitness (overlap ratio) and RMSE (alignment error)
+        rmse_sq = reg_result.inlier_rmse ** 2
+        fitness_factor = 1.0 / (reg_result.fitness + 1e-6)
 
-        # Extract 2D pose correction
-        dtheta = float(np.arctan2(R[1, 0], R[0, 0]))
-        dx = float(t[0])
-        dy = float(t[1])
-
-        # Covariance from SVD singular values
-        # S[1] (weaker singular value) captures the worst-case translational constraint;
-        # mean squared distance of source points from their centroid captures the
-        # rotational constraint (further spread → better-conditioned rotation estimate).
-        src_pts = np.array([p[0] for p in all_pairs])
-        c_src = src_pts.mean(axis=0)
-        mean_sq_dist = float(np.mean(np.sum((src_pts - c_src) ** 2, axis=1)))
-
-        sigma2 = self.lidar_noise_sigma ** 2
-        cov_xy = sigma2 / (float(S[1]) + 1e-6)
-        cov_th = sigma2 / (len(all_pairs) * mean_sq_dist + 1e-6)
+        cov_xy = rmse_sq * fitness_factor
+        cov_th = cov_xy / 0.5  # Rotational uncertainty scales with translational
         covariance = np.diag([cov_xy, cov_xy, cov_th])
 
         pose_correction = {
             'dx': dx,
             'dy': dy,
             'dtheta': dtheta,
-            'type': 'submap_feature',
+            'type': 'point_cloud_icp',
             'covariance': covariance
         }
 
         print(
-            f"[SubmapStitcher] SVD align | "
-            f"shared_walls={len(shared_ids)}  pairs={len(all_pairs)}  "
-            f"cond={condition_number:.1f}  "
+            f"[SubmapStitcher] ICP align | "
+            f"fitness={reg_result.fitness:.3f}  "
+            f"rmse={reg_result.inlier_rmse:.4f}m  "
             f"dx={dx:.4f}m  dy={dy:.4f}m  dtheta={np.degrees(dtheta):.3f}deg  "
             f"cov_xy={cov_xy:.2e}  cov_th={cov_th:.2e}"
         )
@@ -332,16 +250,17 @@ class SubmapStitcher:
 
             return True, None
 
-        # ------ Submap > 0: attempt feature-based alignment ------
+        # ------ Submap > 0: attempt point cloud ICP alignment ------
 
         pose_correction = None
         pcd_aligned_tensor = pcd_tensor   # default: points already in map frame
 
-        if feature_map is not None and self.global_walls:
-            success, pose_correction = self.feature_align_submaps(feature_map)
+        if len(self.global_map_tensor.point.positions) > 0:
+            # Attempt ICP alignment using tensors directly (no numpy conversion needed)
+            success, pose_correction = self.point_cloud_icp_align(pcd_tensor, self.global_map_tensor)
 
             if success:
-                # Apply SVD correction to map-frame points
+                # Apply ICP correction to map-frame points
                 dx      = pose_correction['dx']
                 dy      = pose_correction['dy']
                 dtheta  = pose_correction['dtheta']
@@ -354,15 +273,18 @@ class SubmapStitcher:
                 transform_tensor = o3c.Tensor(correction_4x4, dtype=o3c.float32, device=self.device)
                 pcd_aligned_tensor = pcd_tensor.transform(transform_tensor)
 
-                # Accumulate walls with the SVD correction applied
+                # Update landmark endpoints with ICP correction
                 R_2x2 = np.array([[c, -s], [s, c]])
                 t_2d  = np.array([dx, dy])
-                self._accumulate_walls(feature_map, R_2x2, t_2d)
+                if feature_map is not None:
+                    self._accumulate_walls(feature_map, R_2x2, t_2d)
             else:
-                # Alignment failed (degenerate geometry): add points with EKF pose as-is.
-                # Confidence tracker will reflect degraded accuracy via EKF covariance.
-                self._accumulate_walls(feature_map, identity_R, identity_t)
+                # ICP failed: add points with EKF pose as-is
+                # Confidence tracker will reflect degraded accuracy via EKF covariance
+                if feature_map is not None:
+                    self._accumulate_walls(feature_map, identity_R, identity_t)
         else:
+            # No global map yet (shouldn't happen for submap_id > 0)
             if feature_map is not None:
                 self._accumulate_walls(feature_map, identity_R, identity_t)
 
