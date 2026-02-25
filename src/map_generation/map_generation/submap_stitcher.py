@@ -48,12 +48,12 @@ class SubmapStitcher:
                               source_tensor: o3d.t.geometry.PointCloud,
                               target_tensor: o3d.t.geometry.PointCloud,
                               initial_guess: np.ndarray = None) -> Tuple[bool, Optional[Dict]]:
-        """Align submap to global map using Open3D's ICP black box.
+        """Align submap to global map using hybrid tensor ICP + Censi covariance.
 
-        Uses Open3D's optimized ICP implementation which handles:
-        - Nearest neighbor correspondence search
-        - Iterative refinement
-        - SVD-based transformation estimation
+        Hybrid approach:
+        1. Runs ICP on GPU tensors for speed (Open3D's optimized implementation)
+        2. Converts to legacy format to extract correspondences
+        3. Computes Censi-style covariance from correspondence geometry
 
         Args:
             source_tensor: Source point cloud (submap) as Open3D tensor
@@ -61,7 +61,7 @@ class SubmapStitcher:
             initial_guess: Initial 4x4 transformation (default: identity)
 
         Returns:
-            (success, pose_correction_dict or None)
+            (success, pose_correction_dict with Censi covariance or None)
         """
         if len(source_tensor.point.positions) < 20 or len(target_tensor.point.positions) < 20:
             print("[SubmapStitcher] ICP failed: insufficient points")
@@ -102,14 +102,55 @@ class SubmapStitcher:
         dy = float(T[1, 3])
         dtheta = float(np.arctan2(T[1, 0], T[0, 0]))
 
-        # Compute covariance from ICP statistics
-        # Heuristic based on fitness (overlap ratio) and RMSE (alignment error)
-        rmse_sq = reg_result.inlier_rmse ** 2
-        fitness_factor = 1.0 / (reg_result.fitness + 1e-6)
+        # Convert tensors to legacy for correspondence extraction
+        source_legacy = source_tensor.to_legacy()
+        target_legacy = target_tensor.to_legacy()
 
-        cov_xy = rmse_sq * fitness_factor
-        cov_th = cov_xy / 0.5  # Rotational uncertainty scales with translational
-        covariance = np.diag([cov_xy, cov_xy, cov_th])
+        # Apply ICP transformation to source points
+        source_transformed = source_legacy.transform(T)
+
+        # Find nearest neighbor correspondences using final transformation
+        kdtree = o3d.geometry.KDTreeFlann(target_legacy)
+        correspondences = []
+        max_corr_dist_sq = 0.03 * 0.03  # 0.03m threshold squared
+
+        for i in range(len(source_transformed.points)):
+            [k, idx, dist] = kdtree.search_knn_vector_3d(source_transformed.points[i], 1)
+            if dist[0] < max_corr_dist_sq:
+                correspondences.append((i, idx[0]))
+
+        if len(correspondences) < 20:
+            print(f"[SubmapStitcher] ICP failed: only {len(correspondences)} correspondences after NN search")
+            return False, None
+
+        # Compute Censi-style covariance from correspondence geometry
+        c, s = np.cos(dtheta), np.sin(dtheta)
+        H = np.zeros((3, 3))  # Hessian for [tx, ty, theta]
+
+        for src_idx, tgt_idx in correspondences:
+            # Get source point in 2D (before transformation in local frame)
+            p_src = np.array(source_legacy.points[src_idx][:2])
+
+            # Jacobian of transformation wrt pose [tx, ty, theta]
+            # ∂(R*p + t)/∂tx = [1, 0]
+            # ∂(R*p + t)/∂ty = [0, 1]
+            # ∂(R*p + t)/∂θ  = [-sin(θ)*px - cos(θ)*py, cos(θ)*px - sin(θ)*py]
+            J = np.array([
+                [1.0, 0.0, -s * p_src[0] - c * p_src[1]],
+                [0.0, 1.0,  c * p_src[0] - s * p_src[1]]
+            ])
+            H += J.T @ J
+
+        # Stabilize Hessian via eigenvalue clamping
+        eigvals, eigvecs = np.linalg.eigh(H)
+        eigvals = np.maximum(eigvals, 1e-6)  # Prevent singularity
+        H_stable = eigvecs @ np.diag(eigvals) @ eigvecs.T
+
+        # Covariance = σ² * H⁻¹ (Censi method)
+        try:
+            covariance = (self.lidar_noise_sigma ** 2) * np.linalg.inv(H_stable)
+        except np.linalg.LinAlgError:
+            covariance = (self.lidar_noise_sigma ** 2) * np.linalg.pinv(H_stable)
 
         pose_correction = {
             'dx': dx,
@@ -123,8 +164,9 @@ class SubmapStitcher:
             f"[SubmapStitcher] ICP align | "
             f"fitness={reg_result.fitness:.3f}  "
             f"rmse={reg_result.inlier_rmse:.4f}m  "
+            f"correspondences={len(correspondences)}  "
             f"dx={dx:.4f}m  dy={dy:.4f}m  dtheta={np.degrees(dtheta):.3f}deg  "
-            f"cov_xy={cov_xy:.2e}  cov_th={cov_th:.2e}"
+            f"cov_xx={covariance[0,0]:.2e}  cov_yy={covariance[1,1]:.2e}  cov_th={covariance[2,2]:.2e}"
         )
 
         return True, pose_correction
