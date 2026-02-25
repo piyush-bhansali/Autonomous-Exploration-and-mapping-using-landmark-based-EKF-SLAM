@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, PointCloud2
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped, PoseArray
 from visualization_msgs.msg import MarkerArray
 from tf2_ros import TransformBroadcaster
 import numpy as np
@@ -27,7 +27,9 @@ from map_generation.transform_utils import (
 )
 from map_generation.evaluation_utils import (
     ConfidenceTracker,
-    compute_ekf_confidence
+    compute_ekf_confidence,
+    init_groundtruth_csv,
+    log_groundtruth_row
 )
 from autonomous_exploration.qos_profiles import (
     SCAN_QOS,
@@ -124,6 +126,22 @@ class LocalSubmapGeneratorFeature(Node):
         confidence_csv_path = os.path.join(self.save_dir, 'submap_confidence.csv')
         self.confidence_tracker = ConfidenceTracker(confidence_csv_path)
 
+        # Ground truth tracking
+        gt_csv_path = os.path.join(self.save_dir, 'ground_truth_comparison.csv')
+        self.gt_csv_file, self.gt_csv_writer = init_groundtruth_csv(gt_csv_path)
+
+        # Ground truth initial position (for offsetting to match EKF starting at 0,0)
+        self.gt_initial_pose = None
+        self.gt_last_log_time = None  # For 1 Hz logging throttle
+
+        # Subscribe to Gazebo physics engine ground truth
+        self.ground_truth_sub = self.create_subscription(
+            PoseArray,
+            '/world/maze_world/dynamic_pose/info',
+            self.ground_truth_callback,
+            10
+        )
+
         self.create_timer(0.1, self._publish_tf_callback)
 
 
@@ -189,11 +207,103 @@ class LocalSubmapGeneratorFeature(Node):
         self.tf_broadcaster.sendTransform(t)
 
     def _publish_tf_callback(self):
-        
+
         if self.current_pose is None:
             return
-        
+
         self._publish_map_to_odom_tf()
+
+    def ground_truth_callback(self, msg: PoseArray):
+        """Extract ground truth pose from Gazebo and log comparison with EKF.
+
+        Args:
+            msg: PoseArray containing all model poses from dynamic_pose/info
+        """
+        if not self.slam_manager.is_initialized():
+            return
+
+        ekf_state = self.slam_manager.get_robot_pose()
+        if ekf_state is None:
+            return
+
+        if len(msg.poses) == 0:
+            return
+
+        # Find robot pose by z-position (robot is around z=0.01)
+        gt_pose = None
+        for pose in msg.poses:
+            if 0.005 < pose.position.z < 0.1:
+                gt_pose = pose
+                break
+
+        if gt_pose is None:
+            self.get_logger().warn('Robot pose not found in physics data', throttle_duration_sec=5.0)
+            return
+
+        # Get absolute position from physics engine
+        gt_x_abs = gt_pose.position.x
+        gt_y_abs = gt_pose.position.y
+        gt_theta_abs = quaternion_to_yaw(
+            gt_pose.orientation.x,
+            gt_pose.orientation.y,
+            gt_pose.orientation.z,
+            gt_pose.orientation.w
+        )
+
+        # Store initial pose on first callback
+        if self.gt_initial_pose is None:
+            self.gt_initial_pose = {
+                'x': gt_x_abs,
+                'y': gt_y_abs,
+                'theta': gt_theta_abs
+            }
+            self.get_logger().info(f'Ground truth initial pose: x={gt_x_abs:.3f}, y={gt_y_abs:.3f}, theta={gt_theta_abs:.3f}')
+
+        # Compute relative position from initial
+        gt_x = gt_x_abs - self.gt_initial_pose['x']
+        gt_y = gt_y_abs - self.gt_initial_pose['y']
+        gt_theta = normalize_angle(gt_theta_abs - self.gt_initial_pose['theta'])
+
+        # Throttle logging to 2 seconds
+        current_time = self.get_clock().now()
+        if self.gt_last_log_time is not None:
+            time_diff = (current_time - self.gt_last_log_time).nanoseconds / 1e9
+            if time_diff < 2.0:
+                return
+
+        self.gt_last_log_time = current_time
+
+        # Get EKF state
+        ekf_x = float(ekf_state['x'])
+        ekf_y = float(ekf_state['y'])
+        ekf_theta = float(ekf_state['theta'])
+
+        # Compute errors
+        dx = ekf_x - gt_x
+        dy = ekf_y - gt_y
+        dtheta = normalize_angle(ekf_theta - gt_theta)
+        pos_error = float(np.linalg.norm([dx, dy]))
+        orient_error = float(dtheta)
+
+        # Get robot pose covariance from EKF
+        P_robot = self.slam_manager.ekf.get_robot_covariance()
+
+        # Extract diagonal covariance elements
+        P_xx = float(P_robot[0, 0])
+        P_yy = float(P_robot[1, 1])
+        P_thetatheta = float(P_robot[2, 2])
+
+        # Log to CSV
+        timestamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+        log_groundtruth_row(
+            self.gt_csv_writer,
+            timestamp_ns,
+            ekf_x, ekf_y, ekf_theta,
+            gt_x, gt_y, gt_theta,
+            pos_error, orient_error,
+            P_xx, P_yy, P_thetatheta
+        )
+        self.gt_csv_file.flush()
 
     def _publish_ekf_pose(self):
        
@@ -398,8 +508,7 @@ class LocalSubmapGeneratorFeature(Node):
             stats['observed_features'],
             msg.header.stamp,
             self.feature_markers_pub,
-            self.robot_name,
-            feature_ids=stats.get('feature_ids')
+            self.robot_name
         )
 
         # Log statistics
@@ -540,6 +649,10 @@ class LocalSubmapGeneratorFeature(Node):
         # Close confidence tracker
         if hasattr(self, 'confidence_tracker'):
             self.confidence_tracker.close()
+
+        # Close ground truth CSV
+        if hasattr(self, 'gt_csv_file') and self.gt_csv_file is not None:
+            self.gt_csv_file.close()
 
 
 def main(args=None):

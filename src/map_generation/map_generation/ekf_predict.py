@@ -103,9 +103,17 @@ class BaseEKF:
         return P_conditioned
 
     def get_state(self) -> Dict:
-       
+
         return {
             'x': float(self.state[0]),
             'y': float(self.state[1]),
             'theta': float(self.state[2])
         }
+
+    def get_robot_covariance(self) -> np.ndarray:
+        """Get the robot pose covariance (3x3).
+
+        Returns:
+            3x3 covariance matrix for [x, y, theta]
+        """
+        return self.P[0:3, 0:3].copy()

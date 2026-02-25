@@ -11,10 +11,10 @@ class LandmarkFeatureExtractor:
                  min_points_per_line: int = 5,
                  min_line_length: float = 0.3,
                  corner_angle_threshold: float = 45.0,
-                 max_gap: float = 0.2,
+                 max_gap: float = 0.5,
                  lidar_noise_sigma: float = 0.01,
                  merge_angle_tolerance: float = 0.350,
-                 merge_rho_tolerance: float = 0.15,
+                 merge_rho_tolerance: float = 0.2,
                  grow_residual_threshold: float = 0.03):
       
         self.min_points = min_points_per_line

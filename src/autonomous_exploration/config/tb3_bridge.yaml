@@ -68,10 +68,11 @@
     history: keep_last
     depth: 10
 
-- ros_topic_name: "/{robot_name}/ground_truth_pose"
-  gz_topic_name: "/model/{robot_name}/pose"
-  ros_type_name: "geometry_msgs/msg/PoseStamped"
-  gz_type_name: "gz.msgs.Pose"
+# Ground truth from Gazebo physics engine (dynamic models only)
+- ros_topic_name: "/world/{world_name}/dynamic_pose/info"
+  gz_topic_name: "/world/{world_name}/dynamic_pose/info"
+  ros_type_name: "geometry_msgs/msg/PoseArray"
+  gz_type_name: "gz.msgs.Pose_V"
   direction: GZ_TO_ROS
   qos:
     reliability: best_effort

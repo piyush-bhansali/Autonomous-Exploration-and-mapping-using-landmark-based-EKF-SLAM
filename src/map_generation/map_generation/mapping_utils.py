@@ -26,8 +26,7 @@ def publish_feature_markers(
     features: list,
     scan_timestamp,
     publisher,
-    robot_name: str,
-    feature_ids: Optional[list] = None
+    robot_name: str
 ) -> None:
     
     from visualization_msgs.msg import Marker, MarkerArray
@@ -81,10 +80,8 @@ def publish_feature_markers(
 
         marker_array.markers.append(marker)
 
-        # Text label: feature type prefix + landmark ID (or '?' if unmatched)
-        lm_id = feature_ids[i] if feature_ids is not None else None
-        id_str = str(lm_id) if lm_id is not None else '?'
-        type_prefix = 'W' if feature['type'] == 'wall' else 'C'
+        # Text label: feature type only (Wall or Corner)
+        type_label = 'Wall' if feature['type'] == 'wall' else 'Corner'
 
         text_marker = Marker()
         text_marker.header = marker.header
@@ -96,12 +93,8 @@ def publish_feature_markers(
         text_marker.pose.position.y = marker.pose.position.y
         text_marker.pose.position.z = 0.35  # Above the feature marker
         text_marker.scale.z = 0.15  # Text height in metres
-        # Green = matched to existing landmark, yellow = unmatched / provisional
-        if lm_id is not None:
-            text_marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)  # Green
-        else:
-            text_marker.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)  # Yellow
-        text_marker.text = f"{type_prefix}:{id_str}"
+        text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)  # White
+        text_marker.text = type_label
         text_marker.lifetime = marker.lifetime
 
         marker_array.markers.append(text_marker)

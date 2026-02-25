@@ -19,7 +19,8 @@ class ConfidenceTracker:
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow([
             'submap_id', 'timestamp', 'confidence', 'information',
-            'robot_uncertainty', 'num_landmarks'
+            'robot_x_std', 'robot_y_std', 'robot_theta_std',
+            'num_landmarks'
         ])
 
     def log_confidence(self, submap_id: int, confidence_metrics: Dict):
@@ -29,7 +30,9 @@ class ConfidenceTracker:
             confidence_metrics['timestamp'],
             confidence_metrics['confidence'],
             confidence_metrics['information'],
-            confidence_metrics['robot_uncertainty'],
+            confidence_metrics['robot_x_std'],
+            confidence_metrics['robot_y_std'],
+            confidence_metrics['robot_theta_std'],
             confidence_metrics['num_landmarks']
         ])
         self.csv_file.flush()  # Ensure data is written immediately
@@ -75,14 +78,18 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
         return {
             'confidence': 0.0,
             'information': 0.0,
-            'robot_uncertainty': float('inf'),
+            'robot_x_std': float('inf'),
+            'robot_y_std': float('inf'),
+            'robot_theta_std': float('inf'),
             'num_landmarks': 0,
             'timestamp': current_time_ns
         }
 
     P_robot = ekf_slam.P[0:3, 0:3]
 
-    robot_uncertainty = np.trace(P_robot)
+    robot_x_std = float(np.sqrt(max(P_robot[0, 0], 0.0)))
+    robot_y_std = float(np.sqrt(max(P_robot[1, 1], 0.0)))
+    robot_theta_std = float(np.sqrt(max(P_robot[2, 2], 0.0)))
 
     information = _landmark_information_sum(ekf_slam)
 
@@ -96,7 +103,58 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
     return {
         'confidence': float(confidence),
         'information': float(information),
-        'robot_uncertainty': float(robot_uncertainty),
+        'robot_x_std': robot_x_std,
+        'robot_y_std': robot_y_std,
+        'robot_theta_std': robot_theta_std,
         'num_landmarks': int(num_landmarks),
         'timestamp': current_time_ns
     }
+
+
+def log_groundtruth_row(csv_writer, timestamp_ns: int,
+                        ekf_x: float, ekf_y: float, ekf_theta: float,
+                        gt_x: float, gt_y: float, gt_theta: float,
+                        pos_error: float, orient_error: float,
+                        P_xx: float, P_yy: float, P_thetatheta: float):
+    """Write a row to the ground truth comparison CSV.
+
+    Args:
+        csv_writer: CSV writer object
+        timestamp_ns: Timestamp in nanoseconds
+        ekf_x, ekf_y, ekf_theta: EKF estimated pose
+        gt_x, gt_y, gt_theta: Ground truth pose (relative to initial)
+        pos_error: Position error magnitude
+        orient_error: Orientation error in radians
+        P_xx, P_yy, P_thetatheta: Diagonal covariance elements
+    """
+    csv_writer.writerow([
+        timestamp_ns,
+        f'{ekf_x:.6f}', f'{ekf_y:.6f}', f'{ekf_theta:.6f}',
+        f'{gt_x:.6f}', f'{gt_y:.6f}', f'{gt_theta:.6f}',
+        f'{pos_error:.6f}', f'{orient_error:.6f}',
+        f'{P_xx:.9f}', f'{P_yy:.9f}', f'{P_thetatheta:.9f}'
+    ])
+
+
+def init_groundtruth_csv(csv_path: str):
+    """Initialize ground truth CSV file with headers.
+
+    Args:
+        csv_path: Path to CSV file
+
+    Returns:
+        Tuple of (csv_file, csv_writer)
+    """
+    import os
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    csv_file = open(csv_path, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow([
+        'timestamp_ns',
+        'ekf_x', 'ekf_y', 'ekf_theta',
+        'gt_x', 'gt_y', 'gt_theta',
+        'pos_error', 'orient_error',
+        'P_xx', 'P_yy', 'P_thetatheta'
+    ])
+    csv_file.flush()
+    return csv_file, csv_writer
