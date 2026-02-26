@@ -33,7 +33,7 @@ class SubmapStitcher:
         self._cached_numpy_map = None
         self._map_dirty = True
 
-    def process_submap(self, points: np.ndarray, submap_id: int) -> o3d.t.geometry.PointCloud:
+    def process_submap(self, points: np.ndarray) -> o3d.t.geometry.PointCloud:
         points_tensor = o3c.Tensor(points.astype(np.float32), dtype=o3c.float32, device=self.device)
         pcd_tensor = o3d.t.geometry.PointCloud(self.device)
         pcd_tensor.point.positions = points_tensor
@@ -253,7 +253,7 @@ class SubmapStitcher:
                                         scan_count: int,
                                         feature_map=None) -> Tuple[bool, Optional[dict]]:
 
-        pcd_tensor = self.process_submap(points, submap_id)
+        pcd_tensor = self.process_submap(points)
 
         if len(pcd_tensor.point.positions) < 50:
             return False, None

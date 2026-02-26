@@ -1,1 +1,0 @@
-timestamp,scan_count,ekf_x,ekf_y,ekf_theta,cov_xx,cov_yy,cov_tt,active_landmarks,state_size,gt_x,gt_y,gt_theta,error_x,error_y,error_theta,error_position

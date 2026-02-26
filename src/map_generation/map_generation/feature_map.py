@@ -22,15 +22,13 @@ class FeatureMap:
             'rho':   rho,
             'alpha': alpha,
             't_min': min(t_s, t_e),
-            't_max': max(t_s, t_e),
-            'observation_count': 1
+            't_max': max(t_s, t_e)
         }
 
     def add_corner(self, landmark_id: int, position: np.ndarray):
 
         self.corners[landmark_id] = {
-            'position': np.array(position),
-            'observation_count': 1
+            'position': np.array(position)
         }
 
     def update_wall_endpoints(self, landmark_id: int, new_start: np.ndarray,
@@ -56,8 +54,6 @@ class FeatureMap:
             wall['t_min'] = min(wall['t_min'], new_t_lo)
             wall['t_max'] = max(wall['t_max'], new_t_hi)
 
-        wall['observation_count'] += 1
-
     def update_wall_hessian(self, landmark_id: int, rho: float, alpha: float):
        
         if landmark_id not in self.walls:
@@ -73,7 +69,6 @@ class FeatureMap:
 
         corner = self.corners[landmark_id]
         corner['position'] = new_position
-        corner['observation_count'] += 1
 
     def generate_point_cloud(self, spacing: float = 0.05) -> np.ndarray:
 

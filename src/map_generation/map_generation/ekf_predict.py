@@ -13,8 +13,8 @@ class BaseEKF:
         self.P = np.eye(3) * 0.001
        
         self.Q = np.diag([
-            0.01,    # Distance noise
-            0.005    # Rotation noise
+            0.000008,    # Distance noise
+            0.00002    # Rotation noise
         ])
 
         self.initialized = False
@@ -69,8 +69,8 @@ class BaseEKF:
         min_distance_var = 0.0001    # (1cm)²
         min_rotation_var = 0.000001  # (~0.06°)²
 
-        sigma_d_sq = self.Q[0, 0] * motion_distance**2 + min_distance_var
-        sigma_theta_sq = self.Q[1, 1] * motion_rotation**2 + min_rotation_var
+        sigma_d_sq = self.Q[0, 0] #* motion_distance**2 + min_distance_var
+        sigma_theta_sq = self.Q[1, 1] #* motion_rotation**2 + min_rotation_var
 
         Q_scaled = np.diag([sigma_d_sq, sigma_theta_sq])
 

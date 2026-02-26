@@ -115,11 +115,7 @@ class LandmarkEKFSLAM(BaseEKF):
         return landmark_id
 
     def _build_observation(self, landmark_id: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        """Build the observation Jacobian H and predicted measurement z_pred for a landmark.
-
-        Returns (H, z_pred) where H is (2, n) and z_pred is (2,), or None if landmark missing.
-        H encodes ∂h/∂state for both robot pose columns and landmark columns.
-        """
+       
         if landmark_id not in self.landmarks:
             return None
 
@@ -133,7 +129,6 @@ class LandmarkEKFSLAM(BaseEKF):
             lm_rho = self.state[idx]
             lm_alpha = self.state[idx + 1]
 
-            # Predicted observation in robot frame
             rho_pred = lm_rho - (x_r * np.cos(lm_alpha) + y_r * np.sin(lm_alpha))
             alpha_pred = normalize_angle(lm_alpha - theta_r)
             z_pred = np.array([rho_pred, alpha_pred])

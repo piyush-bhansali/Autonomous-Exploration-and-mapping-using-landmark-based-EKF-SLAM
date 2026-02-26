@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
 import numpy as np
-from typing import List, Dict, Tuple, Optional
+import logging
+from typing import List, Dict, Tuple
 from map_generation.transform_utils import robot_wall_to_map_frame, normalize_angle
+
+logger = logging.getLogger(__name__)
 
 
 def associate_landmarks(
@@ -14,12 +17,13 @@ def associate_landmarks(
     wall_rho_tolerance: float = 0.5,
     return_extension_info: bool = False,
     feature_map=None,
-    max_gap_ext: float = 0.5
+    max_gap_ext: float = 1
 ) -> Tuple[List[Tuple[int, int]], List[int], Dict]:
 
     matched = []
     unmatched = []
     extension_info = {}
+    matched_landmarks = set()  # Track landmarks already matched (prevent one-to-many)
 
     if len(ekf_slam.landmarks) == 0:
       
@@ -30,6 +34,10 @@ def associate_landmarks(
 
     x_r, y_r, theta_r = ekf_slam.state[0:3]
 
+    c_r, s_r = np.cos(theta_r), np.sin(theta_r)
+    R_robot = np.array([[c_r, -s_r], [s_r, c_r]])
+    t_robot = np.array([x_r, y_r])
+
     for feat_idx, feature in enumerate(observed_features):
         best_landmark_id = None
         best_mahal_sq = float('inf')
@@ -37,6 +45,9 @@ def associate_landmarks(
         for landmark_id, lm_data in ekf_slam.landmarks.items():
 
             if feature['type'] != lm_data['feature_type']:
+                continue
+
+            if landmark_id in matched_landmarks:
                 continue
 
             idx = lm_data['state_index']
@@ -92,6 +103,10 @@ def associate_landmarks(
                 S_inv = np.linalg.inv(S)
                 mahal_dist_sq = float(innovation.T @ S_inv @ innovation)
             except np.linalg.LinAlgError:
+                logger.debug(
+                    f"Singular covariance matrix for {feature['type']} obs {feat_idx} "
+                    f"vs landmark {landmark_id}, skipping"
+                )
                 continue
 
             if mahal_dist_sq < chi_sq_gate and mahal_dist_sq < best_mahal_sq:
@@ -102,40 +117,35 @@ def associate_landmarks(
                         and feature.get('end_point') is not None):
                     wall_data = feature_map.walls.get(landmark_id)
                     if wall_data and wall_data.get('t_min') is not None:
-                        c_r, s_r = np.cos(theta_r), np.sin(theta_r)
-                        R_rob = np.array([[c_r, -s_r], [s_r, c_r]])
-                        obs_s = R_rob @ feature['start_point'] + np.array([x_r, y_r])
-                        obs_e = R_rob @ feature['end_point']   + np.array([x_r, y_r])
+                        obs_s = R_robot @ feature['start_point'] + t_robot
+                        obs_e = R_robot @ feature['end_point'] + t_robot
 
-                        alpha   = wall_data['alpha']
+                        alpha = wall_data['alpha']
                         tangent = np.array([-np.sin(alpha), np.cos(alpha)])
 
-                        sto_lo = wall_data['t_min']   # directly stored — no projection needed
+                        sto_lo = wall_data['t_min']
                         sto_hi = wall_data['t_max']
                         obs_lo = min(np.dot(obs_s, tangent), np.dot(obs_e, tangent))
                         obs_hi = max(np.dot(obs_s, tangent), np.dot(obs_e, tangent))
 
                         gap = max(0.0, max(obs_lo - sto_hi, sto_lo - obs_hi))
                         if gap > max_gap_ext:
-                            continue  # spatially separated — skip this candidate
+                            continue  
 
                 best_mahal_sq = mahal_dist_sq
                 best_landmark_id = landmark_id
 
         if best_landmark_id is not None:
             matched.append((feat_idx, best_landmark_id))
+            matched_landmarks.add(best_landmark_id) 
 
             if return_extension_info and feature['type'] == 'wall':
                 obs_start = feature.get('start_point', None)
                 obs_end = feature.get('end_point', None)
 
                 if obs_start is not None and obs_end is not None:
-                    c = np.cos(theta_r)
-                    s = np.sin(theta_r)
-                    R = np.array([[c, -s], [s, c]])
-
-                    start_map = R @ obs_start + np.array([x_r, y_r])
-                    end_map = R @ obs_end + np.array([x_r, y_r])
+                    start_map = R_robot @ obs_start + t_robot
+                    end_map = R_robot @ obs_end + t_robot
 
                     extension_info[feat_idx] = {
                         'new_start': start_map,
@@ -143,6 +153,10 @@ def associate_landmarks(
                     }
         else:
             unmatched.append(feat_idx)
+            logger.debug(
+                f"No match found for {feature['type']} observation {feat_idx} "
+                f"(checked {len(ekf_slam.landmarks)} landmarks)"
+            )
 
     if return_extension_info:
         return matched, unmatched, extension_info

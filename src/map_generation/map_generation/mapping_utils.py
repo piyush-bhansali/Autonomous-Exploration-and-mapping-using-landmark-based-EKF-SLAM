@@ -4,6 +4,8 @@ import numpy as np
 from typing import Optional
 
 from map_generation.transform_utils import numpy_to_pointcloud2
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import ColorRGBA
 
 
 def publish_global_map(
@@ -28,9 +30,6 @@ def publish_feature_markers(
     publisher,
     robot_name: str
 ) -> None:
-    
-    from visualization_msgs.msg import Marker, MarkerArray
-    from std_msgs.msg import ColorRGBA
 
     marker_array = MarkerArray()
 

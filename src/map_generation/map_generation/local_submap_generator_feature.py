@@ -121,7 +121,6 @@ class LocalSubmapGeneratorFeature(Node):
         self.last_odom_pose = None
         self.latest_odom_pose = None
         self.latest_odom_timestamp = None
-        self.latest_odom_msg = None
 
         confidence_csv_path = os.path.join(self.save_dir, 'submap_confidence.csv')
         self.confidence_tracker = ConfidenceTracker(confidence_csv_path)
@@ -293,6 +292,17 @@ class LocalSubmapGeneratorFeature(Node):
         P_yy = float(P_robot[1, 1])
         P_thetatheta = float(P_robot[2, 2])
 
+        # Get raw odometry (relative to initial pose)
+        if self.latest_odom_pose is not None:
+            odom_x = float(self.latest_odom_pose['x'])
+            odom_y = float(self.latest_odom_pose['y'])
+            odom_theta = float(self.latest_odom_pose['theta'])
+        else:
+            # No odometry data available yet
+            odom_x = 0.0
+            odom_y = 0.0
+            odom_theta = 0.0
+
         # Log to CSV
         timestamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
         log_groundtruth_row(
@@ -300,6 +310,7 @@ class LocalSubmapGeneratorFeature(Node):
             timestamp_ns,
             ekf_x, ekf_y, ekf_theta,
             gt_x, gt_y, gt_theta,
+            odom_x, odom_y, odom_theta,
             pos_error, orient_error,
             P_xx, P_yy, P_thetatheta
         )
@@ -363,7 +374,6 @@ class LocalSubmapGeneratorFeature(Node):
             'qw': qw
         }
         self.latest_odom_timestamp = msg.header.stamp
-        self.latest_odom_msg = msg
 
         if not self.slam_manager.is_initialized():
 

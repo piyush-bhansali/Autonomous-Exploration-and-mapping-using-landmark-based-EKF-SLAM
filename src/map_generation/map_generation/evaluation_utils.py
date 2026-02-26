@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import csv
+import os
 import numpy as np
 from typing import Dict
 
@@ -9,9 +10,9 @@ CONF_TAU = 1e6
 
 
 class ConfidenceTracker:
-    
-    def __init__(self, csv_file_path: str, logger=None):
-       
+
+    def __init__(self, csv_file_path: str):
+
         self.csv_file_path = csv_file_path
 
         # Open CSV file for writing
@@ -19,7 +20,7 @@ class ConfidenceTracker:
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow([
             'submap_id', 'timestamp', 'confidence', 'information',
-            'robot_x_std', 'robot_y_std', 'robot_theta_std',
+            'robot_x_var', 'robot_y_var', 'robot_theta_var',
             'num_landmarks'
         ])
 
@@ -30,9 +31,9 @@ class ConfidenceTracker:
             confidence_metrics['timestamp'],
             confidence_metrics['confidence'],
             confidence_metrics['information'],
-            confidence_metrics['robot_x_std'],
-            confidence_metrics['robot_y_std'],
-            confidence_metrics['robot_theta_std'],
+            confidence_metrics['robot_x_var'],
+            confidence_metrics['robot_y_var'],
+            confidence_metrics['robot_theta_var'],
             confidence_metrics['num_landmarks']
         ])
         self.csv_file.flush()  # Ensure data is written immediately
@@ -78,18 +79,18 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
         return {
             'confidence': 0.0,
             'information': 0.0,
-            'robot_x_std': float('inf'),
-            'robot_y_std': float('inf'),
-            'robot_theta_std': float('inf'),
+            'robot_x_var': float('inf'),
+            'robot_y_var': float('inf'),
+            'robot_theta_var': float('inf'),
             'num_landmarks': 0,
             'timestamp': current_time_ns
         }
 
     P_robot = ekf_slam.P[0:3, 0:3]
 
-    robot_x_std = float(np.sqrt(max(P_robot[0, 0], 0.0)))
-    robot_y_std = float(np.sqrt(max(P_robot[1, 1], 0.0)))
-    robot_theta_std = float(np.sqrt(max(P_robot[2, 2], 0.0)))
+    robot_x_var = float(max(P_robot[0, 0], 0.0))
+    robot_y_var = float(max(P_robot[1, 1], 0.0))
+    robot_theta_var = float(max(P_robot[2, 2], 0.0))
 
     information = _landmark_information_sum(ekf_slam)
 
@@ -103,9 +104,9 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
     return {
         'confidence': float(confidence),
         'information': float(information),
-        'robot_x_std': robot_x_std,
-        'robot_y_std': robot_y_std,
-        'robot_theta_std': robot_theta_std,
+        'robot_x_var': robot_x_var,
+        'robot_y_var': robot_y_var,
+        'robot_theta_var': robot_theta_var,
         'num_landmarks': int(num_landmarks),
         'timestamp': current_time_ns
     }
@@ -114,6 +115,7 @@ def compute_ekf_confidence(ekf_slam, ekf_initialized: bool, current_time_ns: int
 def log_groundtruth_row(csv_writer, timestamp_ns: int,
                         ekf_x: float, ekf_y: float, ekf_theta: float,
                         gt_x: float, gt_y: float, gt_theta: float,
+                        odom_x: float, odom_y: float, odom_theta: float,
                         pos_error: float, orient_error: float,
                         P_xx: float, P_yy: float, P_thetatheta: float):
     """Write a row to the ground truth comparison CSV.
@@ -123,16 +125,18 @@ def log_groundtruth_row(csv_writer, timestamp_ns: int,
         timestamp_ns: Timestamp in nanoseconds
         ekf_x, ekf_y, ekf_theta: EKF estimated pose
         gt_x, gt_y, gt_theta: Ground truth pose (relative to initial)
+        odom_x, odom_y, odom_theta: Raw odometry pose (relative to initial)
         pos_error: Position error magnitude
         orient_error: Orientation error in radians
         P_xx, P_yy, P_thetatheta: Diagonal covariance elements
     """
     csv_writer.writerow([
         timestamp_ns,
-        f'{ekf_x:.6f}', f'{ekf_y:.6f}', f'{ekf_theta:.6f}',
-        f'{gt_x:.6f}', f'{gt_y:.6f}', f'{gt_theta:.6f}',
-        f'{pos_error:.6f}', f'{orient_error:.6f}',
-        f'{P_xx:.9f}', f'{P_yy:.9f}', f'{P_thetatheta:.9f}'
+        f'{ekf_x:.3f}', f'{ekf_y:.3f}', f'{ekf_theta:.3f}',
+        f'{gt_x:.3f}', f'{gt_y:.3f}', f'{gt_theta:.3f}',
+        f'{odom_x:.3f}', f'{odom_y:.3f}', f'{odom_theta:.3f}',
+        f'{pos_error:.3f}', f'{orient_error:.3f}',
+        f'{P_xx:.3f}', f'{P_yy:.3f}', f'{P_thetatheta:.3f}'
     ])
 
 
@@ -145,7 +149,6 @@ def init_groundtruth_csv(csv_path: str):
     Returns:
         Tuple of (csv_file, csv_writer)
     """
-    import os
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     csv_file = open(csv_path, 'w', newline='')
     csv_writer = csv.writer(csv_file)
@@ -153,6 +156,7 @@ def init_groundtruth_csv(csv_path: str):
         'timestamp_ns',
         'ekf_x', 'ekf_y', 'ekf_theta',
         'gt_x', 'gt_y', 'gt_theta',
+        'odom_x', 'odom_y', 'odom_theta',
         'pos_error', 'orient_error',
         'P_xx', 'P_yy', 'P_thetatheta'
     ])

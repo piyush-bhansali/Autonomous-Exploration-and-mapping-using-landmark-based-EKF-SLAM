@@ -23,13 +23,13 @@ class FeatureSLAMManager:
 
         # Initialize feature extractor (incremental line growing + adjacent merge)
         self.feature_extractor = LandmarkFeatureExtractor(
-            min_points_per_line=10,
-            min_line_length=0.3,
+            min_points_per_line=8,
+            min_line_length=0.5,
             corner_angle_threshold=45.0,
-            max_gap=0.15,
-            merge_angle_tolerance=0.22,
+            max_gap=0.5,
+            merge_angle_tolerance=0.35,
             merge_rho_tolerance=0.15,
-            grow_residual_threshold=0.03
+            grow_residual_threshold=0.05
         )
 
         # Initialize feature map
@@ -40,7 +40,7 @@ class FeatureSLAMManager:
         self.max_euclidean_dist = 6.0
         self.wall_angle_tolerance = 0.349066
         self.wall_rho_tolerance = 0.5
-        self.max_gap_ext = 0.5  
+        self.max_gap_ext = 1 
         # Statistics
         self.total_scans_processed = 0
 
@@ -162,9 +162,11 @@ class FeatureSLAMManager:
                     new_end=ext['new_end']
                 )
 
-        for lm_id, lm_data in self.ekf.landmarks.items():
-            if lm_data['feature_type'] == 'wall' and lm_id in self.feature_map.walls:
-                lm_idx = lm_data['state_index']
+        # Sync FeatureMap wall parameters with latest EKF state
+        # More efficient: iterate over walls in feature_map rather than all EKF landmarks
+        for lm_id in self.feature_map.walls.keys():
+            if lm_id in self.ekf.landmarks and self.ekf.landmarks[lm_id]['feature_type'] == 'wall':
+                lm_idx = self.ekf.landmarks[lm_id]['state_index']
                 self.feature_map.update_wall_hessian(
                     lm_id,
                     rho=float(self.ekf.state[lm_idx]),
