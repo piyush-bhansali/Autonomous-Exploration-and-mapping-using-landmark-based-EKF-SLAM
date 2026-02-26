@@ -61,18 +61,8 @@ class BaseEKF:
             [0.0,                1.0]
         ])
 
-        # Motion-scaled process noise
-        motion_distance = abs(delta_d)
-        motion_rotation = abs(delta_theta)
-
-        # Add minimum variance to prevent zero when stationary
-        min_distance_var = 0.0001    # (1cm)²
-        min_rotation_var = 0.000001  # (~0.06°)²
-
-        sigma_d_sq = self.Q[0, 0] #* motion_distance**2 + min_distance_var
-        sigma_theta_sq = self.Q[1, 1] #* motion_rotation**2 + min_rotation_var
-
-        Q_scaled = np.diag([sigma_d_sq, sigma_theta_sq])
+        # Process noise covariance
+        Q_scaled = self.Q
 
         # Covariance prediction
         self.P = F @ self.P @ F.T + G @ Q_scaled @ G.T

@@ -153,10 +153,6 @@ def associate_landmarks(
                     }
         else:
             unmatched.append(feat_idx)
-            logger.debug(
-                f"No match found for {feature['type']} observation {feat_idx} "
-                f"(checked {len(ekf_slam.landmarks)} landmarks)"
-            )
 
     if return_extension_info:
         return matched, unmatched, extension_info

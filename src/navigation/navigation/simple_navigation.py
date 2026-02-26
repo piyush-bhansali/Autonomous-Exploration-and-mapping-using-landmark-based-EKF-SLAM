@@ -52,7 +52,7 @@ class SimpleNavigationNode(Node):
         self.enable_reactive_avoidance =                self.get_parameter('enable_reactive_avoidance').value
         self.scan_emergency_distance = self.get_parameter('scan_emergency_distance').value
         self.scan_angular_range = np.radians(self.get_parameter('scan_angular_range').value)
-        self.path_deviation_threshold = 0.5
+        self.path_deviation_threshold = 1.0
 
         self.state = State.WAIT_FOR_MAP
         self.robot_pos = None

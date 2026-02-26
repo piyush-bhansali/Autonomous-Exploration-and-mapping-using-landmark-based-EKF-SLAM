@@ -21,15 +21,11 @@ class SubmapStitcher:
         else:
             self.device = o3c.Device("CPU:0")
 
-        # Submap storage
         self.submaps = []
         self.global_map_tensor = o3d.t.geometry.PointCloud(self.device)
 
-        # Global wall registry keyed by landmark_id — used for feature-based alignment
-        # Each entry: {rho, alpha, start_point, end_point} in globally-aligned map frame
         self.global_walls: Dict[int, Dict] = {}
 
-        # Cache for numpy conversion
         self._cached_numpy_map = None
         self._map_dirty = True
 
@@ -40,29 +36,12 @@ class SubmapStitcher:
         pcd_tensor = pcd_tensor.voxel_down_sample(voxel_size=self.voxel_size)
         return pcd_tensor
 
-    # ------------------------------------------------------------------
-    # Point Cloud ICP Alignment
-    # ------------------------------------------------------------------
 
     def point_cloud_icp_align(self,
                               source_tensor: o3d.t.geometry.PointCloud,
                               target_tensor: o3d.t.geometry.PointCloud,
                               initial_guess: np.ndarray = None) -> Tuple[bool, Optional[Dict]]:
-        """Align submap to global map using hybrid tensor ICP + Censi covariance.
-
-        Hybrid approach:
-        1. Runs ICP on GPU tensors for speed (Open3D's optimized implementation)
-        2. Converts to legacy format to extract correspondences
-        3. Computes Censi-style covariance from correspondence geometry
-
-        Args:
-            source_tensor: Source point cloud (submap) as Open3D tensor
-            target_tensor: Target point cloud (global map) as Open3D tensor
-            initial_guess: Initial 4x4 transformation (default: identity)
-
-        Returns:
-            (success, pose_correction_dict with Censi covariance or None)
-        """
+        
         if len(source_tensor.point.positions) < 20 or len(target_tensor.point.positions) < 20:
             print("[SubmapStitcher] ICP failed: insufficient points")
             return False, None
@@ -70,14 +49,12 @@ class SubmapStitcher:
         if initial_guess is None:
             initial_guess = np.eye(4)
 
-        # Convert initial guess to tensor
         init_transform = o3c.Tensor(initial_guess, dtype=o3c.float32, device=self.device)
 
-        # Run ICP using Open3D's optimized implementation
         reg_result = o3d.t.pipelines.registration.icp(
             source=source_tensor,
             target=target_tensor,
-            max_correspondence_distance=0.03,  # 3σ odometry drift
+            max_correspondence_distance=0.05, 
             init_source_to_target=init_transform,
             estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPoint(),
             criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
@@ -87,32 +64,27 @@ class SubmapStitcher:
             )
         )
 
-        # Check convergence quality
-        if reg_result.fitness < 0.3:
-            print(f"[SubmapStitcher] ICP failed: low fitness ({reg_result.fitness:.3f} < 0.3)")
+        if reg_result.fitness < 0.5:
+            print(f"[SubmapStitcher] ICP failed: low fitness ({reg_result.fitness:.3f} < 0.5)")
             return False, None
 
         if reg_result.inlier_rmse > 0.05:
             print(f"[SubmapStitcher] ICP failed: high RMSE ({reg_result.inlier_rmse:.4f} > 0.05)")
             return False, None
 
-        # Extract transformation matrix
         T = reg_result.transformation.cpu().numpy()
         dx = float(T[0, 3])
         dy = float(T[1, 3])
         dtheta = float(np.arctan2(T[1, 0], T[0, 0]))
 
-        # Convert tensors to legacy for correspondence extraction
         source_legacy = source_tensor.to_legacy()
         target_legacy = target_tensor.to_legacy()
 
-        # Apply ICP transformation to source points
         source_transformed = source_legacy.transform(T)
 
-        # Find nearest neighbor correspondences using final transformation
         kdtree = o3d.geometry.KDTreeFlann(target_legacy)
         correspondences = []
-        max_corr_dist_sq = 0.03 * 0.03  # 0.03m threshold squared
+        max_corr_dist_sq = 0.03 * 0.03  
 
         for i in range(len(source_transformed.points)):
             [k, idx, dist] = kdtree.search_knn_vector_3d(source_transformed.points[i], 1)
@@ -123,30 +95,22 @@ class SubmapStitcher:
             print(f"[SubmapStitcher] ICP failed: only {len(correspondences)} correspondences after NN search")
             return False, None
 
-        # Compute Censi-style covariance from correspondence geometry
         c, s = np.cos(dtheta), np.sin(dtheta)
-        H = np.zeros((3, 3))  # Hessian for [tx, ty, theta]
+        H = np.zeros((3, 3))  
 
         for src_idx, tgt_idx in correspondences:
-            # Get source point in 2D (before transformation in local frame)
             p_src = np.array(source_legacy.points[src_idx][:2])
 
-            # Jacobian of transformation wrt pose [tx, ty, theta]
-            # ∂(R*p + t)/∂tx = [1, 0]
-            # ∂(R*p + t)/∂ty = [0, 1]
-            # ∂(R*p + t)/∂θ  = [-sin(θ)*px - cos(θ)*py, cos(θ)*px - sin(θ)*py]
             J = np.array([
                 [1.0, 0.0, -s * p_src[0] - c * p_src[1]],
                 [0.0, 1.0,  c * p_src[0] - s * p_src[1]]
             ])
             H += J.T @ J
 
-        # Stabilize Hessian via eigenvalue clamping
         eigvals, eigvecs = np.linalg.eigh(H)
-        eigvals = np.maximum(eigvals, 1e-6)  # Prevent singularity
+        eigvals = np.maximum(eigvals, 1e-6)  
         H_stable = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
-        # Covariance = σ² * H⁻¹ (Censi method)
         try:
             covariance = (self.lidar_noise_sigma ** 2) * np.linalg.inv(H_stable)
         except np.linalg.LinAlgError:
@@ -160,34 +124,16 @@ class SubmapStitcher:
             'covariance': covariance
         }
 
-        print(
-            f"[SubmapStitcher] ICP align | "
-            f"fitness={reg_result.fitness:.3f}  "
-            f"rmse={reg_result.inlier_rmse:.4f}m  "
-            f"correspondences={len(correspondences)}  "
-            f"dx={dx:.4f}m  dy={dy:.4f}m  dtheta={np.degrees(dtheta):.3f}deg  "
-            f"cov_xx={covariance[0,0]:.2e}  cov_yy={covariance[1,1]:.2e}  cov_th={covariance[2,2]:.2e}"
-        )
-
         return True, pose_correction
 
     def _accumulate_walls(self, feature_map, R: np.ndarray, t: np.ndarray):
-        """Apply correction (R, t) to current submap walls and upsert into global_walls.
-
-        Wall extents in feature_map are stored as (t_min, t_max) scalars; they are
-        reconstructed as 2D endpoints, corrected, then stored back as t_min/t_max
-        in the global wall's own tangent coordinate system.
-
-        For existing landmark IDs: extend the tangential extent.
-        For new IDs: insert directly.
-        """
+        
         dtheta = float(np.arctan2(R[1, 0], R[0, 0]))
 
         for lm_id, wall in feature_map.walls.items():
             if wall.get('t_min') is None or wall.get('t_max') is None:
                 continue
 
-            # Reconstruct 2D endpoints from stored scalar extents
             alpha_src   = float(wall['alpha'])
             rho_src     = float(wall['rho'])
             tangent_src = np.array([-np.sin(alpha_src), np.cos(alpha_src)])
@@ -196,11 +142,9 @@ class SubmapStitcher:
             start_raw   = line_pt_src + float(wall['t_min']) * tangent_src
             end_raw     = line_pt_src + float(wall['t_max']) * tangent_src
 
-            # Apply SVD correction
             start_corr = R @ start_raw + t
             end_corr   = R @ end_raw   + t
 
-            # Corrected Hessian params
             alpha_corr = float(np.arctan2(
                 np.sin(alpha_src + dtheta),
                 np.cos(alpha_src + dtheta)
@@ -218,7 +162,6 @@ class SubmapStitcher:
                 normal_corr  = -normal_corr
                 tangent_corr = -tangent_corr
 
-            # Project corrected endpoints onto corrected wall tangent → store as scalars
             t_s = float(np.dot(start_corr, tangent_corr))
             t_e = float(np.dot(end_corr,   tangent_corr))
             t_min_corr = min(t_s, t_e)
@@ -232,7 +175,6 @@ class SubmapStitcher:
                     't_max': t_max_corr
                 }
             else:
-                # Extend existing extent along the stored global wall's tangent
                 existing  = self.global_walls[lm_id]
                 alpha_e   = float(existing['alpha'])
                 tangent_e = np.array([-np.sin(alpha_e), np.cos(alpha_e)])
@@ -241,9 +183,6 @@ class SubmapStitcher:
                 existing['t_min'] = min(existing['t_min'], proj_s, proj_e)
                 existing['t_max'] = max(existing['t_max'], proj_s, proj_e)
 
-    # ------------------------------------------------------------------
-    # Global map management
-    # ------------------------------------------------------------------
 
     def integrate_submap_to_global_map(self,
                                         points: np.ndarray,
@@ -272,7 +211,7 @@ class SubmapStitcher:
         identity_t = np.zeros(2)
 
         if submap_id == 0:
-            # Points already in map frame — place directly into global map
+           
             self.global_map_tensor = pcd_tensor
 
             submap_data = {
@@ -286,23 +225,20 @@ class SubmapStitcher:
             }
             self.submaps.append(submap_data)
 
-            # Seed the global wall registry with first submap's walls (no correction)
             if feature_map is not None:
                 self._accumulate_walls(feature_map, identity_R, identity_t)
 
             return True, None
 
-        # ------ Submap > 0: attempt point cloud ICP alignment ------
-
         pose_correction = None
         pcd_aligned_tensor = pcd_tensor   # default: points already in map frame
 
         if len(self.global_map_tensor.point.positions) > 0:
-            # Attempt ICP alignment using tensors directly (no numpy conversion needed)
+            
             success, pose_correction = self.point_cloud_icp_align(pcd_tensor, self.global_map_tensor)
 
             if success:
-                # Apply ICP correction to map-frame points
+               
                 dx      = pose_correction['dx']
                 dy      = pose_correction['dy']
                 dtheta  = pose_correction['dtheta']
@@ -315,18 +251,16 @@ class SubmapStitcher:
                 transform_tensor = o3c.Tensor(correction_4x4, dtype=o3c.float32, device=self.device)
                 pcd_aligned_tensor = pcd_tensor.transform(transform_tensor)
 
-                # Update landmark endpoints with ICP correction
                 R_2x2 = np.array([[c, -s], [s, c]])
                 t_2d  = np.array([dx, dy])
                 if feature_map is not None:
                     self._accumulate_walls(feature_map, R_2x2, t_2d)
             else:
-                # ICP failed: add points with EKF pose as-is
-                # Confidence tracker will reflect degraded accuracy via EKF covariance
+                
                 if feature_map is not None:
                     self._accumulate_walls(feature_map, identity_R, identity_t)
         else:
-            # No global map yet (shouldn't happen for submap_id > 0)
+            
             if feature_map is not None:
                 self._accumulate_walls(feature_map, identity_R, identity_t)
 
@@ -353,7 +287,7 @@ class SubmapStitcher:
         return True, pose_correction
 
     def save_global_map(self, filepath: str):
-        """Save the global map using Tensor I/O."""
+        
         if len(self.global_map_tensor.point.positions) == 0:
             return
         o3d.t.io.write_point_cloud(filepath, self.global_map_tensor, write_ascii=False, compressed=False)
