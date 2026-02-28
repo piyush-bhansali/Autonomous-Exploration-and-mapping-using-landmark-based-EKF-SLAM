@@ -182,6 +182,8 @@ class SubmapStitcher:
                 proj_e = float(np.dot(end_corr,   tangent_e))
                 existing['t_min'] = min(existing['t_min'], proj_s, proj_e)
                 existing['t_max'] = max(existing['t_max'], proj_s, proj_e)
+                existing['rho'] = rho_corr
+                existing['alpha'] = alpha_corr
 
 
     def integrate_submap_to_global_map(self,

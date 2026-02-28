@@ -15,15 +15,12 @@ class LandmarkEKFSLAM(BaseEKF):
 
         super().__init__()
 
-        # Landmark database
         self.landmarks = {}
         self.next_landmark_id = 0
 
-        # Parameters
         self.landmark_timeout_scans = landmark_timeout_scans
         self.min_observations_for_init = min_observations_for_init
 
-        # Statistics
         self.landmark_update_count = 0
 
     def add_landmark(self,
@@ -39,57 +36,47 @@ class LandmarkEKFSLAM(BaseEKF):
         if feature['type'] == 'wall':
             rho_m, alpha_m = robot_wall_to_map_frame(z_x, z_y, x_r, y_r, theta_r)
 
-            # Augment state vector
             self.state = np.append(self.state, [rho_m, alpha_m])
 
             cos_a = np.cos(alpha_m)
             sin_a = np.sin(alpha_m)
 
-            # Jacobian wrt robot pose
             d_rho_d_theta = -x_r * sin_a + y_r * cos_a
             H_r = np.array([
                 [cos_a, sin_a, d_rho_d_theta],
                 [0.0, 0.0, 1.0]
             ])
 
-            # Jacobian wrt observation (rho_r, alpha_r)
             H_z = np.array([
                 [1.0, d_rho_d_theta],
                 [0.0, 1.0]
             ])
 
         else:
-            # Corner in Cartesian (x, y) in robot frame
+            
             cos_theta = np.cos(theta_r)
             sin_theta = np.sin(theta_r)
 
-            # Landmark position in map frame
             lm_x = x_r + cos_theta * z_x - sin_theta * z_y
             lm_y = y_r + sin_theta * z_x + cos_theta * z_y
 
-            # Augment state vector
             self.state = np.append(self.state, [lm_x, lm_y])
 
-            # Jacobian wrt robot pose
             H_r = np.array([
                 [1.0, 0.0, -sin_theta * z_x - cos_theta * z_y],
                 [0.0, 1.0,  cos_theta * z_x - sin_theta * z_y]
             ])
 
-            # Jacobian wrt observation (x, y)
             H_z = np.array([
                 [cos_theta, -sin_theta],
                 [sin_theta,  cos_theta]
             ])
 
-        # Landmark covariance (uncertainty propagation)
-        P_rr = self.P[0:3, 0:3]  # Robot pose covariance
+        P_rr = self.P[0:3, 0:3]  
         P_lm = H_r @ P_rr @ H_r.T + H_z @ R_obs @ H_z.T
 
-        # Cross-correlation: P_xl = P_xx_all * H_r^T
         P_rl = self.P[:, 0:3] @ H_r.T
 
-        # Augment covariance matrix
         n_old = len(self.P)
         P_new = np.zeros((n_old + 2, n_old + 2))
         P_new[0:n_old, 0:n_old] = self.P
@@ -99,11 +86,10 @@ class LandmarkEKFSLAM(BaseEKF):
 
         self.P = P_new
 
-        # Register landmark
         landmark_id = self.next_landmark_id
         self.next_landmark_id += 1
 
-        state_index = len(self.state) - 2  # Index of landmark x in state
+        state_index = len(self.state) - 2 
 
         self.landmarks[landmark_id] = {
             'state_index': state_index,
@@ -133,7 +119,6 @@ class LandmarkEKFSLAM(BaseEKF):
             alpha_pred = normalize_angle(lm_alpha - theta_r)
             z_pred = np.array([rho_pred, alpha_pred])
 
-            # ∂h/∂robot_pose
             H[0, 0] = -np.cos(lm_alpha)
             H[0, 1] = -np.sin(lm_alpha)
             H[0, 2] = 0.0
@@ -141,7 +126,6 @@ class LandmarkEKFSLAM(BaseEKF):
             H[1, 1] = 0.0
             H[1, 2] = -1.0
 
-            # ∂h/∂landmark
             H[0, idx]     = 1.0
             H[0, idx + 1] = x_r * np.sin(lm_alpha) - y_r * np.cos(lm_alpha)
             H[1, idx]     = 0.0
@@ -162,7 +146,6 @@ class LandmarkEKFSLAM(BaseEKF):
                 sin_neg * dx + cos_neg * dy
             ])
 
-            # ∂h/∂robot_pose  (using c = cos θ, s = sin θ)
             c = np.cos(theta_r)
             s = np.sin(theta_r)
             H[0, 0] = -c
@@ -173,7 +156,6 @@ class LandmarkEKFSLAM(BaseEKF):
             H[1, 1] = -c
             H[1, 2] = -c * dx - s * dy
 
-            # ∂h/∂landmark
             H[0, idx]     = cos_neg
             H[0, idx + 1] = -sin_neg
             H[1, idx]     = sin_neg
@@ -192,8 +174,6 @@ class LandmarkEKFSLAM(BaseEKF):
             return
 
         lm_data = self.landmarks[landmark_id]
-
-        # Update observation count and timestamp
         lm_data['observations'] += 1
         lm_data['last_seen'] = scan_number
 
@@ -205,28 +185,21 @@ class LandmarkEKFSLAM(BaseEKF):
         z_obs = np.array([z_x, z_y])
         innovation = z_obs - z_pred
 
-        # Angle-wrap the angular component for wall observations
         if lm_data['feature_type'] == 'wall':
             innovation[1] = normalize_angle(innovation[1])
 
-        # Innovation covariance
         S = H @ self.P @ H.T + measurement_covariance
 
-        # Outlier rejection using Mahalanobis distance test
         try:
             S_inv = np.linalg.inv(S)
             mahal_dist_sq = float(innovation.T @ S_inv @ innovation)
         except np.linalg.LinAlgError:
-            # Singular covariance - reject update
             return
 
-        # Chi-squared test (2-DOF, 99.7% confidence interval = 13.8)
-        chi_sq_threshold = 13.8
+        chi_sq_threshold = 5.99
         if mahal_dist_sq > chi_sq_threshold:
-            # Reject outlier
             return
 
-        # Kalman gain
         try:
             K = self.P @ H.T @ S_inv
         except np.linalg.LinAlgError:
@@ -234,16 +207,11 @@ class LandmarkEKFSLAM(BaseEKF):
 
         n = len(self.state)
 
-        # State update
         self.state = self.state + K @ innovation
 
-        # Normalize robot orientation
         self.state[2] = normalize_angle(self.state[2])
 
-        # Normalize all wall landmarks: enforce rho >= 0.
-        # After EKF updates rho can drift negative, which flips the Hessian normal
-        # direction and causes future observations of the same wall to fail the
-        # alpha-difference check in data association, creating duplicate landmarks.
+     
         for lm_data in self.landmarks.values():
             if lm_data['feature_type'] == 'wall':
                 i = lm_data['state_index']
@@ -251,12 +219,10 @@ class LandmarkEKFSLAM(BaseEKF):
                     self.state[i] = -self.state[i]
                     self.state[i + 1] = normalize_angle(self.state[i + 1] + np.pi)
 
-        # Covariance update (Joseph form)
         I = np.eye(n)
         I_KH = I - K @ H
         self.P = I_KH @ self.P @ I_KH.T + K @ measurement_covariance @ K.T
 
-        # Condition covariance
         self.P = self._condition_covariance(self.P)
 
         self.landmark_update_count += 1
@@ -281,25 +247,21 @@ class LandmarkEKFSLAM(BaseEKF):
         return to_remove
 
     def _remove_landmark(self, landmark_id: int):
-        """Remove landmark from state vector and covariance matrix."""
+      
         if landmark_id not in self.landmarks:
             return
 
         idx = self.landmarks[landmark_id]['state_index']
 
-        # Remove from state vector (2 elements: x,y or rho,alpha)
         self.state = np.delete(self.state, [idx, idx+1])
 
-        # Remove from covariance matrix (2 rows and 2 columns)
         rows_to_keep = [i for i in range(len(self.P)) if i not in [idx, idx+1]]
         self.P = self.P[np.ix_(rows_to_keep, rows_to_keep)]
 
-        # Update indices of landmarks that came after this one
         for lm_id, lm_data in self.landmarks.items():
             if lm_data['state_index'] > idx:
                 lm_data['state_index'] -= 2
 
-        # Remove from database
         del self.landmarks[landmark_id]
 
     def update(self,
@@ -316,31 +278,24 @@ class LandmarkEKFSLAM(BaseEKF):
         z = np.array([x, y, theta])
         z_pred = self.state[0:3]
 
-        # Innovation with angle normalization
         innovation = z - z_pred
         innovation[2] = normalize_angle(innovation[2])
 
         H = np.zeros((3, n))
         H[0:3, 0:3] = np.eye(3)
 
-        # Innovation covariance
         S = H @ self.P @ H.T + measurement_covariance
 
-        # Kalman gain
         try:
             K = self.P @ H.T @ np.linalg.inv(S)
         except np.linalg.LinAlgError:
-            # Singular innovation covariance - skip update
             return
-
-        # State update
+        
         self.state = self.state + K @ innovation
         self.state[2] = normalize_angle(self.state[2])
 
-        # Covariance update (Joseph form)
         I = np.eye(n)
         I_KH = I - K @ H
         self.P = I_KH @ self.P @ I_KH.T + K @ measurement_covariance @ K.T
 
-        # Condition covariance
         self.P = self._condition_covariance(self.P)

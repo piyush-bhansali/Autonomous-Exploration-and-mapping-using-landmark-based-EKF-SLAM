@@ -136,311 +136,6 @@ While landmark based EKF-SLAM and frontier exploration have been studied extensi
 
 A core contribution of this work is also the explicit modeling of landmark uncertainty within the EKF state vector. Rather than treating landmarks as isolated points, the system maintains a joint covariance matrix that captures the high degree of correlation between the robot’s pose and the mapped features. Furthermore, this framework provides a confidence metric by aggregating the marginal uncertainties of the landmarks associated with a specific submap.
 
-\section{System Overview}
-
-This thesis presents an autonomous indoor mapping system that integrates real-time feature-based SLAM with feature-based SVD submap stitching. The system uses an Extended Kalman Filter (EKF) as the state estimator, fusing wheel odometry with geometric landmark observations to maintain a joint estimate of robot pose and map. Global drift correction is performed via Procrustes SVD alignment of shared wall landmarks between submaps. A separate navigation module provides frontier-based exploration with RRT* path planning and Pure Pursuit path tracking, enabling the robot to explore unknown environments autonomously. The system is implemented in Python using ROS 2 Jazzy as the middleware framework, with the TurtleBot3 Waffle Pi as the robot platform and Gazebo Harmonic for simulation.
-
-\subsection{System Architecture}
-
-The complete system architecture consists of three primary modules: the Mapping Module, the Navigation Module, and the Launch files, all operating within the ROS2 Jazzy framework.
-
-\subparagraph{High-Level Architecture}
-
-The system operates through a hierarchical data flow starting from simulated sensors in Gazebo, processing through the ROS 2 middleware, performing SLAM and navigation computations, and sending the velocity commands back to the robot actuators. 
-
-The Gazebo simulation environment uses two primary sensor:
-\begin{itemize}
-	\item \textbf{LiDAR}: 360° laser scanner operating at 10 Hz providing range measurements
-	\item \textbf{Odometry}: Wheel encoder-based position estimates at 50 Hz
-	
-\end{itemize}
-
-
-\subsubsection{Mapping Module Architecture}
-
-The Mapping Module represents the core of the SLAM pipeline, encapsulated within the \texttt{local\_submap\_generator\_feature} node. This architectural component executes a sequential three-stage operation for every LiDAR scan:
-
-\begin{enumerate}
-	\item \textbf{Feature Extraction:} Raw scan data is processed by the \texttt{LandmarkFeatureExtractor}. Geometric landmarks are identified using an incremental line-growing algorithm. Collinear segments are then merged to reduce oversegmentation due to sensor noise. Validated segments are transformed into the Hessian normal form $(\rho, \alpha)$, with associated uncertainties. Furthermore, corner landmarks are localized at the intersection of adjacent segment pairs, with their Cartesian covariances determined via analytical error propagation.
-	
-	\item \textbf{Extended Kalman Filter (EKF) SLAM:} The \texttt{LandmarkEKFSLAM} class manages the joint state vector, comprising the robot pose and the global landmark map. The filter cycle consists of:
-	\begin{itemize}
-		\item \textbf{Prediction:} Robot state prediction using odometry data.
-		\item \textbf{Data Association:} A matching phase to link observations to the state vector.
-		\item \textbf{Correction:} An EKF update step for each matched feature. 
-	\end{itemize}
-
-	\item \textbf{Submap Integration and Drift Correction:} At an interval of 50 scans, a point cloud based submap is generated using features is transferred to the \texttt{SubmapStitcher}. This module performs voxel-downsampling and aligns the local submap against the global map using feature-based correspondence: shared wall landmark IDs provide matched point pairs, and SVD is used to compute the optimal rigid transformation. The resulting drift correction (pose adjustment and covariance) is fed back into the EKF to maintain global consistency.
-\end{enumerate}
-
-
-\subsubsection{Navigation Module Architecture}
-
-The Navigation Module implements a finite state machine for autonomous exploration centered around the \texttt{simple\_navigation} node. This node orchestrates three sequential operations:
-
-\textbf{Frontier Detection:} The system analyzes the point cloud map to generate a convex hull boundary between the explored and unexplored regions. Raw frontier points are placed and clustered using DBSCAN to group nearby points into discrete exploration candidates. Each cluster is evaluated based on multiple paramaters to select the most promising exploration target.
-
-\textbf{Path Planning:} Once a frontier goal is selected, the RRT* (Rapidly-exploring Random Tree Star) algorithm computes a collision-free path through the point cloud map.
-
-\textbf{Path Tracking and Control:} The Pure Pursuit controller tracks the planned path by computing a target point ahead of the robot based on a lookahead distance. Linear and angular velocities are computed to drive the robot toward this target point, with additional reactive obstacle avoidance logic that reduces velocity or halts when obstacles are detected within safety thresholds.
-
-
-\subsection{Hardware Requirements}
-
-The system has been tested on the configurations listed in Table~\ref{tab:hardware}.
-
-\begin{table}[h]
-	\centering
-	\caption{Hardware Specifications Used in This Thesis}
-	\label{tab:hardware}
-	\begin{tabular}{|l|l|}
-		\hline
-		\textbf{Component} & \textbf{Specification} \\ \hline
-		CPU & Intel Core i7-10750H @ 2.60GHz (6 cores, 12 threads) \\ \hline
-		RAM & 8 GB \\ \hline
-		GPU & NVIDIA GeForce GTX 1660 Ti (6 GB VRAM, CUDA 12.0) \\ \hline
-		Storage & 1 TB SSD \\ \hline
-	\end{tabular}
-\end{table}
-
-
-
-\subsection{ROS2 Software Architecture}
-
-\subsubsection{System Nodes}
-
-\paragraph{Mapping Node: local\_submap\_generator\_feature}
-
-
-The mapping node implements the complete SLAM pipeline described in previous chapters. This node is responsible for feature extraction, feature association, fusing sensor data and maintaining the point cloud map.
-
-\textbf{Subscribed Topics:}
-\begin{itemize}
-	\item \texttt{/\{robot\}/scan}: 360° laser scan measurements from the LiDAR sensor, containing range data at 1° angular resolution
-	\item \texttt{/\{robot\}/odom}: Wheel encoder-based pose estimates including position, orientation, and covariance information
-
-\end{itemize}
-
-\textbf{Published Topics:}
-\begin{itemize}
-	\item \texttt{/\{robot\}/global\_map}: Accumulated point cloud map containing all integrated submaps.
-	\item \texttt{/\{robot\}/ekf\_pose}: The globally corrected robot pose estimated by the Extended Kalman Filter.
-	\item \texttt{/\{robot\}/scan\_features}: Marker arrays representing the extracted wall and corner landmarks.
-	\item \texttt{/\{robot\}/current\_submap}: Accumulated point cloud per submap from last 50 scans.
-	\item \texttt{/tf}: Transform broadcast from the \texttt{map} frame to the \texttt{odom} frame.
-\end{itemize}
-
-
-\paragraph{Navigation Node: simple\_navigation}
-
-The navigation node implements the autonomous exploration finite state machine. Operating within the \texttt{navigation} package, this node queries the global map, detects frontiers, plans collision-free paths, and executes motion control.
-
-\textbf{Subscribed Topics:}
-\begin{itemize}
-	\item \texttt{/\{robot\}/global\_map} (sensor\_msgs/PointCloud2): Current accumulated map for frontier detection and collision checking during path planning
-	\item \texttt{/\{robot\}/scan} (sensor\_msgs/LaserScan, 10 Hz): Real-time laser scan for reactive obstacle avoidance layer
-\end{itemize}
-
-\textbf{Published Topics:}
-\begin{itemize}
-	\item \texttt{/\{robot\}/cmd\_vel}: Velocity commands specifying linear velocity in the forward direction and angular velocity about the vertical axis
-	\item \texttt{/\{robot\}/planned\_path}: Current RRT* trajectory visualized as a sequence of waypoints
-	\item \texttt{/\{robot\}/frontier\_markers}: Visualization of detected frontier clusters for debugging and monitoring
-	\item \texttt{/\{robot\}/hull\_boundary}: Visualization of the convex hull of the explored area.
-\end{itemize}
-
-\subsubsection{Quality of Service Profiles}
-
-ROS2's Quality of Service (QoS) is a set of policies that define the communication protocol between nodes. The system employs different QoS profiles for different topic types based on their requirements, as shown in Table~\ref{tab:qos_profiles}.
-
-\begin{table}[h]
-	\centering
-	\caption{ROS2 Topic Quality of Service Configurations}
-	\label{tab:qos_profiles}
-	\begin{tabular}{|l|l|p{7cm}|}
-		\hline
-		\textbf{Topic} & \textbf{QoS Policy} & \textbf{Rationale} \\ \hline
-		/scan & RELIABLE & Ensures all laser scans are received for accurate mapping; lost scans create gaps in the map \\ \hline
-		/odom & RELIABLE & Critical for localization; missing odometry measurements cause EKF divergence \\ \hline
-		/cmd\_vel & RELIABLE & Ensures motion commands are delivered; lost commands could cause navigation failures \\ \hline
-		/global\_map & RELIABLE & Large messages that must be received completely for navigation to function \\ \hline
-	\end{tabular}
-\end{table}
-
-
-\subsubsection{Simulation Module}
-
-The simulation infrastructure is managed through the \texttt{full\_system.launch.py} launch file with configurable parameters.
-
-\paragraph{Configurable Options:}
-\begin{itemize}
-	\item \texttt{world}: maze 
-	\item \texttt{enable\_navigation}: true | false (default: true)
-	\item \texttt{use\_rviz}: true | false (default: true)
-\end{itemize}
-
-
-\subsubsection{Configuration Files}
-
-\paragraph{Gazebo-ROS2 Bridge Configuration}
-
-The \texttt{config/tb3\_bridge.yaml} file specifies topic mappings between Gazebo's internal topic namespace and ROS2. Each sensor requires an explicit mapping entry due to Gazebo's hierarchical topic structure.
-
-Example configuration:
-\begin{verbatim}
-	- ros_topic_name: "/tb3_1/scan"
-	gz_topic_name: "/world/maze_world/model/tb3_1/link/base_scan/
-	sensor/lidar/scan"
-	ros_type_name: "sensor_msgs/msg/LaserScan"
-	gz_type_name: "gz.msgs.LaserScan"
-\end{verbatim}
-
-This mapping translates Gazebo's deeply nested topic path (including world name, model name, link name, and sensor name) to a simplified ROS2 topic that nodes can easily subscribe to. Similar mappings exist for odometry and command velocity topics.
-
-\subsection{TurtleBot3 Robot Platform}
-
-\subsubsection{Platform Overview}
-
-The TurtleBot3 Waffle Pi serves as the robot platform for this research. This open-source mobile robot, developed by ROBOTIS, represents the third generation of the TurtleBot educational platform and specifically targets SLAM research applications. The complete TurtleBot3 codebase used in this thesis was sourced directly from the official ROBOTIS GitHub repository. This includes the robot model files, sensor and driver configurations, and the baseline software stack required to run TurtleBot3 in ROS 2.
-
-\subsubsection{Physical Specifications}
-
-Table~\ref{tab:robot_specs} summarizes the key physical characteristics of the platform.
-
-\begin{table}[h]
-	\centering
-	\caption{TurtleBot3 Waffle Pi Physical Specifications}
-	\label{tab:robot_specs}
-	\begin{tabular}{|l|l|p{6cm}|}
-		\hline
-		\textbf{Parameter} & \textbf{Value} & \textbf{Notes} \\ \hline
-		Length & 281 mm & Front to back dimension \\ \hline
-		Width & 306 mm & Side to side including wheels \\ \hline
-		Height & 141 mm & Ground to top of LiDAR mounting \\ \hline
-		Total Mass & 1.8 kg & Including battery and sensors \\ \hline
-		Wheelbase & 287 mm & Distance between drive wheels \\ \hline
-		Wheel Diameter & 66 mm & Rubber tire contact \\ \hline
-		Ground Clearance & 10 mm & Clearance for base plate \\ \hline
-	\end{tabular}
-\end{table}
-
-\subsubsection{Sensors}
-
-\paragraph{LiDAR Sensor}
-
-The robot is equipped with a Hitachi-LG Data Storage HLS-LFCD-LDS laser distance sensor mounted atop the chassis.
-
-Key specifications include:
-\begin{itemize}
-	\item Update rate: 10 Hz (one complete rotation per 100 ms)
-	\item Angular coverage: 360° in the horizontal plane
-	\item Angular resolution: 1.0° (360 samples per scan)
-	\item Minimum range: 0.12 m (objects closer than 12 cm are not detected)
-	\item Maximum range: 5 m (sufficient for indoor navigation)
-	\item Range resolution: 0.015 m (1.5 cm measurement quantization)
-	\item Accuracy: ±1 cm (one standard deviation under nominal conditions)
-\end{itemize}
-
-In the Gazebo simulation, the LiDAR is modeled with additive Gaussian noise having zero mean and 0.01 m standard deviation on range measurements. The 1 cm noise level is consistent with the manufacturer's specifications for this sensor.
-
-The sensor is positioned at [-0.064, 0, 0.121] meters relative to the robot's base frame, matching the physical mounting location on the real TurtleBot3. This offset is accounted for in coordinate transformations when integrating scan data into the map.
-
-The LiDAR publishes data to the \texttt{/\{robot\}/scan} topic using the \texttt{sensor\_msgs/LaserScan} message type. Each message contains:
-\begin{itemize}
-	\item 360 range measurements in meters (one per degree)
-	\item Timestamp for temporal synchronization with other sensors
-	\item Frame identifier linking to the TF tree
-\end{itemize}
-
-\paragraph{Wheel Odometry}
-
-Odometry information is generated by the Gazebo differential drive plugin, which simulates wheel encoders and computes pose estimates through forward kinematics. The plugin integrates wheel velocities to produce position and orientation estimates in the odometry frame.
-
-Odometry characteristics:
-\begin{itemize}
-	\item Update rate: 50 Hz
-	\item Position noise: $\sigma = 0.071$ m (7.1 cm standard deviation)
-	\item Orientation noise: $\sigma = 0.141$ rad (8.1° standard deviation)
-\end{itemize}
-
-
-Odometry is published to \texttt{/\{robot\}/odom} using the \texttt{nav\_msgs/Odometry} message type, which includes:
-\begin{itemize}
-	\item Pose (position and orientation) in the odometry frame
-	\item Twist (linear and angular velocity) in the robot frame
-\end{itemize}
-
-\subsection{Gazebo Simulation Environment}
-
-\subsubsection{Simulation Platform}
-
-The system employs Gazebo Harmonic. It provides physics-based simulation including rigid body dynamics, collision detection, sensor simulation, and actuator models. The Open Dynamics Engine (ODE) serves as the underlying physics solver, computing contact forces, friction, and multi-body dynamics.
-
-\subsubsection{Maze World Environment}
-
-The primary test environment is a 30 m × 30 m indoor maze with multiple rooms, corridors, and loops. This environment is defined in \texttt{src/multi\_robot\_mapping/worlds/maze.sdf}.
-
-\subsection{System Deployment}
-
-\subsubsection{Build Process}
-
-The system is compiled using ROS2's colcon build tool. The complete build procedure is:
-
-\begin{verbatim}
-	cd ~/thesis_ws
-	colcon build 
-	source install/setup.bash
-\end{verbatim}
-
-\subsubsection{Launching the System}
-
-The complete system launches with a single command:
-
-\begin{verbatim}
-	ros2 launch multi_robot_mapping full_system.launch.py
-\end{verbatim}
-
-This default configuration starts Gazebo with the maze world, spawns a single TurtleBot3, bridges sensor topics to ROS2, launches both mapping and navigation nodes, and opens RViz for visualization.
-
-\subsubsection{System Monitoring}
-
-Several ROS2 command-line utilities enable runtime monitoring and debugging:
-
-\textbf{List active nodes:}
-\begin{verbatim}
-	ros2 node list
-\end{verbatim}
-
-This command displays all currently running ROS2 nodes, confirming that both the mapping and navigation nodes have started successfully.
-
-\textbf{List available topics:}
-\begin{verbatim}
-	ros2 topic list
-\end{verbatim}
-
-Displays all topics being published or subscribed to in the system. A properly functioning system should show sensor topics (\texttt{/scan}, \texttt{/odom}, \texttt{/imu}), map topics (\texttt{/global\_map}), and control topics (\texttt{/cmd\_vel}).
-
-\textbf{Measure topic publication rate:}
-\begin{verbatim}
-	ros2 topic hz /tb3_1/global_map
-\end{verbatim}
-
-Reports the actual publication frequency of the global map topic. 
-
-\textbf{View current robot pose:}
-\begin{verbatim}
-	ros2 topic echo /tb3_1/odom --once
-\end{verbatim}
-
-Prints a single message from the odometry topic, showing the robot's current position and orientation. The \texttt{--once} flag prevents continuous streaming of messages.
-
-\textbf{Node information:}
-\begin{verbatim}
-	ros2 node info /local_submap_generator_feature
-\end{verbatim}
-
-Displays detailed information about a specific node including its subscribed topics, published topics, services, and parameters. This is useful for verifying that all expected connections are established.
-
 \section{THEORY}
 
 \subsection{SLAM Problem Statement}
@@ -472,20 +167,22 @@ The robot's motion follows a discrete-time kinematic model with additive Gaussia
 \end{equation}
 
 where $f(\cdot)$ is the deterministic motion function and $\mathbf{Q}_t$ is the process noise covariance matrix. For a differential-drive robot, the motion function in the global frame is:
-\begin{equation}
-	f(\mathbf{x}_{t-1}, \mathbf{u}_t) = \begin{bmatrix}
-		x_{t-1} + v_x \Delta t \cos(\theta_{t-1}) - v_y \Delta t \sin(\theta_{t-1}) \\
-		y_{t-1} + v_x \Delta t \sin(\theta_{t-1}) + v_y \Delta t \cos(\theta_{t-1}) \\
-		\theta_{t-1} + \omega \Delta t
-	\end{bmatrix}
-\end{equation}
+
+\[
+f(\mathbf{x}_{t-1}, \mathbf{u}_t) 
+=
+\begin{bmatrix}
+	x_{t-1} + \delta_d \cos(\theta_{t-1} + \delta_\theta / 2) \\
+	y_{t-1}  + \delta_d \sin(\theta_{t-1} + \delta_\theta / 2) \\
+	\theta_{t-1} + \delta_\theta
+\end{bmatrix}
+\]
 
 The process noise covariance $\mathbf{Q}_t$ accounts for unmodeled dynamics, wheel slippage, and discretization errors. It is parameterized as a diagonal matrix:
 \begin{equation}
 	\mathbf{Q}_t = \begin{bmatrix}
-		\sigma_x^2 & 0 & 0 \\
-		0 & \sigma_y^2 & 0 \\
-		0 & 0 & \sigma_\theta^2
+		\sigma_d^2 & 0 \\
+		0 & \sigma_\theta^2\\
 	\end{bmatrix}
 \end{equation}
 
@@ -569,7 +266,7 @@ where:
 	\item $\mathbf{V} \in \mathbb{R}^{2 \times 2}$: orthogonal matrix (right singular vectors)
 \end{itemize}
 
-\subsection{Compute Optimal Rotation}
+\subparagraph{Compute Optimal Rotation}
 
 Calculate the determinant to check for reflections:
 \begin{equation}
@@ -588,7 +285,7 @@ Compute the optimal rotation:
 
 \textit{Note: If $d = +1$, then $\mathbf{D} = \mathbf{I}$ and $\mathbf{R} = \mathbf{V}\mathbf{U}^T$.}
 
-\subsection{Compute Optimal Translation}
+\subparagraph{Compute Optimal Translation}
 
 Using the centroids and optimal rotation:
 \begin{equation}
@@ -596,67 +293,6 @@ Using the centroids and optimal rotation:
 \end{equation}
 
 
-
-\subsection{Convex Hull Computation: QuickHull Algorithm}
-
-
-Given a finite set of points $\mathcal{P} = \{p_1, p_2, \ldots, p_n\}$ in Euclidean space $\mathbb{R}^d$, the \textbf{convex hull} is to find the smallest convex set $\mathcal{H} \subseteq \mathbb{R}^d$ that contains all points in $\mathcal{P}$.
-
-QuickHull~\cite{barber1996quickhull} follows a divide-and-conquer algorithm. 
-For a 2D point set $\mathcal{P}$, the algorithm starts 
-by finding the two most extreme points using the $x$ values ($p_{\min}$ and 
-$p_{\max}$). These points are guaranteed to be on the convex hull boundary.
-
-\paragraph{Point Classification}
-The line segment $\overline{p_{\min}p_{\max}}$ divides the plane into two half-planes. For any point $p = (p_x, p_y) \in \mathcal{P}$, are partitioned into upper and lower sets using the signed distance to the line passing through $p_{\min}$ and $p_{\max}$ :
-
-\begin{equation}
-	d(p, p_{\min}, p_{\max}) = \frac{(p_{\max,y} - p_{\min,y})p_x - (p_{\max,x} - p_{\min,x})p_y + p_{\max,x}p_{\min,y} - p_{\max,y}p_{\min,x}}{\sqrt{(p_{\max,x} - p_{\min,x})^2 + (p_{\max,y} - p_{\min,y})^2}}
-\end{equation}
-
-
-\begin{align}
-	\mathcal{P}_{\text{upper}} &= \{p \in \mathcal{P} : d(p, p_{\min}, p_{\max}) > 0\} \\
-	\mathcal{P}_{\text{lower}} &= \{p \in \mathcal{P} : d(p, p_{\min}, p_{\max}) < 0\}
-\end{align}
-
-Points with $d = 0$ lie on the line and can be discarded from further consideration.
-
-\paragraph{Complete Algorithm}
-The complete convex hull is obtained by:
-
-\begin{equation}
-	\mathcal{H} = \{p_{\min}\} \cup \text{FindHull}(\mathcal{P}_{\text{upper}}, p_{\min}, p_{\max}) \cup \{p_{\max}\} \cup \text{FindHull}(\mathcal{P}_{\text{lower}}, p_{\max}, p_{\min})
-\end{equation}
-
-
-\subparagraph{Geometric Operations}
-
-\paragraph{Distance to Line Segment}
-For numerical stability, the \textbf{perpendicular distance} from point $p$ to the line through $A$ and $B$ is computed using the cross product:
-
-\begin{equation}
-	d(p, A, B) = \frac{|(B - A) \times (p - A)|}{\|B - A\|}
-\end{equation}
-
-
-\begin{equation}
-	d_{\text{signed}}(p, A, B) = \frac{(B - A) \times (p - A)}{\|B - A\|}
-\end{equation}
-
-where $d_{\text{signed}} > 0$ indicates $p$ is to the left of directed segment $\overrightarrow{AB}$.
-
-\paragraph{Triangle Containment Test}
-A point $p$ is inside triangle $\triangle ABC$ if and only if it is on the same side of all three edges. Using signed distances:
-
-\begin{equation}
-	p \in \triangle ABC \iff 
-	\begin{cases}
-		d_{\text{signed}}(p, A, B) \cdot d_{\text{signed}}(C, A, B) \geq 0 \\
-		d_{\text{signed}}(p, B, C) \cdot d_{\text{signed}}(A, B, C) \geq 0 \\
-		d_{\text{signed}}(p, C, A) \cdot d_{\text{signed}}(B, C, A) \geq 0
-	\end{cases}
-\end{equation}
 
 \section{Feature extraction}
 
@@ -891,7 +527,7 @@ The unique intersection point is calculated via the matrix inverse:
 
 Feature uncertainty is modeled using two main sources: sensor noise in the raw measurements and robot‑pose uncertainty when landmarks are initialized in the map frame. For the SVD-based submap alignment, additional error sources include feature correspondence outliers, degenerate wall geometry (parallel walls providing weak rotational constraint), and the small-angle linearization used in covariance propagation. The accuracy of the resulting covariance depends on which of these errors are explicitly modeled. While Monte Carlo methods can capture more effects, they are too expensive for real‑time use. Instead, we use a Gauss–Newton/Hessian approach: form the Jacobian‑based Hessian (equivalently the Fisher Information under Gaussian noise) and approximate the covariance as its inverse.
 
-\subsubsection{Wall Uncertainity}
+\subsection{Wall Uncertainity}
 
 \subparagraph{Hessian Normal Form Parameterization}
 A wall in a 2D plane is represented in Hessian normal form by the parameter vector $\mathbf{\theta} = [\rho, \alpha]^\top$. The equation of the line is defined as:
@@ -944,7 +580,7 @@ The covariance matrix $\mathbf{C}_{\text{wall}}$ is the inverse of the FIM scale
 To prevent numerical instability and keep the covariance positive definite in degenerate geometries, the eigenvalues of $\mathbf{A}$ and $\mathbf{C}_{\text{wall}}$ are clamped to a minimum threshold $\lambda_{\text{min}}$.
 
 
-\subsubsection{Corner Uncertainity}
+\subsection{Corner Uncertainity}
 
 While wall segments are represented by their polar parameters, corner landmarks are defined by their Cartesian coordinates $(x_c, y_c)$. In this system, a corner is treated as a derived feature resulting from the intersection of two primary wall landmarks. This section details the propagation of uncertainty from the wall parameter space to the Cartesian corner space.
 
@@ -993,7 +629,7 @@ To maintain the physical validity of the result, we enforce symmetry on the resu
 
 The uncertainty of the Iterative Closest Point (ICP) registration is estimated using a closed-form approach derived from the method proposed by Censi. This approach relates the pose covariance to the geometric structure of the environment and the sensor's measurement noise. The fundamental insight is that the covariance of the estimated transformation $\mathbf{x}$ is inversely proportional to the Hessian matrix (or Fisher Information Matrix) of the least-squares objective function.
 
-\subsection{Problem Formulation}
+\subparagraph{Problem Formulation}
 Given a source point cloud $\mathcal{S} = \{\mathbf{p}_1, \dots, \mathbf{p}_n\}$ and a target map $\mathcal{T}$, the ICP algorithm finds the optimal 2D pose $\mathbf{x} = [t_x, t_y, \theta]^\top$ that minimizes the following error metric:
 
 \begin{equation}
@@ -1002,7 +638,7 @@ Given a source point cloud $\mathcal{S} = \{\mathbf{p}_1, \dots, \mathbf{p}_n\}$
 
 where $\mathbf{R}(\theta)$ is the 2D rotation matrix and $\mathbf{q}_i \in \mathcal{T}$ is the corresponding match for $\mathbf{p}_i$. We seek to derive the $3 \times 3$ covariance matrix $\mathbf{\Sigma}_{\mathbf{x}}$ characterizing the uncertainty of the solution.
 
-\subsection{Jacobian Derivation}
+\subparagraph{Jacobian Derivation}
 For each point correspondence $(\mathbf{p}_i, \mathbf{q}_i)$, we compute the Jacobian $\mathbf{J}_i$ by taking the partial derivatives of the transformed point $\mathbf{p}'_i$ with respect to the pose parameters. The transformation is defined as:
 
 \begin{equation}
@@ -1015,7 +651,7 @@ The resulting Jacobian matrix $\mathbf{J}_i \in \mathbb{R}^{2 \times 3}$ represe
 	\mathbf{J}_i = \frac{\partial \mathbf{p}'_i}{\partial \mathbf{x}} = \begin{bmatrix} 1 & 0 & -p_x \sin \theta - p_y \cos \theta \\ 0 & 1 & p_x \cos \theta - p_y \sin \theta \end{bmatrix}
 \end{equation}
 
-\subsection{Hessian Construction and Stabilization}
+\subparagraph{Hessian Construction and Stabilization}
 The system Hessian $\mathbf{H}$ is constructed using the Gauss-Newton approximation, representing the ``stiffness'' of the geometric match:
 
 \begin{equation}
@@ -1027,8 +663,8 @@ The system Hessian $\mathbf{H}$ is constructed using the Gauss-Newton approximat
 To ensure numerical stability in feature-poor environments, an eigendecomposition is performed: $\mathbf{H} = \mathbf{V} \mathbf{\Lambda} \mathbf{V}^\top$. The eigenvalues are clamped to a minimum threshold $\epsilon$ to prevent singularities in the inversion process:
 
 
-\subsection{Covariance Calculation}
-The final pose covariance is determined by scaling the inverse of the stabilized Hessian by the LiDAR measurement noise variance $\sigma^2$:
+\subparagraph{Covariance Calculation}
+The final covariance is determined by scaling the inverse of the stabilized Hessian by the LiDAR measurement noise variance $\sigma^2$:
 
 \begin{equation}
 	\mathbf{\Sigma}_{\mathbf{x}} = \sigma^2 \mathbf{H}_{stable}^{-1} = \begin{bmatrix} \sigma_x^2 & \sigma_{xy} & \sigma_{x\theta} \\ \sigma_{xy} & \sigma_y^2 & \sigma_{y\theta} \\ \sigma_{x\theta} & \sigma_{y\theta} & \sigma_{\theta}^2 \end{bmatrix}
@@ -1101,15 +737,13 @@ The next step involves extracting walls and corners from the raw lidar scans. Th
 
 \subsubsection{Wall Feature Extraction}
 
-\subparagraph{Preprocessing and Segmentation} First, the LiDAR points are filtered to remove invalid readings and outliers. The remaining points are grouped into segments based on a distance threshold. If the gap between two consecutive points exceeds $0.5\,\text{m}$, they are assigned to different clusters. This ensures that the algorithm does not attempt to fit a single line across two separate surfaces.
+\subparagraph{Preprocessing and Segmentation} First, the LiDAR points are filtered to remove invalid readings and outliers. The remaining points are grouped into segments based on a distance threshold. If the gap between two consecutive points exceeds $1\,\text{m}$, they are assigned to different clusters. This ensures that the algorithm does not attempt to fit a single line across two separate surfaces.
 
 \paragraph{Incremental Line Growing}
-The next step extracts lines using an incremental growing approach. New points are added one by one as long as the Total Least Squares (TLS) residual remains below $0.03\,\text{m}$. By using Singular Value Decomposition (SVD), the algorithm finds the best-fit line for the cluster of points. 
+The next step extracts lines using an incremental line fitting approach. New points are added one by one as long as the Total Least Squares (TLS) residual remains below $0.05\,\text{m}$. By using Singular Value Decomposition (SVD), the algorithm finds the best-fit line for the cluster of points. 
 
 \paragraph{Hessian Parameterization and Uncertainty}
-Every extracted wall is stored in Hessian normal form $(\rho, \alpha)$. This form is compact and prevents mathematical issues when lines are vertical. 
-
-The uncertainty of these parameters is calculated using the Fisher Information Matrix. This calculation accounts for the number of points and their distribution along the wall. 
+Every extracted wall is stored in Hessian normal form $(\rho, \alpha)$. This form is compact and prevents mathematical issues when lines are vertical. The uncertainty of these parameters is calculated using the Fisher Information Matrix and Cramer Rao's Lower Bound theorem. 
 
 \paragraph{Segment Merging}
 Finally, a merging step combines adjacent segments that were split due to sensor noise. If two line segments have similar angles and are physically close to each other, they are joined into a single wall. This creates a cleaner, more accurate map for the EKF update.
@@ -1117,27 +751,24 @@ Finally, a merging step combines adjacent segments that were split due to sensor
 \subsubsection{Corner Feature Extraction}
 
 \subparagraph{Detection Logic and Intersection}
-Corners are only extracted from \textit{adjacent} segments in the LiDAR scan order. This restriction prevents the algorithm from creating "ghost" corners between walls that are spatially close but structurally unrelated.
-
-A corner is detected if the acute angle between two adjacent walls exceeds a threshold of $45^\circ$. This criteria allows the system to identify L-shaped corners and T-junctions while ignoring small noise-induced fluctuations on flat walls. To find the exact corner position $\mathbf{c} = [x_c, y_c]^\top$, the system solves the following linear system representing the intersection of two lines in Hessian form:
+Corners are only extracted from \textit{adjacent} segments in the LiDAR scan order. A corner is detected if the acute angle between two adjacent walls exceeds a threshold of $45^\circ$. This criteria allows the system to identify L-shaped corners and T-junctions while ignoring small noise-induced fluctuations on flat walls. To find the exact corner position $\mathbf{c} = [x_c, y_c]^\top$, the system solves the following linear system representing the intersection of two lines in Hessian form:
 \begin{equation}
 	\begin{bmatrix} \cos\alpha_a & \sin\alpha_a \\ \cos\alpha_b & \sin\alpha_b \end{bmatrix} \begin{bmatrix} x_c \\ y_c \end{bmatrix} = \begin{bmatrix} \rho_a \\ \rho_b \end{bmatrix}
 \end{equation}
 
-The algorithm checks the determinant of the matrix $\mathbf{A}$ to avoid singularity.
 
-\subsection{Landmark Initialization and State Augmentation}
+\subsection{Landmark Initialization and State Update}
 
 When the data association module fails to match an observed feature to an existing landmark, the feature is initialized as a new landmark. 
 
 \subsubsection{State Vector Expansion}
-Features are transformed from the Robot Frame ($R$) to the Map Frame ($M$) using the current robot pose estimate $(x_r, y_r, \theta_r)$. 
+Features are transformed from the Robot Frame ($R$) to the Map Frame ($M$) using the current robot pose estimate $(x_r, y_r, \theta_r)$ and are added to the state vector.
 
 \subparagraph{Wall Transformation}
 Given a robot pose $\mathbf{x}_r = [x_r, y_r, \theta_r]^\top$ and a line landmark in the robot frame $L_r = (\rho_r, \alpha_r)$, the corresponding parameters in the map frame $L_m = (\rho_m, \alpha_m)$ are derived as:
 
 \begin{align}
-	\alpha_m &= \text{arctan2}(\alpha_r + \theta_r) \\
+	\alpha_m &= \text{normalize}(\alpha_r + \theta_r) \\
 	\rho_m   &= \rho_r + x_r \cos(\alpha_m) + y_r \sin(\alpha_m)
 \end{align}
 
@@ -1177,7 +808,64 @@ where $\mathbf{S}$ is the innovation covariance and H is a sparse jacobian matri
 \end{equation}
 We apply a \textbf{$\chi^2$ gate} at the 95\% confidence level ($D_M^2 < 5.99$). This allows the system to be flexible when landmark uncertainty is high (e.g., during initialization) but strict when the map is well-established.
 
+\subsubsection{Observation Model}
 
+\subparagraph{Wall observation}
+
+Given the robot pose in the map frame $\mathbf{x}_r = [x_r, y_r, \theta_r]^T$ and wall parameters in the map frame $\mathbf{m} = [\rho_m, \alpha_m]^T$, the predicted observation in the robot's local frame is:
+
+\begin{equation}
+	h(\mathbf{x}, \mathbf{m}) =
+	\begin{bmatrix}
+		\hat{\rho}_r \\
+		\hat{\alpha}_r
+	\end{bmatrix}
+	=
+	\begin{bmatrix}
+		\rho_m - (x_r \cos\alpha_m + y_r \sin\alpha_m) \\
+		\mathrm{normalize\_angle}(\alpha_m - \theta_r)
+	\end{bmatrix}
+\end{equation}
+
+\subparagraph{Observation Jacobian for Wall Landmarks}
+
+The Jacobian for a wall landmark measurement is sparse. For a landmark at state index $i$ (corresponding to $[\rho_m, \alpha_m]$), the nonzero terms are:
+\begin{equation}
+	\mathbf{H}_{wall} =
+	\begin{bmatrix}
+		-\cos\alpha_m & -\sin\alpha_m & 0 & \cdots & 1 & x_r\sin\alpha_m - y_r\cos\alpha_m & \cdots \\
+		0 & 0 & -1 & \cdots & 0 & 1 & \cdots
+	\end{bmatrix}
+\end{equation}
+The first three columns correspond to $[x_r, y_r, \theta_r]$, and columns $i, i+1$ correspond to $[\rho_m, \alpha_m]$.
+
+\subparagraph{Corner observation}
+
+Corner landmarks are stored in the map frame as:
+\begin{equation}
+	\mathbf{m}_c = \begin{bmatrix} x_m \\ y_m \end{bmatrix}
+\end{equation}
+
+Given the robot pose $\mathbf{x}_r$ and corner landmark $\mathbf{m}_c$, the predicted observation in the robot frame is:
+\begin{align}
+	\Delta x &= x_m - x_r \\
+	\Delta y &= y_m - y_r \\
+	x_r &= \cos\theta_r\,\Delta x + \sin\theta_r\,\Delta y \\
+	y_r &= -\sin\theta_r\,\Delta x + \cos\theta_r\,\Delta y
+\end{align}
+
+\subparagraph{Observation Jacobian for Corner Landmarks}
+
+Let $c = \cos\theta_r$, $s = \sin\theta_r$.
+
+For a corner landmark at state index $j$ (corresponding to $[x_m, y_m]$), the sparse Jacobian is:
+\begin{equation}
+	\mathbf{H}_{corner} =
+	\begin{bmatrix}
+		-c & -s & -s\Delta x + c\Delta y & \cdots & c & s & \cdots \\
+		s & -c & -c\Delta x - s\Delta y & \cdots & -s & c & \cdots
+	\end{bmatrix}
+\end{equation}
 
 \subsubsection{Geometric Validation: The Gap Check}
 A unique challenge in SLAM is distinguishing between two parallel, collinear walls (such as walls on opposite sides of a doorway). Standard statistical gates may match these incorrectly. To prevent this, the system performs a segment overlap validation. 
@@ -1185,8 +873,6 @@ A unique challenge in SLAM is distinguishing between two parallel, collinear wal
 The observed wall's endpoints are projected onto the stored landmark’s tangent. If the gap between the existing wall's extent $[t_{\min}, t_{\max}]$ and the new observation exceeds $1$\,m, the match is rejected. This ensures that the EKF only merges wall segments that are physically continuous.
 
 
-
-\subsubsection{Nearest-Neighbor Selection}
 Finally, if multiple landmarks pass all gates for a single observation, the system selects the one with the lowest Mahalanobis distance and are marked as matched to prevent multiple matching with the same landmark. Observations that find no suitable match are passed to the initialization function to be added as new landmarks.
 
 
@@ -1194,7 +880,7 @@ Finally, if multiple landmarks pass all gates for a single observation, the syst
 
 The Extended Kalman Filter (EKF) serves as a model-based estimation technique for combining data from multiple sensors in nonlinear systems.[2,3] It characterizes the state as a random variable through a Gaussian distribution, which is defined by its mean and covariance matrix.[1] EKF estimation involves two main stages:
 
-1. Prediction: The algorithm computes the predicted state ($\hat{\mathbf{x}}_k^-$) through a nonlinear odometry function and calculates the expected state covariance ($\mathbf{P}_k^-$) by passing the state covariance through the system's linearized form. 
+1. Prediction: The algorithm computes the predicted state ($\hat{\mathbf{x}}_k^-$) through a nonlinear odometry function and calculates the expected state covariance ($\mathbf{P}_k^-$).
 
 2. Update: Upon receiving new sensor measurements, the algorithm applies the Kalman gain ($\mathbf{K}$) to refine both the state estimate ($\hat{\mathbf{x}}_k$) and its covariance ($\mathbf{P}_k$). 
 
@@ -1429,15 +1115,6 @@ is modeled by the process noise covariance matrix:
 \end{bmatrix}
 \]
 
-\paragraph{Process Noise Parameter Selection}
-
-\textbf{Design Decision:} The base process noise variances are set to:
-\begin{itemize}
-	\item $\sigma_d^2 = 0.01$ (distance noise coefficient)
-	\item $\sigma_\theta^2 = 0.02$ (rotation noise coefficient)
-\end{itemize}
-
-
 \subsubsection{Covariance Prediction}
 
 The predicted covariance matrix is computed as:
@@ -1577,8 +1254,6 @@ The conditioned covariance is reconstructed:
 	\mathbf{P}_{\text{clamped}} = \mathbf{V} \,\text{diag}(\lambda_1', \ldots, \lambda_n') \mathbf{V}^\top
 \end{equation}
 
-This conditioning pipeline is applied to $\mathbf{P}$ immediately after the prediction step and again after the Joseph form update.
-
 \subsection{Landmark Management and Map Representation}
 
 To maintain a consistent and computationally efficient map, the system implements a pruning mechanism to remove unreliable landmarks and a specialized storage structure for wall geometry.
@@ -1586,14 +1261,14 @@ To maintain a consistent and computationally efficient map, the system implement
 \subsubsection{Landmark Pruning and Maintenance}
 The EKF state is periodically cleaned to remove landmarks that are either spurious or no longer relevant. Two primary conditions trigger the removal of a landmark:
 \begin{itemize}
-	\item \textbf{Observation Timeout:} If a landmark is not re-observed within 25 consecutive scans, it is considered out of the sensor's range or an outlier and is removed.
+	\item \textbf{Observation Timeout:} If a landmark is not re-observed within 50 consecutive scans, it is considered out of the sensor's range or an outlier and is removed.
 	\item \textbf{Provisional Confirmation:} New landmarks must be confirmed by at least two independent observations. If a landmark remains unconfirmed for 10 scans, it is purged to prevent fleeting sensor noise from polluting the state vector.
 \end{itemize}
 
 When landmarks are removed, the system deletes the corresponding rows and columns from the covariance matrix $\mathbf{P}$ in reverse order. This prevents indexing errors and ensures the remaining state indices are correctly shifted.
 
 \subsubsection{The Feature Map and Arc-Length Parameterization}
-While the EKF tracks the probabilistic parameters $(\rho, \alpha)$, the \texttt{FeatureMap} module manages the physical extent of the landmarks. A significant challenge in feature-based SLAM is "endpoint drift," where updating a wall's angle causes its endpoints to become geometrically inconsistent with the new line equation.
+While the EKF tracks the probabilistic parameters $(\rho, \alpha)$, the \texttt{FeatureMap} module manages the physical extent of the landmarks. A significant challenge in feature-based SLAM is endpoint drift, where updating a wall's angle causes its endpoints to become geometrically inconsistent with the new line equation.
 
 To solve this, the map stores wall endpoints using \textbf{scalar arc-lengths} ($t_{\min}, t_{\max}$) along the wall's tangent vector $\hat{\boldsymbol{\tau}} = [-\sin\alpha, \cos\alpha]^\top$. A physical point on the wall is recovered using:
 \begin{equation}
@@ -1625,13 +1300,13 @@ The input to the registration pipeline is an $N \times 3$ point set $\mathcal{P}
 
 % --- Section: ICP Alignment ---
 \subsubsection{ICP Alignment Algorithm}
-The alignment of the current submap $\mathcal{S}$ to the global map $\mathcal{M}$ is performed using the Iterative Closest Point (ICP) algorithm with a point-to-point estimation objective. Given that the submap is initialized via the EKF pose, the transformation $\mathbf{T}$ starts from identity $\mathbf{I}$.
+The alignment of the current submap $\mathcal{S}$ to the global map $\mathcal{M}$ is performed using the Iterative Closest Point (ICP) algorithm with a point-to-point estimation objective. Since the submap is generated in the map frame same as the global map, the transformation $\mathbf{T}$ starts from identity $\mathbf{I}$.
 
-The optimization objective seeks to minimize the Euclidean distance between matched pairs:
+The optimization objective is to minimize the Euclidean distance between matched pairs:
 \begin{equation}
 	\mathbf{T}^* = \arg\min_{\mathbf{T}} \sum_{i=1}^{N_c} \| \mathbf{T}\mathbf{p}_i - \mathbf{q}_i \|^2
 \end{equation}
-where $\mathbf{q}_i$ is the nearest neighbor in $\mathcal{M}$ within a search radius of $\delta_{max} = 0.03\,\text{m}$.
+where $\mathbf{q}_i$ is the nearest neighbor in $\mathcal{M}$ within a search radius of $\delta_{max} = 0.05\,\text{m}$.  This radius is chosen to be slightly larger than the expected odometry drift over a submap, while remaining below the inter‑point spacing after voxel downsampling.
 
 \begin{algorithm}
 	\caption{Submap-to-Map ICP Registration}
@@ -1653,11 +1328,12 @@ where $\mathbf{q}_i$ is the nearest neighbor in $\mathcal{M}$ within a search ra
 \end{algorithm}
 
 % --- Section: Transformation Extraction ---
-\subsubsection{Transformation Extraction and Validation}
+\subsubsection{Transformation Extraction and Update step}
 The resulting homogeneous transformation matrix $\mathbf{T}$ is decomposed to extract the 2D correction $(\Delta x, \Delta y, \Delta \theta)$ for the EKF update:
 \begin{equation}
-	\Delta x = T_{1,4}, \quad \Delta y = T_{2,4}, \quad \Delta \theta = \operatorname{atan2}(T_{2,1}, T_{1,1})
+	\Delta x = T_{0,3}, \quad \Delta y = T_{1,3}, \quad \Delta \theta = \operatorname{atan2}(T_{1,0}, T_{0,0})
 \end{equation}
+ 
 
 \subsubsection{Quality Assurance and Fallback Strategy}
 Registration results are validated against two primary metrics to prevent map corruption:
@@ -1666,7 +1342,7 @@ Registration results are validated against two primary metrics to prevent map co
 	\item \textbf{RMSE}: Represents the root mean square error of correspondences. The alignment is rejected if $\text{RMSE} > 0.05\,\text{m}$.
 \end{itemize}
 
-In the event of rejection, the system employs a \textit{Fallback Strategy}, where the ICP correction is ignored, and the robot state is propagated solely via the EKF prediction. This ensures that transient sensor noise or feature-poor environments do not introduce discontinuities into the global map.
+In the event of rejection, the system employs a \textit{Fallback Strategy}, where the ICP correction is ignored, the submap points are directly added to the global map with no transformation. 
 
 \subsubsection{Submap Confidence Metrics}
 
@@ -1691,64 +1367,39 @@ where $\tau$ is a normalization constant. This formulation ensures that:
 
 This confidence metric is logged for each submap and can be used in post-processing evaluation to identify low-confidence regions requiring re-exploration.
 
-\subsection{Wall Endpoint Correction and Global Mapping}
+\subsection{Wall Landmark Transformation and Global Accumulation}
 
-\subsubsection{Motivation}
-After the ICP alignment phase corrects the submap pose, the semantic features—specifically the wall landmarks—must be updated to reflect the refined coordinate frame. This process ensures geometric consistency between the registered point cloud and the high-level landmarks stored in the \textit{FeatureMap}. By updating these endpoints, the system maintains a topologically accurate map that supports reliable long-term data association.
+To maintain consistency between the geometric point cloud and the semantic map, the code  updates wall landmarks following ICP pose correction. This process ensures that high-level features stay aligned with the registered sensor data. The transformation is applied to every wall landmark stored in the local \textit{FeatureMap} before it is integrated into the global map.
 
+After every ICP correction, the new endpoints of the wall in the submap is generated using the hessian parameters and scalar tangential lengths $(t_{min}, t_{max})$ and transformed using the transformation matrix.
 
-\subsubsection{Endpoint Correction Algorithm}
-When the ICP algorithm provides a rigid transformation consisting of a rotation matrix $\mathbf{R} \in SO(2)$ and a translation vector $\mathbf{t} \in \mathbb{R}^2$, the wall landmarks are updated through the following geometric pipeline.
-
-\subsubsection{Transformation and Re-parameterization}
-The reconstructed endpoints are transformed into the corrected global frame:
 \begin{equation}
-	\mathbf{p}' = \mathbf{R}\mathbf{p} + \mathbf{t}
+	\mathbf{p}' = \mathbf{R} \mathbf{p} + \mathbf{t}
 \end{equation}
 
-The corrected orientation $\alpha'$ is calculated by rotating the source normal by the ICP-derived heading change $\Delta\theta$. The updated perpendicular distance $\rho'$ is then computed by projecting the corrected segment centroid onto the new normal vector $\mathbf{\hat{n}}'$:
+
+\subparagraph{Hessian Parameter Recalculation}
+Following the transformation, the Hessian parameters are recomputed. The new orientation $\alpha'$ is derived from the ICP-corrected heading. The updated perpendicular distance $\rho'$ is determined by projecting the segment's centroid onto the new normal vector:
 \begin{equation}
-	\rho' = \left| \left( \frac{\mathbf{p}'_{start} + \mathbf{p}'_{end}}{2} \right) \cdot \mathbf{\hat{n}}' \right|
+	\rho' = | \text{centroid} \cdot \mathbf{\hat{n}}' |
 \end{equation}
-To maintain the uniqueness constraint $\rho \ge 0$, if the projection result is negative, the normal vector $\mathbf{\hat{n}}'$ is inverted and $\alpha'$ is shifted by $\pi$.
+To ensure a unique representation, the system enforces the constraint $\rho \ge 0$. If the projection yields a negative value, the normal vector is inverted and the angle $\alpha'$ is adjusted by $\pi$. Finally, the corrected tangential coordinates are calculated by projecting the transformed endpoints onto the new tangent vector $\mathbf{\hat{t}}'$.
 
-\subsubsection{Tangential Coordinate Projection}
-Finally, the endpoints are projected onto the corrected tangent vector $\mathbf{\hat{t}}'$ to establish the updated scalar extents:
-\begin{equation}
-	t'_{s} = \mathbf{p}'_{start} \cdot \mathbf{\hat{t}}', \quad t'_{e} = \mathbf{p}'_{end} \cdot \mathbf{\hat{t}}'
-\end{equation}
-The final extents are assigned such that $t'_{min} = \min(t'_s, t'_e)$ and $t'_{max} = \max(t'_s, t'_e)$.
+\subsection{Global Map Fusion}
+The corrected segments are merged into a global registry to build a continuous map of the environment. This fusion handles two specific scenarios:
 
+\begin{itemize}
+	\item \textbf{Initialization}: If a landmark ID is encountered for the first time, it is recorded in the global dictionary with its corrected parameters.
+	\item \textbf{Extension}: If the landmark already exists, the new endpoints are projected onto the existing wall's tangent. The global $t_{min}$ and $t_{max}$ are updated to the minimum and maximum of the combined observations, and then hessian parameters are updated.
+\end{itemize}
 
-
-\subsubsection{Global Wall Registry and Landmark Fusion}
-To facilitate incremental mapping, corrected landmarks are merged into a global registry. This allows the system to aggregate partial observations of the same wall into a single contiguous feature, as described in Algorithm~\ref{alg:wall_fusion}.
-
-\begin{algorithm}
-	\caption{Global Landmark Fusion and Extent Extension}
-	\label{alg:wall_fusion}
-	\begin{algorithmic}[1]
-		\Require Corrected wall landmark $W'$, Global Registry $\mathcal{G}$
-		\Ensure Updated Global Registry $\mathcal{G}$
-		\If{$W'_{id} \notin \mathcal{G}$}
-		\State $\mathcal{G}[W'_{id}] \gets \{ \rho', \alpha', t'_{min}, t'_{max} \}$ \Comment{Initialize new global landmark}
-		\Else
-		\State $W_{g} \gets \mathcal{G}[W'_{id}]$ \Comment{Retrieve existing landmark}
-		\State $\mathbf{\hat{t}}_{g} \gets [-\sin\alpha_g, \cos\alpha_g]^\top$
-		\State $p_{s} \gets \mathbf{p}'_{start} \cdot \mathbf{\hat{t}}_{g}$
-		\State $p_{e} \gets \mathbf{p}'_{end} \cdot \mathbf{\hat{t}}_{g}$
-		\State $W_{g}.t_{min} \gets \min(W_{g}.t_{min}, p_{s}, p_{e})$ \Comment{Expand observed boundaries}
-		\State $W_{g}.t_{max} \gets \max(W_{g}.t_{max}, p_{s}, p_{e})$
-		\EndIf
-	\end{algorithmic}
-\end{algorithm}
-
+This strategy allows walls to grow incrementally as the robot observes new sections of a structure.
 
 \section{NAVIGATION MODULE}
 
 Autonomous navigation is a fundamental problem in mobile robotics that involves planning a path from a starting position to a goal while avoiding obstacles. It can be divided into three main components: Perception, planning and control.
 
-\paragraph{Perception Layer:} The perception layer processes the point cloud map (generated by SLAM) to identify frontiers - boundaries between explored free space and unknown regions. This component:
+\paragraph{Perception Layer:} The perception layer processes the point cloud map (generated by SLAM) to identify frontiers at the boundary between explored free space and unknown regions.
 
 \paragraph{Planning Layer:} The planning layer computes a collision-free, near-optimal path from the robot's current position to the selected frontier goal, using the RRT* (Rapidly-exploring Random Tree Star) algorithm.
 
@@ -1809,14 +1460,7 @@ The map callback function implements an event-driven architecture where each map
 
 \paragraph{Mathematical Formulation}
 
-Traditional frontier detection operates on 2D occupancy grids, identifying cells where free and unknown regions meet. Instead of grid-based edge detection, we leverage the geometric properties of the point cloud based explored region. The convex hull for the given point cloud forms a polygon enclosing all the points within the boundary. 
-
-The implementation utilizes the QuickHull algorithm~\cite{barber1996quickhull} via SciPy's \texttt{ConvexHull} function. The \texttt{scipy.spatial.ConvexHull} object provides the following attributes:
-\begin{itemize}[noitemsep]
-	\item \textbf{vertices}: Indices of hull vertices ordered counterclockwise in 2D
-	\item \textbf{simplices}: Edge connectivity matrix
-	\item \textbf{volume}: In 2D, this represents the enclosed area
-\end{itemize}
+Traditional frontier detection operates on 2D occupancy grids, identifying cells where free and unknown regions meet. Instead of grid-based edge detection, we leverage the geometric properties of the point cloud based explored region. The convex hull for the given point cloud forms a polygon enclosing all the points within the boundary. The implementation utilizes the QuickHull algorithm~\cite{barber1996quickhull} via SciPy's \texttt{ConvexHull} function.
 
 \subsubsection{Step 3: Safety Margin Application}
 
@@ -2403,6 +2047,311 @@ The complete algorithm runs in each control cycle as shown in Algorithm~\ref{alg
 	\end{algorithmic}
 \end{algorithm}
 
+\section{System Overview}
+
+This thesis presents an autonomous indoor mapping system that integrates real-time feature-based SLAM with ICP based submap stitching. The system uses an Extended Kalman Filter (EKF) as the state estimator, fusing wheel odometry with geometric landmark observations to maintain a joint estimate of robot pose and map. A separate navigation module provides frontier-based exploration with RRT* path planning and Pure Pursuit path tracking, enabling the robot to explore unknown environments autonomously. The system is implemented in Python using ROS 2 Jazzy as the middleware framework, with the TurtleBot3 Waffle Pi as the robot platform and Gazebo Harmonic for simulation.
+
+\subsection{System Architecture}
+
+The complete system architecture consists of three primary modules: the Mapping Module, the Navigation Module, and the Launch files, all operating within the ROS2 Jazzy framework.
+
+\subparagraph{High-Level Architecture}
+
+The system operates through a hierarchical data flow starting from simulated sensors in Gazebo, processing through the ROS 2 middleware, performing SLAM and navigation computations, and sending the velocity commands back to the robot actuators. 
+
+The Gazebo simulation environment uses two primary sensor:
+\begin{itemize}
+	\item \textbf{LiDAR}: 360° laser scanner operating at 10 Hz providing range measurements
+	\item \textbf{Odometry}: Wheel encoder-based position estimates at 50 Hz
+	
+\end{itemize}
+
+
+\subsubsection{Mapping Module Architecture}
+
+The Mapping Module represents the core of the SLAM pipeline, encapsulated within the \texttt{local\_submap\_generator\_feature} node. This architectural component executes a sequential three-stage operation for every LiDAR scan:
+
+\begin{enumerate}
+	\item \textbf{Feature Extraction:} Raw scan data is processed by the \texttt{LandmarkFeatureExtractor}. Geometric landmarks are identified using an incremental line-growing algorithm. Collinear segments are then merged to reduce oversegmentation due to sensor noise. Validated segments are transformed into the Hessian normal form $(\rho, \alpha)$, with associated uncertainties. Furthermore, corner landmarks are localized at the intersection of adjacent segment pairs, with their Cartesian covariances determined via analytical error propagation.
+	
+	\item \textbf{Extended Kalman Filter (EKF) SLAM:} The \texttt{LandmarkEKFSLAM} class manages the joint state vector, comprising the robot pose and the global landmark map. The filter cycle consists of:
+	\begin{itemize}
+		\item \textbf{Prediction:} Robot state prediction using odometry data.
+		\item \textbf{Data Association:} A matching phase to link observations to the state vector.
+		\item \textbf{Correction:} An EKF update step for each matched feature. 
+	\end{itemize}
+	
+	\item \textbf{Submap Integration and Drift Correction:} At an interval of 50 scans, a point cloud based submap is generated using features is transferred to the \texttt{SubmapStitcher}. This module performs voxel-downsampling and aligns the local submap against the global map using ICP. The resulting drift correction (pose adjustment) is fed back into the EKF to maintain global consistency.
+\end{enumerate}
+
+\subsubsection{Navigation Module Architecture}
+
+The Navigation Module implements a finite state machine for autonomous exploration centered around the \texttt{simple\_navigation} node. This node orchestrates three sequential operations:
+
+\textbf{Frontier Detection:} The system analyzes the point cloud map to generate a convex hull boundary between the explored and unexplored regions. Raw frontier points are placed and clustered using DBSCAN to group nearby points into discrete exploration candidates. Each cluster is evaluated based on multiple paramaters to select the most promising exploration target.
+
+\textbf{Path Planning:} Once a frontier goal is selected, the RRT* (Rapidly-exploring Random Tree Star) algorithm computes a collision-free path through the point cloud map.
+
+\textbf{Path Tracking and Control:} The Pure Pursuit controller tracks the planned path by computing a target point ahead of the robot based on a lookahead distance. Linear and angular velocities are computed to drive the robot toward this target point, with additional reactive obstacle avoidance logic that reduces velocity or halts when obstacles are detected within safety thresholds.
+
+
+\subsection{Hardware Requirements}
+
+The system has been tested on the configurations listed in Table~\ref{tab:hardware}.
+
+\begin{table}[h]
+	\centering
+	\caption{Hardware Specifications Used in This Thesis}
+	\label{tab:hardware}
+	\begin{tabular}{|l|l|}
+		\hline
+		\textbf{Component} & \textbf{Specification} \\ \hline
+		CPU & Intel Core i7-10750H @ 2.60GHz (6 cores, 12 threads) \\ \hline
+		RAM & 8 GB \\ \hline
+		GPU & NVIDIA GeForce GTX 1660 Ti (6 GB VRAM, CUDA 12.0) \\ \hline
+		Storage & 1 TB SSD \\ \hline
+	\end{tabular}
+\end{table}
+
+
+
+\subsection{ROS2 Software Architecture}
+
+\subsubsection{System Nodes}
+
+\paragraph{Mapping Node: local\_submap\_generator\_feature}
+
+
+The mapping node implements the complete SLAM pipeline described in previous chapters. This node is responsible for feature extraction, feature association, fusing sensor data and maintaining the point cloud map.
+
+\textbf{Subscribed Topics:}
+\begin{itemize}
+	\item \texttt{/\{robot\}/scan}: 360° laser scan measurements from the LiDAR sensor, containing range data at 1° angular resolution
+	\item \texttt{/\{robot\}/odom}: Wheel encoder-based pose estimates including position, orientation, and covariance information
+	
+\end{itemize}
+
+\textbf{Published Topics:}
+\begin{itemize}
+	\item \texttt{/\{robot\}/global\_map}: Accumulated point cloud map containing all integrated submaps.
+	\item \texttt{/\{robot\}/ekf\_pose}: The globally corrected robot pose estimated by the Extended Kalman Filter.
+	\item \texttt{/\{robot\}/scan\_features}: Marker arrays representing the extracted wall and corner landmarks.
+	\item \texttt{/\{robot\}/current\_submap}: Accumulated point cloud per submap from last 50 scans.
+	\item \texttt{/tf}: Transform broadcast from the \texttt{map} frame to the \texttt{odom} frame.
+\end{itemize}
+
+
+\paragraph{Navigation Node: simple\_navigation}
+
+The navigation node implements the autonomous exploration finite state machine. Operating within the \texttt{navigation} package, this node queries the global map, detects frontiers, plans collision-free paths, and executes motion control.
+
+\textbf{Subscribed Topics:}
+\begin{itemize}
+	\item \texttt{/\{robot\}/global\_map} (sensor\_msgs/PointCloud2): Current accumulated map for frontier detection and collision checking during path planning
+	\item \texttt{/\{robot\}/scan} (sensor\_msgs/LaserScan, 10 Hz): Real-time laser scan for reactive obstacle avoidance layer
+\end{itemize}
+
+\textbf{Published Topics:}
+\begin{itemize}
+	\item \texttt{/\{robot\}/cmd\_vel}: Velocity commands specifying linear velocity in the forward direction and angular velocity about the vertical axis
+	\item \texttt{/\{robot\}/planned\_path}: Current RRT* trajectory visualized as a sequence of waypoints
+	\item \texttt{/\{robot\}/frontier\_markers}: Visualization of detected frontier clusters for debugging and monitoring
+	\item \texttt{/\{robot\}/hull\_boundary}: Visualization of the convex hull of the explored area.
+\end{itemize}
+
+\subsubsection{Quality of Service Profiles}
+
+ROS2's Quality of Service (QoS) is a set of policies that define the communication protocol between nodes. The system employs different QoS profiles for different topic types based on their requirements, as shown in Table~\ref{tab:qos_profiles}.
+
+\begin{table}[h]
+	\centering
+	\caption{ROS2 Topic Quality of Service Configurations}
+	\label{tab:qos_profiles}
+	\begin{tabular}{|l|l|p{7cm}|}
+		\hline
+		\textbf{Topic} & \textbf{QoS Policy} & \textbf{Rationale} \\ \hline
+		/scan & RELIABLE & Ensures all laser scans are received for accurate mapping; lost scans create gaps in the map \\ \hline
+		/odom & RELIABLE & Critical for localization; missing odometry measurements cause EKF divergence \\ \hline
+		/cmd\_vel & RELIABLE & Ensures motion commands are delivered; lost commands could cause navigation failures \\ \hline
+		/global\_map & RELIABLE & Large messages that must be received completely for navigation to function \\ \hline
+	\end{tabular}
+\end{table}
+
+
+\subsubsection{Simulation Module}
+
+The simulation infrastructure is managed through the \texttt{full\_system.launch.py} launch file with configurable parameters.
+
+\paragraph{Configurable Options:}
+\begin{itemize}
+	\item \texttt{world}: maze 
+	\item \texttt{enable\_navigation}: true | false (default: true)
+	\item \texttt{use\_rviz}: true | false (default: true)
+\end{itemize}
+
+
+\subsubsection{Configuration Files}
+
+\paragraph{Gazebo-ROS2 Bridge Configuration}
+
+The \texttt{config/tb3\_bridge.yaml} file specifies topic mappings between Gazebo's internal topic namespace and ROS2. Each sensor requires an explicit mapping entry due to Gazebo's hierarchical topic structure.
+
+Example configuration:
+\begin{verbatim}
+	- ros_topic_name: "/tb3_1/scan"
+	gz_topic_name: "/world/maze_world/model/tb3_1/link/base_scan/
+	sensor/lidar/scan"
+	ros_type_name: "sensor_msgs/msg/LaserScan"
+	gz_type_name: "gz.msgs.LaserScan"
+\end{verbatim}
+
+This mapping translates Gazebo's deeply nested topic path (including world name, model name, link name, and sensor name) to a simplified ROS2 topic that nodes can easily subscribe to. Similar mappings exist for odometry and command velocity topics.
+
+\subsection{TurtleBot3 Robot Platform}
+
+\subsubsection{Platform Overview}
+
+The TurtleBot3 Waffle Pi serves as the robot platform for this research. This open-source mobile robot, developed by ROBOTIS, represents the third generation of the TurtleBot educational platform and specifically targets SLAM research applications. The complete TurtleBot3 codebase used in this thesis was sourced directly from the official ROBOTIS GitHub repository. This includes the robot model files, sensor and driver configurations, and the baseline software stack required to run TurtleBot3 in ROS 2.
+
+\subsubsection{Physical Specifications}
+
+Table~\ref{tab:robot_specs} summarizes the key physical characteristics of the platform.
+
+\begin{table}[h]
+	\centering
+	\caption{TurtleBot3 Waffle Pi Physical Specifications}
+	\label{tab:robot_specs}
+	\begin{tabular}{|l|l|p{6cm}|}
+		\hline
+		\textbf{Parameter} & \textbf{Value} & \textbf{Notes} \\ \hline
+		Length & 281 mm & Front to back dimension \\ \hline
+		Width & 306 mm & Side to side including wheels \\ \hline
+		Height & 141 mm & Ground to top of LiDAR mounting \\ \hline
+		Total Mass & 1.8 kg & Including battery and sensors \\ \hline
+		Wheelbase & 287 mm & Distance between drive wheels \\ \hline
+		Wheel Diameter & 66 mm & Rubber tire contact \\ \hline
+		Ground Clearance & 10 mm & Clearance for base plate \\ \hline
+	\end{tabular}
+\end{table}
+
+\subsubsection{Sensors}
+
+\paragraph{LiDAR Sensor}
+
+The robot is equipped with a Hitachi-LG Data Storage HLS-LFCD-LDS laser distance sensor mounted atop the chassis.
+
+Key specifications include:
+\begin{itemize}
+	\item Update rate: 10 Hz (one complete rotation per 100 ms)
+	\item Angular coverage: 360° in the horizontal plane
+	\item Angular resolution: 1.0° (360 samples per scan)
+	\item Minimum range: 0.12 m (objects closer than 12 cm are not detected)
+	\item Maximum range: 5 m (sufficient for indoor navigation)
+	\item Range resolution: 0.015 m (1.5 cm measurement quantization)
+	\item Accuracy: ±1 cm (one standard deviation under nominal conditions)
+\end{itemize}
+
+In the Gazebo simulation, the LiDAR is modeled with additive Gaussian noise having zero mean and 0.01 m standard deviation on range measurements. The 1 cm noise level is consistent with the manufacturer's specifications for this sensor.
+
+The sensor is positioned at [-0.064, 0, 0.121] meters relative to the robot's base frame, matching the physical mounting location on the real TurtleBot3. This offset is accounted for in coordinate transformations when integrating scan data into the map.
+
+The LiDAR publishes data to the \texttt{/\{robot\}/scan} topic using the \texttt{sensor\_msgs/LaserScan} message type. Each message contains:
+\begin{itemize}
+	\item 360 range measurements in meters (one per degree)
+	\item Timestamp for temporal synchronization with other sensors
+	\item Frame identifier linking to the TF tree
+\end{itemize}
+
+\paragraph{Wheel Odometry}
+
+Odometry information is generated by the Gazebo differential drive plugin, which simulates wheel encoders and computes pose estimates through forward kinematics. The plugin integrates wheel velocities to produce position and orientation estimates in the odometry frame.
+
+Odometry characteristics:
+\begin{itemize}
+	\item Update rate: 50 Hz
+	\item Position noise: $\sigma = 0.071$ m (7.1 cm standard deviation)
+	\item Orientation noise: $\sigma = 0.141$ rad (8.1° standard deviation)
+\end{itemize}
+
+
+Odometry is published to \texttt{/\{robot\}/odom} using the \texttt{nav\_msgs/Odometry} message type, which includes:
+\begin{itemize}
+	\item Pose (position and orientation) in the odometry frame
+	\item Twist (linear and angular velocity) in the robot frame
+\end{itemize}
+
+\subsection{Gazebo Simulation Environment}
+
+\subsubsection{Simulation Platform}
+
+The system employs Gazebo Harmonic. It provides physics-based simulation including rigid body dynamics, collision detection, sensor simulation, and actuator models. The Open Dynamics Engine (ODE) serves as the underlying physics solver, computing contact forces, friction, and multi-body dynamics.
+
+\subsubsection{Maze World Environment}
+
+The primary test environment is a 30 m × 30 m indoor maze with multiple rooms, corridors, and loops. This environment is defined in \texttt{src/multi\_robot\_mapping/worlds/maze.sdf}.
+
+\subsection{System Deployment}
+
+\subsubsection{Build Process}
+
+The system is compiled using ROS2's colcon build tool. The complete build procedure is:
+
+\begin{verbatim}
+	cd ~/thesis_ws
+	colcon build 
+	source install/setup.bash
+\end{verbatim}
+
+\subsubsection{Launching the System}
+
+The complete system launches with a single command:
+
+\begin{verbatim}
+	ros2 launch multi_robot_mapping full_system.launch.py
+\end{verbatim}
+
+This default configuration starts Gazebo with the maze world, spawns a single TurtleBot3, bridges sensor topics to ROS2, launches both mapping and navigation nodes, and opens RViz for visualization.
+
+\subsubsection{System Monitoring}
+
+Several ROS2 command-line utilities enable runtime monitoring and debugging:
+
+\textbf{List active nodes:}
+\begin{verbatim}
+	ros2 node list
+\end{verbatim}
+
+This command displays all currently running ROS2 nodes, confirming that both the mapping and navigation nodes have started successfully.
+
+\textbf{List available topics:}
+\begin{verbatim}
+	ros2 topic list
+\end{verbatim}
+
+Displays all topics being published or subscribed to in the system. A properly functioning system should show sensor topics (\texttt{/scan}, \texttt{/odom}, \texttt{/imu}), map topics (\texttt{/global\_map}), and control topics (\texttt{/cmd\_vel}).
+
+\textbf{Measure topic publication rate:}
+\begin{verbatim}
+	ros2 topic hz /tb3_1/global_map
+\end{verbatim}
+
+Reports the actual publication frequency of the global map topic. 
+
+\textbf{View current robot pose:}
+\begin{verbatim}
+	ros2 topic echo /tb3_1/odom --once
+\end{verbatim}
+
+Prints a single message from the odometry topic, showing the robot's current position and orientation. The \texttt{--once} flag prevents continuous streaming of messages.
+
+\textbf{Node information:}
+\begin{verbatim}
+	ros2 node info /local_submap_generator_feature
+\end{verbatim}
+
+Displays detailed information about a specific node including its subscribed topics, published topics, services, and parameters. This is useful for verifying that all expected connections are established.
+
+
 \section{SIMULATION}
 
 This section describes the experimental methodology for validating the feature-based EKF-SLAM system. While this work focuses on the theoretical framework and algorithmic design, the evaluation strategy is designed to assess localization accuracy, map consistency and computational performance under realistic operating conditions.
@@ -2497,7 +2446,7 @@ Figure~\ref{fig:system_architecture} shows the high-level architecture from sens
 
 The system's performance depends critically on proper parameter tuning. This section details all key parameters used in the algorithm.
 
-\subsection{Feature Extraction Parameters}
+\subsubsection{Feature Extraction Parameters}
 
 \begin{table}[htbp]
 	\centering
@@ -2521,7 +2470,7 @@ The system's performance depends critically on proper parameter tuning. This sec
 
 All design parameters are chosen conservatively to reduce the risk of missing true features. For ranges of 1–3.5 m, a 1° scan yields roughly 3.5–6 cm lateral spacing; thus a 5 cm grow\_residual\_threshold accommodates lidar noise and range quantization while still rejecting clear outliers. A 45° corner threshold avoids labeling gentle bends or noisy segments as corners, which is conservative but appropriate in the maze environment where corners are predominantly 90°. Minimum line length and minimum line points provide an additional gate to prevent over‑segmentation of a single wall into multiple short segments.
 
-\subsection{EKF-SLAM Parameters}
+\subsubsection{EKF-SLAM Parameters}
 
 \begin{table}[htbp]
 	\centering
@@ -2542,7 +2491,7 @@ All design parameters are chosen conservatively to reduce the risk of missing tr
 
 The chi-square gate threshold of 5.99 corresponds to the 95\% confidence level for a 2-DOF $\chi^2$ distribution, providing robust data association. Wall features additionally use geometric constraints: parallel walls must have angles within 20° and perpendicular distances within 0.5m for matching. The values are chosen a bit conservatively after trial and error method.
 
-\subsection{Submap Generation Parameters}
+\subsubsection{Submap Generation Parameters}
 
 \begin{table}[htbp]
 	\centering
@@ -2554,7 +2503,7 @@ The chi-square gate threshold of 5.99 corresponds to the 95\% confidence level f
 		\midrule
 		\texttt{scans\_per\_submap} & 50 & Balance between local consistency and global coverage \\
 		\texttt{voxel\_size} & 0.05 m & Downsampling resolution matching feature precision \\
-		\texttt{icp\_max\_corr\_dist} & 0.03 m & Max distance for point correspondences; limits matches to nearby points \\
+		\texttt{icp\_max\_corr\_dist} & 0.05 m & Max distance for point correspondences; limits matches to nearby points \\
 		\texttt{icp\_max\_iter} & 50 & Upper bound on ICP iterations before stopping \\
 		\texttt{icp\_min\_fitness} & 0.3 & Reject alignment if too few inliers match \\
 		\texttt{icp\_max\_rmse} & 0.05 m & Reject alignment if inlier error is too high \\		
@@ -2562,10 +2511,9 @@ The chi-square gate threshold of 5.99 corresponds to the 95\% confidence level f
 	\end{tabular}
 \end{table}
 
-Using 50 scans per submap balances local consistency against accumulated drift, it yields enough points to stabilize feature estimates while keeping each submap short enough that odometry error does not dominate. A 0.05 m voxel size provides effective downsampling to reduce memory and computation while preserving wall geometry; it also roughly matches typical scan spacing at common indoor ranges. The ICP minimum fitness threshold (0.3) is intentionally lenient so alignments are not rejected when overlap is limited, while still filtering out extremely poor matches
+Using 50 scans per submap balances local consistency against accumulated drift, it yields enough points to stabilize feature estimates while keeping each submap short enough that odometry error does not dominate. A 0.05 m voxel size provides effective downsampling to reduce memory and computation while preserving wall geometry. Odometry drift is estimated using ground truth and odom values and accordingly the ICP correspondence gate is set to 0.05 m. This threshold limits nearest-neighbor pairings to points that are plausibly overlapping, rejecting distant matches and reducing outlier correspondences during submap alignment. The ICP minimum fitness threshold is intentionally lenient so alignments are not rejected when overlap is limited, while still filtering out extremely poor matches.
 
-
-\subsection{Navigation and Exploration Parameters}
+\subsubsection{Navigation and Exploration Parameters}
 
 \begin{table}[htbp]
 	\centering
@@ -2612,36 +2560,32 @@ The navigation parameters were tuned through multiple iterations of trial-and-er
 \subsection{Qualitative Results}
 \label{sec:qualitative_results}
 
-\subsubsection{Feature Detection and Extraction}
+In this work, only a small section of the maze environment has been mapped, and all plots are generated from data collected within that mapped region. The autonomous navigation module is not yet production‑grade and does not reliably handle extreme or edge‑case configurations. Despite these limitations, the data gathered is sufficient to evaluate the feature‑based SLAM algorithm, which explicitly models observation uncertainty during feature matching and localization.
+\subparagraph{Raw Lidar scan and feature extraction}
 
 \begin{figure}[htbp]
 	\centering
-	\includegraphics[width=0.5\textwidth]{../thesis_ws/images/lidar_scan.png}
-	\caption{Feature extraction results showing detected wall segments (red lines) extracted from LiDAR scan data. The robot's coordinate frame is shown at the center, with line features fitted using RANSAC representing wall boundaries in the environment.}
+	\includegraphics[width=0.5\textwidth]{../thesis_ws/images/landmarks.png}
+	\caption{The figure illustrates how raw scan points are grouped into geometric landmarks.}
 	\label{fig:feature_detection}
 \end{figure}
 
-\subsubsection{Local Submap Visualization}
+The raw LiDAR scan is first split into segments wherever there is a gap between points. Each segment is then processed with incremental line fitting to extract wall candidates, shown as blue points. Intersections between adjacent wall segments form corners, shown as red points, as illustrated in Figure 4.
+
 
 \begin{figure}[htbp]
 	\centering
 	\includegraphics[width=0.5\textwidth]{../thesis_ws/images/local_submap.png}
-	\caption{Current local submap showing extracted wall features accumulated over multiple LiDAR scans. The colored line segments (yellow/orange) represent detected wall landmarks, with the robot coordinate frame at the center. Features are transformed using EKF pose estimates.}
+	\caption{Current local submap showing extracted features accumulated over multiple LiDAR scans.}
 	\label{fig:local_submap}
 \end{figure}
 
-\subsubsection{Global Map Construction}
+\subparagraph{Local Submap} 
 
-\begin{figure}[htbp]
-	\centering
-	% TODO: Add global map after full exploration
-	\caption{Final global map constructed through submap stitching after complete exploration of the maze. The map clearly shows walls, corridors, and obstacle boundaries.}
-	\label{fig:global_map}
-\end{figure}
+The local submap view shown in figure 5 depicts the submap built from a short window of recent scans, where each feature is rendered as a point cloud by interpolating points between its endpoints.
 
-\subsubsection{Convex Hull Boundary Detection}
-
-The convex hull represents the explored region boundary, used for frontier detection.
+\subparagraph{Global Map}
+The map shown in Figure 6 uses white point clouds to depict the final stitched global map. The blue boundary is the convex hull, which marks the frontier between explored and unexplored regions. Multiple frontiers are shown as red and orange spheres; the red sphere indicates the active frontier goal, which is rated using travel cost, information cost, and heading cost
 
 \begin{figure}[htbp]
 	\centering
@@ -2656,52 +2600,69 @@ The convex hull represents the explored region boundary, used for frontier detec
 
 \subsubsection{Comparison between Robot estimated Pose and Ground Truth}
 
+The EKF vs. ground‑truth plot shows close agreement over the full trajectory, indicating that the filter tracks the true motion well. A small, consistent offset appears in the middle segment, which is consistent with a feature‑sparse corridor: the robot can constrain its position perpendicular to the wall but remains uncertain along the wall direction. There is no catastrophic divergence, and overall the EKF remains stable relative to ground truth.
+
+\subparagraph{Abosulte Trajectory Error}
+Absolute Trajectory Error (ATE) measures the deviation between the estimated trajectory and ground truth. It is typically summarized using the root mean square error (RMSE), which provides a single scalar for overall trajectory accuracy; lower RMSE indicates closer agreement. For the collected data, the RMSE is 0.14 m, corresponding to an average positional error of about 14 cm between the EKF estimate and ground truth.
+
 \begin{figure}[htbp]
 	\centering
 	\includegraphics[width=0.75\textwidth]{../thesis_ws/images/ekf_vs_groundtruth.png}
-	\caption{Confidence value for each submap generated}
-	\label{fig:submap confidence}
+	\caption{Comparison between Ekf trajectory and actual ground truth from the simulation.}
+	\label{fig:ATE}
 \end{figure}
 
 \subsubsection{Uncertainity in robot Pose}
 \begin{figure}[htbp]
 	\centering
 	\includegraphics[width=0.75\textwidth]{../thesis_ws/images/uncertainity_in_robot_position.png}
-	\caption{Confidence value for each submap generated}
-	\label{fig:submap confidence}
+	\caption{EKF position covariance across submaps, showing variance in the x and y directions}
+	\label{fig:Variance}
 \end{figure}
-
+The uncertainty plot shown in figure$~$\ref{fig:Variance} shows the EKF’s positional variance in x and y direction across submaps. Periods where the variance is strongly anisotropic (one axis higher than the other) indicate directional ambiguity: the filter is well‑constrained perpendicular to the corridor wall direction but less certain along the corridor axis. This supports the earlier interpretation that the small mid‑segment offset arises from feature‑sparse corridor geometry, which provides limited constraints in the along‑wall direction.
 
 \subsubsection{Submap Confidence Evolution}
 
 \begin{figure}[htbp]
 	\centering
-	\includegraphics[width=0.75\textwidth]{../thesis_ws/images/submap_confidence.png}
+	\includegraphics[width=0.75\textwidth]{../thesis_ws/images/submap_confidence_2.png}
 	\caption{Confidence value for each submap generated}
-	\label{fig:submap confidence}
+	\label{fig:submap_confidence}
 \end{figure}
 
 The confidence metric is computed as:
 \begin{equation}
 	C(t) = 1 - \exp\left(-\frac{I_{\text{landmarks}}(t)}{\tau}\right)
 \end{equation}
-where $I_{\text{landmarks}}$ is the sum of landmark information (trace of inverse covariance) and $\tau = 10^6$ is a normalization constant.
+where $I_{\text{landmarks}}$ is the sum of landmark information (trace of inverse variance) and $\tau = 10^6$ is a normalization constant.
 
+The submap‑confidence plot in Figure~\ref{fig:submap_confidence} shows how the EKF confidence metric evolves across submaps. It begins near zero for the first submap, then rises quickly and stabilizes around 0.8–1.0 as more reliable landmarks are incorporated. The initial dip around submap 3 to 8 correspond to the long corridor section, which yields fewer informative features and lowers the summed information. Overall, the trend indicates that the estimator reaches and sustains high confidence once the environment becomes feature‑rich in all directions.
 
+\section{Conclusion and Future Works}
 
-\subsection{Limitations and Future Extensions}
+This thesis presents a comprehensive feature-based EKF-SLAM system for autonomous indoor exploration that addresses the fundamental challenge of probabilistic mapping and localization in GPS-denied environments. The work demonstrates rigorous uncertainty modeling, and using it for sensor fusion. It also presents a frontier based navigation algorithm for a point cloud based map using convex hull to differentiate between explored and unexplored reigon.
 
-\subsubsection{Current Limitations}
+Unlike many feature-based approaches that rely on heuristic covariance assignments, this system derives landmark uncertainties. Wall covariances are computed using the Fisher Information Matrix (Cramér-Rao Lower Bound). Corner covariances are propagated analytically through the line intersection geometry using the Jacobian of the transformation. 
 
-\begin{itemize}
-	\item \textbf{2D Planar Assumption:} System assumes flat floors and vertical walls. Fails on ramps, stairs, or tilted surfaces.
-	\item \textbf{Static Environment:} Moving obstacles (people, furniture) treated as spurious landmarks, pruned via timeout. No explicit dynamic object modeling.
-	\item \textbf{Geometric Features Only:} Relies on walls and corners. Fails in open spaces (e.g., atriums, parking lots) without structure.
-\end{itemize}
+Walls are represented using Hessian parameters $(\rho, \alpha)$ which provides a compact two-degree-of-freedom representation that is free from singularities encountered in slope-intercept forms. The parametric extent tracking $(t_{\text{min}}, t_{\text{max}})$ allows wall segments to grow dynamically as new observations arrive, preventing over segmentation while maintaining geometric consistency.
 
-\section{CONCLUSION}
+The submap stitching module employs point-to-point ICP alignment with uncertainty quantification. By extracting point correspondences and building the Fisher Information Matrix from the alignment Jacobian, the system produces a 3×3 pose correction covariance that captures the quality of the alignment. The navigation module introduces a grid-free frontier detection strategy that operates directly on the point cloud map. By computing the convex hull of observed free space and sampling along the buffered boundary, the system generates exploration targets without the discretization used in occupancy grid methods.
 
-This thesis presented a feature-based EKF-SLAM system for autonomous indoor exploration that addresses fundamental challenges in probabilistic mapping and localization. By integrating geometric feature extraction, rigorous uncertainty quantification, and drift-correcting submap alignment, the system produces both geometrically accurate and statistically consistent maps suitable for long-term autonomous navigation in structured indoor environments.
+\subparagraph{Future Work}
+
+In this work, there are a lot of areas which can be improved to obtain a more robust algorithm for feature based SLAM.
+
+One of them would be to improve the covariance estimates of the feature extracted and ICP based submap stiching by including more sources of error. Another improvement to the system, would be to find a better way to evaluate corresponding pairs for ICP than using nearest point within a threshold.
+
+The current 2D planar assumption limits applicability to environments with stairs, ramps, or multi-level structures. The current system can be extended to 3D mapping, extracting features in 3D space, and augmenting the EKF state to include pitch and roll. This would enable operation in parking garages, stairwells, and outdoor terrains.
+
+Real-world indoor spaces frequently contain moving objects such as people, doors, and furniture. Future work could incorporate dynamic object detection. Static landmarks could be distinguished from dynamic objects using consistency checks over multiple observations, allowing the EKF to maintain only persistent features while tracking dynamic obstacles separately for collision avoidance.
+
+While the EKF provides real-time estimates, it suffers from linearization errors and computational scaling with map size. Transitioning to a graph-based backend using pose graphs and factor graphs (e.g., GTSAM or g2o) would enable batch optimization of the full trajectory and all landmarks. Loop closure constraints could be added as factors, and the graph could be optimized periodically using Levenberg-Marquardt or Gauss-Newton methods. This would reduce accumulated drift and improve global consistency, especially for large-scale exploration.
+
+The current system relies on hand-tuned parameters for feature extraction, data association, and navigation. Future work could incorporate adaptive or learning-based parameter adjustment. Submap confidence metric can be used to determine the next frontier by reexploring sections with low confidence values.
+
+These future works collectively represent a roadmap toward a fully autonomous, robust, and scalable SLAM system capable of operating in diverse real-world environments.
 
 
 \begin{thebibliography}{9}
@@ -2836,189 +2797,6 @@ This thesis presented a feature-based EKF-SLAM system for autonomous indoor expl
 	
 	
 \end{thebibliography}
-
-\clearpage
-\thispagestyle{empty}
-\vspace*{\fill}
-\begin{center}
-	{\Huge \textbf{APPENDIX}}
-\end{center}
-\vspace*{\fill}
-\clearpage
-
-\appendix
-
-\section{Wall Landmark Update (Hessian Normal Form)}
-
-\subsection{Wall Representation}
-A wall (represented as an infinite line) in the map frame is parameterized using the Hessian Normal Form. This representation is preferred for its minimality and lack of singularities compared to slope-intercept forms. The wall is defined by the parameter set $\mathbf{m} = [\rho_m, \alpha_m]^T$:
-
-\begin{equation}
-	\rho_m = x \cos(\alpha_m) + y \sin(\alpha_m)
-\end{equation}
-
-Where:
-\begin{itemize}
-	\item $\rho_m \in [0, \infty)$: The perpendicular distance from the map origin to the line.
-	\item $\alpha_m \in [-\pi, \pi]$: The angle of the normal vector relative to the map's x-axis.
-\end{itemize}
-
-
-
-\subsection{Observation Model: Map Frame $\rightarrow$ Robot Frame}
-Given the robot pose in the map frame $\mathbf{x}_r = [x_r, y_r, \theta_r]^T$ and the wall parameters $\mathbf{m} = [\rho_m, \alpha_m]^T$, the predicted observation in the robot's local frame $\mathbf{h}(\mathbf{x})$ is derived as follows:
-
-\subsubsection{Local Wall Distance ($\rho_r$)}
-The perpendicular distance from the robot to the wall is the difference between the wall's absolute distance from the origin and the robot's own projection onto the wall's normal vector:
-
-\begin{equation}
-	\rho_r = \rho_m - (x_r \cos(\alpha_m) + y_r \sin(\alpha_m))
-\end{equation}
-
-\subsubsection{Local Wall Orientation ($\alpha_r$)}
-The wall's normal angle in the robot's local frame is calculated by rotating the global normal angle by the robot's current heading:
-
-\begin{equation}
-	\alpha_r = \text{atan2}(\sin(\alpha_m - \theta_r), \cos(\alpha_m - \theta_r))
-\end{equation}
-
-This formulation ensures the angular representation remains normalized within the $[-\pi, \pi]$ interval.
-
-\subsection{Complete Measurement Model}
-The non-linear observation model $h(\mathbf{x}, \mathbf{m})$ used for the measurement update (e.g., within an EKF or UKF framework) is summarized as:
-
-\begin{equation}
-	h(\mathbf{x}, \mathbf{m}) = \begin{bmatrix} 
-		\hat{\rho}_r \\ \hat{\alpha}_r 
-	\end{bmatrix} = \begin{bmatrix} 
-		\rho_m - (x_r \cos \alpha_m + y_r \sin \alpha_m) \\ 
-		\text{atan2}(\sin(\alpha_m - \theta_r), \cos(\alpha_m - \theta_r)) 
-	\end{bmatrix}
-\end{equation}
-
-\subsection{Observation Jacobian for Wall Landmarks}
-
-To linearize the observation model for use in an Extended Kalman Filter (EKF), we compute the Jacobian matrix $\mathbf{H}_{wall}$. This matrix represents the partial derivatives of the observation function $h(\mathbf{x}, \mathbf{m})$ with respect to the state vector $\mathbf{x}$. Assuming the state vector consists of the robot pose $[x_r, y_r, \theta_r]^T$ followed by $N$ wall landmarks, the Jacobian is defined as:
-
-\begin{equation}
-	\mathbf{H}_{wall} = \frac{\partial h_{wall}}{\partial \mathbf{x}} = 
-	\begin{bmatrix} 
-		\frac{\partial \rho_r}{\partial x_r} & \frac{\partial \rho_r}{\partial y_r} & \frac{\partial \rho_r}{\partial \theta_r} & \cdots & \frac{\partial \rho_r}{\partial \rho_m} & \frac{\partial \rho_r}{\partial \alpha_m} & \cdots \\ 
-		\frac{\partial \alpha_r}{\partial x_r} & \frac{\partial \alpha_r}{\partial y_r} & \frac{\partial \alpha_r}{\partial \theta_r} & \cdots & \frac{\partial \alpha_r}{\partial \rho_m} & \frac{\partial \alpha_r}{\partial \alpha_m} & \cdots 
-	\end{bmatrix}
-\end{equation}
-
-\subsubsection{Resulting Sparse Jacobian Structure}
-The complete Jacobian for a single wall landmark measurement at index $i$ in the map state is a sparse matrix:
-
-\begin{equation}
-	\mathbf{H}_{wall} = \begin{bmatrix} 
-		-\cos(\alpha_m) & -\sin(\alpha_m) & 0 & \cdots & 1 & x_r \sin(\alpha_m) - y_r \cos(\alpha_m) & \cdots \\ 
-		0 & 0 & -1 & \cdots & 0 & 1 & \cdots 
-	\end{bmatrix}
-\end{equation}
-
-In this structure, the first three columns correspond to the robot's pose $[x_r, y_r, \theta_r]$, and the columns starting at $i$ and $i+1$ correspond to the specific observed landmark $[\rho_m, \alpha_m]$. All other entries in the matrix remain zero, as the observation is independent of other landmarks in the map.
-
-\section{Corner Landmark Update (Cartesian Representation)}
-
-\subsection{Corner Representation}
-Corner landmarks are stored in the map frame using Cartesian coordinates:
-\begin{equation}
-	\mathbf{m}_c = \begin{bmatrix} x_m \\ y_m \end{bmatrix} \in \mathbb{R}^2
-\end{equation}
-
-Unlike walls, corners are point features with finite spatial extent, making Cartesian representation natural and singularity-free.
-
-\subsection{Observation Model: Map Frame $\rightarrow$ Robot Frame}
-
-Given the robot pose $\mathbf{x}_r = [x_r, y_r, \theta_r]^\top$ and corner landmark $\mathbf{m}_c = [x_m, y_m]^\top$ in the map frame, the predicted observation in the robot's local frame is obtained by:
-
-\subsubsection{Translation to Robot Origin}
-The corner position is first translated relative to the robot:
-\begin{equation}
-	\Delta \mathbf{p} = \begin{bmatrix} \Delta x \\ \Delta y \end{bmatrix} = \begin{bmatrix} x_m - x_r \\ y_m - y_r \end{bmatrix}
-\end{equation}
-
-\subsubsection{Rotation into Local Frame}
-The translated vector is rotated by $-\theta_r$ to align with the robot's local coordinate system:
-\begin{equation}
-	\mathbf{h}_{\text{corner}}(\mathbf{x}_r, \mathbf{m}_c) =
-	\begin{bmatrix} x_L \\ y_L \end{bmatrix} =
-	\begin{bmatrix} \cos(\theta_r) & \sin(\theta_r) \\ -\sin(\theta_r) & \cos(\theta_r) \end{bmatrix}
-	\begin{bmatrix} \Delta x \\ \Delta y \end{bmatrix}
-\end{equation}
-
-Expanding:
-\begin{align}
-	x_L &= \cos(\theta_r)(x_m - x_r) + \sin(\theta_r)(y_m - y_r) \\
-	y_L &= -\sin(\theta_r)(x_m - x_r) + \cos(\theta_r)(y_m - y_r)
-\end{align}
-
-\subsection{Observation Jacobian for Corner Landmarks}
-
-The Jacobian $\mathbf{H}_{\text{corner}} \in \mathbb{R}^{2 \times n}$ has the sparse structure:
-\begin{equation}
-	\mathbf{H}_{\text{corner}} =
-	\begin{bmatrix}
-		\frac{\partial x_L}{\partial x_r} & \frac{\partial x_L}{\partial y_r} & \frac{\partial x_L}{\partial \theta_r} & \cdots & \frac{\partial x_L}{\partial x_m} & \frac{\partial x_L}{\partial y_m} & \cdots \\
-		\frac{\partial y_L}{\partial x_r} & \frac{\partial y_L}{\partial y_r} & \frac{\partial y_L}{\partial \theta_r} & \cdots & \frac{\partial y_L}{\partial x_m} & \frac{\partial y_L}{\partial y_m} & \cdots
-	\end{bmatrix}
-\end{equation}
-
-\subsubsection{Derivatives with Respect to Robot Pose}
-Let $c = \cos(\theta_r)$ and $s = \sin(\theta_r)$ for brevity.
-
-\textbf{Position derivatives:}
-\begin{align}
-	\frac{\partial x_L}{\partial x_r} &= -c, \quad \frac{\partial x_L}{\partial y_r} = -s \\
-	\frac{\partial y_L}{\partial x_r} &= s, \quad \frac{\partial y_L}{\partial y_r} = -c
-\end{align}
-
-\textbf{Heading derivatives:}
-\begin{align}
-	\frac{\partial x_L}{\partial \theta_r} &= \frac{\partial}{\partial \theta_r}\left[c(x_m - x_r) + s(y_m - y_r)\right] \\
-	&= -s(x_m - x_r) + c(y_m - y_r) = -s\Delta x + c\Delta y \\
-	\frac{\partial y_L}{\partial \theta_r} &= \frac{\partial}{\partial \theta_r}\left[-s(x_m - x_r) + c(y_m - y_r)\right] \\
-	&= -c(x_m - x_r) - s(y_m - y_r) = -c\Delta x - s\Delta y
-\end{align}
-
-\subsubsection{Derivatives with Respect to Landmark Position}
-\begin{align}
-	\frac{\partial x_L}{\partial x_m} &= c, \quad \frac{\partial x_L}{\partial y_m} = s \\
-	\frac{\partial y_L}{\partial x_m} &= -s, \quad \frac{\partial y_L}{\partial y_m} = c
-\end{align}
-
-\subsubsection{Complete Sparse Jacobian}
-For a corner landmark at state index $j$ (where $\mathbf{x}[j:j+2] = [x_m, y_m]^\top$), the Jacobian is:
-\begin{equation}
-	\mathbf{H}_{\text{corner}} =
-	\begin{bmatrix}
-		-c & -s & -s\Delta x + c\Delta y & \cdots & c & s & \cdots \\
-		s & -c & -c\Delta x - s\Delta y & \cdots & -s & c & \cdots
-	\end{bmatrix}
-\end{equation}
-where the first three columns correspond to $[x_r, y_r, \theta_r]$, columns $j$ and $j+1$ correspond to $[x_m, y_m]$, and all other entries are zero.
-
-\subsubsection{Implementation Note}
-In the code (\texttt{ekf\_slam\_feature.py}, lines 217-241), $\Delta x = x_m - x_r$ and $\Delta y = y_m - y_r$ are precomputed (as \texttt{dx, dy}). The rotation matrix uses the identities $\cos(-\theta_r) = \cos(\theta_r)$ and $\sin(-\theta_r) = -\sin(\theta_r)$, which simplifies the observation prediction. This implementation is numerically equivalent to the formulation above.
-
-
-
-
-
-\subsubsection{Rotation into Local Frame}
-To obtain the coordinates $(x_L, y_L)$ in the robot's local frame, the translated vector $\Delta \mathbf{p}$ must be rotated by the inverse of the robot's heading $\theta_r$:
-
-\begin{equation}
-	\begin{bmatrix} x_L \\ y_L \end{bmatrix} = 
-	\begin{bmatrix} \cos(\theta_r) & \sin(\theta_r) \\ -\sin(\theta_r) & \cos(\theta_r) \end{bmatrix}
-	\begin{bmatrix} \Delta x \\ \Delta y \end{bmatrix}
-\end{equation}
-
-
-
-
 
 
 \end{document}
