@@ -329,18 +329,18 @@ class LandmarkFeatureExtractor:
         cos_a = np.cos(alpha)
         sin_a = np.sin(alpha)
 
-        A = np.zeros((2, 2))
+        H = np.zeros((2, 2))
         for px, py in points:
             dr_d_alpha = px * sin_a - py * cos_a
             J = np.array([[1.0, dr_d_alpha]])
-            A += J.T @ J
+            H += J.T @ J
 
-        min_eig_A = sigma2 * 0.1 
-        eigvals, eigvecs = np.linalg.eigh(A)
-        eigvals_clamped = np.maximum(eigvals, min_eig_A)
-        A_inv = eigvecs @ np.diag(1.0 / eigvals_clamped) @ eigvecs.T
+        min_eig_H = sigma2 * 0.1 
+        eigvals, eigvecs = np.linalg.eigh(H)
+        eigvals_clamped = np.maximum(eigvals, min_eig_H)
+        H_inv = eigvecs @ np.diag(1.0 / eigvals_clamped) @ eigvecs.T
 
-        cov = sigma2 * A_inv
+        cov = sigma2 * H_inv
 
         min_cov_eig = sigma2 * 1e-4
         eigvals_out, eigvecs_out = np.linalg.eigh(cov)

@@ -14,7 +14,8 @@
 \usepackage{algpseudocode}
 \usepackage{tikz}
 \usetikzlibrary{positioning}   % for "right=of", "below=of" syntax
-\usetikzlibrary{arrows.meta}   % for >=stealth arrow style
+\usetikzlibrary{arrows.meta}
+\usepackage{subcaption}  % for >=stealth arrow style
 
 % Custom commands
 \newcommand{\R}{\mathbb{R}}
@@ -33,24 +34,41 @@
 \newtheorem{theorem}{Theorem}
 \newtheorem{proposition}{Proposition}
 \newtheorem{lemma}{Lemma}
+\begin{document}
+\begin{titlepage}
+	\centering
+	\begin{figure}[htbp]
+		\centering
+		\includegraphics[width=0.3\textwidth]{../thesis_ws/images/logo_rosso.png}
+	\end{figure}
 
+% --- Department Information ---
+{\Large \textsc{University of Trento}} \\[0.2cm]
+{\large \textsc{Department of Industrial Engineering}} \\[0.2cm]
+{\large \textsc{Master´s degree in Mechatronics Engineering}} \\[0.4cm]
+{\large Academic Year 2022--2023} \\[3cm]
 
-\title{Autonomous Robot Exploration using Landmark-based EKF-SLAM}
+% --- Thesis Title ---
+{\huge \textbf{Autonomous Robot Exploration using Landmark-based EKF-SLAM}} \\[4cm]
 
-\author{
-	Piyush Bhansali \\
-	\textit{Department of Industrial Engineering} \\
-	\textbf{University of Trento} \\[2ex]
-	Supervised by: \\
-	Professor Daniele Fontanelli
-}
+% --- Supervisor and Student Section ---
+\vfill
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lr}
+	\textbf{Supervisor} & \textbf{Student} \\
+	Prof. Daniele Fontanelli & Piyush Bhansali \\
+	& 238881 % Replace with your ID
+\end{tabular*}
 
+\vspace{2cm}
+
+% --- Bottom Footer ---
+\hrule
+\vspace{0.2cm}
 \date{\today}
 
-\begin{document}
-	
-	\maketitle
-	\vspace{1em}
+\end{titlepage}
+
+
 	
 	% --- ABSTRACT (Unchanged to keep your specific abstract style) ---
 	\begin{abstract}
@@ -68,7 +86,7 @@
 			 	
 		\vspace{0.5em}
 		\noindent
-		State estimation is performed by an Extended Kalman Filter (EKF). The state vector contains the robot pose $(x, y, \theta)$ and all landmark parameters jointly, so that a single observation updates both the observed landmark and every other landmark through the cross-covariance structure. Landmarks are matched to observations using nearest-neighbour association with Mahalanobis-distance gating at the 95\% chi-squared confidence level. Global consistency is maintained by a submap-stitching layer that uses feature-based SVD alignment. This correction is injected into the EKF as a direct pose observation, propagating the adjustment to all correlated landmarks through the cross-covariance structure.
+		State estimation is performed by an Extended Kalman Filter (EKF). The state vector contains the robot pose $(x, y, \theta)$ and all landmark parameters jointly, so that a single observation updates both the observed landmark and every other landmark through the cross-covariance structure. Landmarks are matched to observations using nearest-neighbour association with Mahalanobis-distance gating at the 95\% chi-squared confidence level. Global consistency is maintained by a submap-stitching layer that uses point cloud based ICP alignment. This correction is injected into the EKF as a direct pose observation, propagating the adjustment to all correlated landmarks through the cross-covariance structure.
 		
 		
 		\vspace{0.5em}
@@ -81,12 +99,12 @@
 		
 		\vspace{0.5em}
 		\noindent
-		The system is implemented as a ROS 2 node in Python, tested on TurtleBot3 in structured indoor environments. Performance is assessed using the absolute trajectory error (ATE), landmark map confidence, point cloud quality, and filter consistency via the normalised estimation error squared (NEES).
+		The system is implemented as a ROS 2 node in Python, tested on TurtleBot3 in structured indoor environments. Performance is assessed using the absolute trajectory error (ATE), landmark map confidence, and point cloud quality.
 				
 			
 		\vspace{0.5em}
 		\noindent
-		Keywords: SLAM, Extended Kalman Filter, Feature-Based Mapping, Landmark Extraction, SVD Alignment, Procrustes, RRT*, ROS2, Frontier-Based Exploration, 2D LiDAR Mapping, Cramér-Rao Lower Bound
+		Keywords: SLAM, Extended Kalman Filter, Feature-Based Mapping, Landmark Extraction, ICP Alignment, RRT*, ROS2, Frontier-Based Exploration, 2D LiDAR Mapping, Cramér-Rao Lower Bound
 	\end{abstract}
 	
 	\newpage
@@ -98,7 +116,7 @@
 	\setlength{\parskip}{0.5em} % Add vertical space between all paragraphs
 	\pagebreak
 	% --- INTRODUCTION ---
-	\section{Introduction}
+	\section{INTRODUCTION}
 	
 	\subsection{Motivation}
 	
@@ -106,24 +124,37 @@
 	
 	The ability of mobile robots to autonomously explore and map unknown environments is one of the most fundamental challenges in robotics. Unlike structured industrial settings where environments are precisely, many real-world scenarios require robots to operate in previously unmapped, and potentially hazardous spaces where human presence is dangerous or impossible. This necessity drives the application of autonomous exploration across several critical domains such as Search and Rescue Operations, Warehouse and Logistics Automation, Planetary and Underground Exploration etc. While teleoperated robots provide an alternative to direct human presence, it requires  high bandwidth, low-latency communication channels and are prone to human errors. Furthermore, operational costs scale linearly with the number of robots, making large-scale swarm management unsustainable.
 	
-	\subsubsection{The SLAM Problem: Fundamental Challenge of Robotics} 
-
-	One of the critical challenges faced in autonomous exploration is the Simultaneous Localization and Mapping (SLAM) problem \cite{durrant2006slam}: an algorithm to build a map of an unknown environment while simultaneously using that map to determine its own location, creating a circular dependency often described as a "chicken-and-egg" problem. 
+	\subsection{State of the Art in Indoor Mapping and Autonomous Navigation}
+	\label{sec:sota_indoor}
 	
- 	One of the methods is to compute the posterior distribution of the robot state and map given all sensor measurements and control inputs over time. \cite{thrun2005probabilistic}. Smith and Cheeseman (1987) formalised the problem using covariance matrices to represent spatial uncertainty. Dissanayake et al. (2001) provided the first convergence proof for SLAM. They showed that the determinant of any submatrix of the landmark covariance decreases monotonically as observations accumulate, meaning the map becomes more certain over time\cite{Dissanayake2001}.
+	Foundational SLAM work formalized the probabilistic formulation and identified the core bottlenecks of scalability, localisation, and map representation, which still structure modern system design. Classical tutorials emphasized computational complexity, loop closure, and representation choices as key constraints for practical systems, while later survey work framed the field as moving toward robust perception and long-term operation. \cite{durrant2006slam,cadena2016past}
 	
-	Indoor environments are dominated by planar surfaces, making lines and corners superior landmarks compared to raw points or occupancy grids. The task of converting raw 2D range data into these landmarks is a well-studied problem. Nguyen et al. (2005) \cite{Nguyen} conducted a comparative analysis of four feature extraction methodologies: Split-and-Merge, Incremental Line Fitting, the Hough Transform, and RANSAC. While the Hough Transform and RANSAC are known for their robustness to outliers, they often come with a higher computational cost whereas Split-and-Merge and Incremental Line Fitting provide the best balance of reliability and speed. Given that LiDAR sensors provide ordered scans, the Incremental Line Fitting method was selected for this work.
- 	
-	Feature based EKF-SLAM represents the environment as a set of walls and corners, each with a covariance that describes how uncertain it is with respect to the robot. When a landmark is re-observed, the correction spreads coherently to every other correlated landmark through the joint covariance matrix.
-	 
-
+	Recent systems increasingly adopt smoothing/graph-based estimation and tight multi-sensor coupling. Visual based SLAM has matured into robust, multi-session systems (e.g., ORB-SLAM3), while LiDAR-inertial frameworks (e.g., LIO-SAM) provide high-accuracy odometry and mapping with factor-graph formulations and real-time performance. Although these systems are robust and more accurate , they come with a trade off, as these are computationally and memory intensive due to large factor graphs and global optimization. They require fine tuning of parameters and may introduce latency from batch updates. Visual SLAM can fail in low‑texture or low‑light environments and is sensitive to motion blur and dynamic scenes.
+		
+	For indoor mapping, LiDAR-based SLAM surveys from 2023 highlight the diversity of sensor configurations and remaining challenges in robustness and deployment, while semantic mapping has become a standard extension to support task-level navigation and interaction. \cite{yue2023lidar_slam_survey} More recently, implicit representations (e.g., NeRF-based SLAM) have emerged as a promising direction for dense, photorealistic indoor reconstruction, though real-time performance and scalability remain active challenges. \cite{yang2024nerf_slam_survey}
+	
 \subsection{Problem Statement}
 
 One of the challenges faced in indoor SLAM, is unavailability of Global Navigation Satellite System (GNSS). The robot has to rely on noisy sensor data for localisation and mapping, which inherently couples the errors in robot pose estimation with the extracted environmental features. Many current feature-based methodologies utilize heuristic approximations for landmark uncertainty or fail to account for the correlations between the robot and the map. As a result, maps can appear geometrically plausible while being statistically overconfident, limiting their reliability for downstream navigation and evaluation.
 
-This thesis addresses that gap by developing and assessing a feature‑based EKF‑SLAM system with explicit uncertainty modeling for both walls and corners. Wall covariances are derived from the Fisher information (Cramér–Rao lower bound) of the line fit, and corner covariances are propagated analytically through the line‑intersection geometry, yielding a principled measure of map confidence. The objective is to quantify and preserve probabilistic map quality while evaluating localization accuracy, landmark consistency, and overall mapping performance in indoor environments.
+This thesis focuses on implementing a feature‑based EKF‑SLAM system with explicit uncertainty modeling for wall and corner landmarks. Wall covariances are obtained from the Fisher information (via the Cramér–Rao lower bound), and corner covariances are propagated analytically through line‑intersection geometry, providing a principled estimate of map confidence. The system is evaluated in indoor environments for localization accuracy, landmark consistency, and overall mapping quality, with the aim of preserving probabilistic correctness. Compared to graph‑based alternatives, the approach is intended to be less computationally and memory intensive and to reduce latency.
 
-\subsection{Autonomous Exploration and Navigation}
+
+
+
+\subsubsection{The SLAM Problem: Fundamental Challenge of Robotics} 
+
+One of the critical challenges faced in autonomous exploration is the Simultaneous Localization and Mapping (SLAM) problem \cite{durrant2006slam}: an algorithm to build a map of an unknown environment while simultaneously using that map to determine its own location, creating a circular dependency often described as a "chicken-and-egg" problem. 
+
+One of the methods is to compute the posterior distribution of the robot state and map given all sensor measurements and control inputs over time. \cite{thrun2005probabilistic}. Smith and Cheeseman (1987) formalised the problem using covariance matrices to represent spatial uncertainty. Dissanayake et al. (2001) provided the first convergence proof for SLAM. They showed that the determinant of any submatrix of the landmark covariance decreases monotonically as observations accumulate, meaning the map becomes more certain over time\cite{Dissanayake2001}.
+
+Indoor environments are dominated by planar surfaces, making lines and corners superior landmarks compared to raw points or occupancy grids. The task of converting raw 2D range data into these landmarks is a well-studied problem. Nguyen et al. (2005) \cite{Nguyen} conducted a comparative analysis of four feature extraction methodologies: Split-and-Merge, Incremental Line Fitting, the Hough Transform, and RANSAC. While the Hough Transform and RANSAC are known for their robustness to outliers, they often come with a higher computational cost whereas Split-and-Merge and Incremental Line Fitting provide the best balance of reliability and speed. Given that LiDAR sensors provide ordered scans, the Incremental Line Fitting method was selected for this work.
+
+Feature based EKF-SLAM represents the environment as a set of walls and corners, each with a covariance that describes how uncertain it is with respect to the robot. When a landmark is re-observed, the correction spreads coherently to every other correlated landmark through the joint covariance matrix.
+
+
+
+\subsubsection{Autonomous Exploration and Navigation}
 
 Frontier-based exploration identifies the boundary between mapped free space and unknown territory as navigation goals. In contrast to classic grid‑based frontier exploration\cite{Yamauchi1997}, a point‑cloud frontier strategy operates directly on lidar returns without discretizing space. The approach used in this thesis is to compute the convex hull of the observed free points and treat the hull boundary as a frontier surface; multiple candidates are then selected based on reachability, travel cost, and expected information gain. 
 
@@ -132,17 +163,17 @@ Frontier-based exploration identifies the boundary between mapped free space and
 
 \subsection{Thesis Contributions}
 
-While landmark based EKF-SLAM and frontier exploration have been studied extensively, probabilistic based mapping using geometry-aware CRLB covariances for landmarks and feature-based SVD drift correction is the objective of this thesis. A convex‑hull–based frontier detection algorithm which operates directly on the point cloud to generate exploration targets without grid discretization is implemented, where frontier candidates are geometrically validated and ranked for navigation.
+While landmark based EKF-SLAM and frontier exploration have been studied extensively, probabilistic based mapping using geometry-aware CRLB covariances for landmarks and point cloud based ICP drift correction is the objective of this thesis. A convex‑hull–based frontier detection algorithm which operates directly on the point cloud to generate exploration targets without grid discretization is implemented, where frontier candidates are geometrically validated and ranked for navigation.
 
 A core contribution of this work is also the explicit modeling of landmark uncertainty within the EKF state vector. Rather than treating landmarks as isolated points, the system maintains a joint covariance matrix that captures the high degree of correlation between the robot’s pose and the mapped features. Furthermore, this framework provides a confidence metric by aggregating the marginal uncertainties of the landmarks associated with a specific submap.
 
-\section{THEORY}
+\section{ BACKGROUND THEORY}
 
 \subsection{SLAM Problem Statement}
 
 The simultaneous localization and mapping problem can be formally stated as follows. Let $\mathbf{x}_t = [x_t, y_t, \theta_t]^T \in \mathbb{SE}(2)$ represent the robot's pose at time $t$ in the special Euclidean group, where $(x_t, y_t)$ denotes the position in Cartesian coordinates and $\theta_t$ denotes the orientation. Let $\mathcal{M} = \{\mathbf{p}_i\}_{i=1}^{N}$ represent the map as a set of $N$ points in $\mathbb{R}^2$, where each $\mathbf{p}_i = [p_i^x, p_i^y]^T$ represents a landmark or environment feature.
 
-At each time step, the robot receives control inputs $\mathbf{u}_t = [v_x, v_y, \omega]^T$ representing linear velocities and angular velocity, and sensor observations $\mathbf{z}_t$ representing laser range measurements. The sequence of poses, control inputs, and observations up to time $t$ is denoted as:
+At each time step, the robot receives control inputs $\mathbf{u}_t = [\delta_d, \delta_\theta]^T$ representing linear velocities and angular velocity, and sensor observations $\mathbf{z}_t$ representing laser range measurements. The sequence of poses, control inputs, and observations up to time $t$ is denoted as:
 \begin{align}
 	\mathbf{X}_{0:t} &= \{\mathbf{x}_0, \mathbf{x}_1, \ldots, \mathbf{x}_t\} \\
 	\mathbf{U}_{1:t} &= \{\mathbf{u}_1, \mathbf{u}_2, \ldots, \mathbf{u}_t\} \\
@@ -186,20 +217,28 @@ The process noise covariance $\mathbf{Q}_t$ accounts for unmodeled dynamics, whe
 	\end{bmatrix}
 \end{equation}
 
-\subsubsection{Observation Model}
 
-The laser range finder provides distance measurements to obstacles in the environment. For a 2D LiDAR with 360 beams, each observation $\mathbf{z}_t$ consists of 360 range-bearing pairs:
+\subsubsection{Observation Model (Feature-Based)}
+The EKF update does not use raw LiDAR beams directly. Instead, each scan is processed to extract a set of geometric features (walls and corners), which are used as observations. Let the observation set at time $t$ be:
 \begin{equation}
-	\mathbf{z}_t = \{(r_j, \phi_j)\}_{j=1}^{M}
+	\mathbf{z}_t = \{ \mathbf{z}_k \}_{k=1}^{M_t},
+\end{equation}
+where each $\mathbf{z}_k$ is either a wall measurement $\mathbf{z}_k^{\text{wall}} = [\rho_r, \alpha_r]^\top$ in the robot frame or a corner measurement $\mathbf{z}_k^{\text{corner}} = [x_r, y_r]^\top$ in the robot frame.
+
+\paragraph{Wall Observation Model}
+Given a map-frame wall landmark $\mathbf{m}_j = [\rho_m, \alpha_m]^\top$ and robot pose $\mathbf{x}_r = [x, y, \theta]^\top$, the expected measurement in the robot frame is:
+\begin{equation}
+	\mathbf{z}_k^{\text{wall}} = h_{\text{wall}}(\mathbf{x}_r,\mathbf{m}_j) + \mathbf{v}_k.
 \end{equation}
 
-where $r_j$ is the measured range and $\phi_j$ is the bearing angle relative to the sensor frame. These measurements are converted to Cartesian coordinates in the sensor frame:
+\paragraph{Corner Observation Model}
+Given a map-frame corner landmark $\mathbf{m}_j = [m_x, m_y]^\top$, the expected measurement in the robot frame is:
+
 \begin{equation}
-	\mathbf{p}_j^{sensor} = \begin{bmatrix}
-		r_j \cos(\phi_j) \\
-		r_j \sin(\phi_j)
-	\end{bmatrix}
+	\mathbf{z}_k^{\text{corner}} = h_{\text{corner}}(\mathbf{x}_r,\mathbf{m}_j) + \mathbf{v}_k.
 \end{equation}
+
+In both cases, $\mathbf{v}_k \sim \mathcal{N}(\mathbf{0}, \mathbf{R}_k)$ models feature extraction and sensing noise.
 
 \subsection{Point Clouds}
 A point Cloud is a set of data points containing coordinates that make up an object or an environment. They are primarily generated through exteroceptive sensors like LIDAR sensors and RGB-D Cameras. 
@@ -211,16 +250,16 @@ A LiDAR point cloud contains errors introduced from sensor-inherent, environment
 
 \subsection{The Cramér–Rao Lower Bound (CRLB)}
 
-The Cramér–Rao Lower Bound establishes a theoretical limit on the precision of an unbiased estimator. The CRLB is utilized to quantify the uncertainty of extracted geometric features, such as wall parameters $(\rho, \alpha)$ and SVD-based submap alignment results.
+The Cramér–Rao Lower Bound (CRLB) establishes a theoretical lower limit on the precision of any unbiased estimator. In the multivariate case, the CRLB is expressed as a matrix inequality, which is used here to quantify the minimum achievable uncertainty for geometric features and ICP-based alignment results.
 
-Let $\mathbf{\theta} \in \mathbb{R}^n$ represent an unknown parameter vector observed through a noisy measurement model:
+Let $\mathbf{\theta} \in \mathbb{R}^n$ represent a vector of unknown parameters observed through a noisy measurement model:
 \begin{equation}
-	\mathbf{z} = h(\mathbf{\theta}) + \mathbf{v}, \quad \mathbf{v} \sim \mathcal{N}(\mathbf{0}, \mathbf{R}_{\text{sensor}})
+	\mathbf{z} = h(\mathbf{\theta}) + \mathbf{v}, 
 \end{equation}
 
-The covariance of any unbiased estimate $\mathbf{\hat{\theta}}$ is bounded by the inverse of the Fisher Information Matrix (FIM), denoted as $\mathcal{F}(\mathbf{\theta})$:
+The covariance matrix $\mathbf{\Sigma}_{\hat{\theta}}$ of any unbiased estimator $\mathbf{\hat{\theta}}$ is bounded by the inverse of the \textit{Fisher Information Matrix} (FIM), denoted as $\mathcal{I}(\mathbf{\theta})$. This relationship is defined by the matrix inequality:
 \begin{equation}
-	\text{Cov}(\mathbf{\hat{\theta}}) \geq \mathcal{F}(\mathbf{\theta})^{-1}
+	\mathbf{\Sigma}_{\hat{\theta}} \succeq \mathcal{I}(\mathbf{\theta})^{-1}
 \end{equation}
 
 \subsection{Mahalanobis Distance}
@@ -252,49 +291,67 @@ For two points $\mathbf{x}, \mathbf{y} \in \mathbb{R}^n$ with covariance matrix 
 	D_M(\mathbf{x}, \mathbf{y}) = \sqrt{(\mathbf{x} - \mathbf{y})^T \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \mathbf{y})}
 \end{equation}
 
-\subsection{Singular Value Decomposition}
 
-Compute the Single Value Decomposition of $\mathbf{H}$:
+\subsection{Iterative Closest Point}
+
+The Iterative Closest Point (ICP) algorithm is used for submap stitching. 
+It aligns the local submap with the fixed global map by estimating the optimal 
+rigid transformation between them \cite{Besl}. 
+
+Most ICP variants use either a point-to-point or point-to-plane formulation. 
+Since this work operates on 2D LiDAR-based maps, the point-to-point formulation is employed.
+
+Let the source point cloud and target point cloud be defined as
+
 \begin{equation}
-	\mathbf{H} = \mathbf{U}\mathbf{\Sigma}\mathbf{V}^T
+	\mathcal{S} = \{\mathbf{s}_i\}, \quad i \in \{1, \dots, N_s\}
 \end{equation}
 
-where:
-\begin{itemize}
-	\item $\mathbf{U} \in \mathbb{R}^{2 \times 2}$: orthogonal matrix (left singular vectors)
-	\item $\mathbf{\Sigma} \in \mathbb{R}^{2 \times 2}$: diagonal matrix with singular values $\sigma_1 \geq \sigma_2 \geq 0$
-	\item $\mathbf{V} \in \mathbb{R}^{2 \times 2}$: orthogonal matrix (right singular vectors)
-\end{itemize}
-
-\subparagraph{Compute Optimal Rotation}
-
-Calculate the determinant to check for reflections:
 \begin{equation}
-	d = \det(\mathbf{V}\mathbf{U}^T)
+	\mathcal{O} = \{\mathbf{o}_j\}, \quad j \in \{1, \dots, N_o\}
 \end{equation}
 
-Construct the correction matrix:
+The first step of ICP is to determine correspondences between the two point sets. 
+For each source point, the closest point in the target cloud is selected using 
+a nearest-neighbour search. This produces a set of matched pairs 
+$(\mathbf{p}_i, \mathbf{q}_i)$.
+
+Given these correspondences, the rigid transformation is estimated by minimising 
+the point-to-point cost function
+
 \begin{equation}
-	\mathbf{D} = \begin{bmatrix} 1 & 0 \\ 0 & d \end{bmatrix}
+	E(\mathbf{R}, \mathbf{t}) = \sum_{i=1}^{N} 
+	\left\| \mathbf{q}_i - (\mathbf{R}\mathbf{p}_i + \mathbf{t}) \right\|^2
 \end{equation}
 
-Compute the optimal rotation:
+where $\mathbf{R} \in SO(2)$ is the rotation matrix and 
+$\mathbf{t} \in \mathbb{R}^2$ is the translation vector.
+
+At iteration $k$, the estimated rigid transformation is represented in 
+homogeneous coordinates as
+
 \begin{equation}
-	\boxed{\mathbf{R} = \mathbf{V}\mathbf{D}\mathbf{U}^T}
+	\mathbf{T}_k =
+	\begin{bmatrix}
+		\mathbf{R}_k & \mathbf{t}_k \\
+		\mathbf{0}_{1 \times 2} & 1
+	\end{bmatrix},
+	\quad \mathbf{T}_k \in SE(2)
 \end{equation}
 
-\textit{Note: If $d = +1$, then $\mathbf{D} = \mathbf{I}$ and $\mathbf{R} = \mathbf{V}\mathbf{U}^T$.}
+After $n_{\text{ICP}}$ iterations, the final transformation is obtained by 
+the product of all intermediate transformations:
 
-\subparagraph{Compute Optimal Translation}
-
-Using the centroids and optimal rotation:
 \begin{equation}
-	\boxed{\mathbf{t} = \bar{\mathbf{q}} - \mathbf{R}\bar{\mathbf{p}}}
+	\mathbf{T}_{\text{ICP}} =
+	\prod_{k=1}^{n_{\text{ICP}}} \mathbf{T}_k
+	\label{eq:icp_total_transform}
 \end{equation}
 
+where $n_{\text{ICP}}$ denotes the total number of ICP iterations performed.
 
 
-\section{Feature extraction}
+\section{FEATURE EXTRACTION}
 
 Feature extraction is a process of converting raw 2D LIDAR scans into geometric features likes walls and corners that serve as landmarks for EKF-SLAM.
 The incremental line fitting approach is chosen as its well-suited for ordered LiDAR scan data where consecutive points belong to the same surface. To mitigate the over-segmentation often caused by fixed distance thresholds during the growth phase, A secondary merging stage is employed to consolidate collinear segments into unified wall landmarks. A corner is detected by the intersection of two non parallel walls.
@@ -358,7 +415,7 @@ To reduce over-segmentation of a single wall due to lidar noisy data, an iterati
  	This prevents merging of geometrically disjoint segments that happen to lie on the same infinite line but are spatially separated (e.g., two wall sections separated by a wide doorway).
 \end{enumerate}
 
-After merging, segments shorter than $\ell_{\min} = 0.3$\,m are discarded.
+After merging, segments shorter than $\ell_{\min} = 0.5$\,m are discarded.
 
 \subsubsection{Final Hessian Transformation}
 Every validated segment is transformed into the Hessian normal form $(\rho, \alpha)$, defined by the equation:
@@ -523,11 +580,11 @@ The unique intersection point is calculated via the matrix inverse:
 \end{algorithm}
 
 
-\section{Uncertainity}
+\subsection{Uncertainity}
 
-Feature uncertainty is modeled using two main sources: sensor noise in the raw measurements and robot‑pose uncertainty when landmarks are initialized in the map frame. For the SVD-based submap alignment, additional error sources include feature correspondence outliers, degenerate wall geometry (parallel walls providing weak rotational constraint), and the small-angle linearization used in covariance propagation. The accuracy of the resulting covariance depends on which of these errors are explicitly modeled. While Monte Carlo methods can capture more effects, they are too expensive for real‑time use. Instead, we use a Gauss–Newton/Hessian approach: form the Jacobian‑based Hessian (equivalently the Fisher Information under Gaussian noise) and approximate the covariance as its inverse.
+Feature uncertainty is modeled using two main sources: sensor noise in the raw measurements and robot‑pose uncertainty when landmarks are initialized in the map frame. For the ICP-based submap alignment, additional error sources include feature correspondence outliers, degenerate wall geometry (parallel walls providing weak rotational constraint), and the small-angle linearization used in covariance propagation. The accuracy of the resulting covariance depends on which of these errors are explicitly modeled. An estimated covaraince matrix is used for Extended Kalman filter for this thesis. There are multiple ways to estimated the uncertainity in the observation and calculate the covaraince matrix. While Monte Carlo methods can capture more effects, they are too expensive for real‑time use. Instead, we use a Gauss–Newton/Hessian approach: form the Jacobian‑based Hessian (equivalently the Fisher Information under Gaussian noise) and approximate the covariance as its inverse.\cite{censi}
 
-\subsection{Wall Uncertainity}
+\subsubsection{Wall Uncertainity}
 
 \subparagraph{Hessian Normal Form Parameterization}
 A wall in a 2D plane is represented in Hessian normal form by the parameter vector $\mathbf{\theta} = [\rho, \alpha]^\top$. The equation of the line is defined as:
@@ -550,7 +607,7 @@ is the unit normal of the wall.
 \subparagraph{Perpendicular-Distance Measurement Model}
 Assuming additive independent and identically distributed (i.i.d.) range noise $v_i \sim \mathcal{N}(0, \sigma^2)$, the noisy constraint for a scan point $\mathbf{p}_i = (p_{x,i}, p_{y,i})$ is expressed as:
 \begin{equation}
-	h_i(\rho, \alpha) = \rho - p_{x,i} \cos(\alpha) - p_{y,i} \sin(\alpha) = 0
+	h_i(\rho, \alpha) = \rho - p_{x,i} \cos(\alpha) - p_{y,i} \sin(\alpha)
 \end{equation}
 
 The Jacobian of the measurement function $h_i$ with respect to the parameter vector $\mathbf{\theta} = [\rho, \alpha]^\top$ is derived as:
@@ -580,9 +637,9 @@ The covariance matrix $\mathbf{C}_{\text{wall}}$ is the inverse of the FIM scale
 To prevent numerical instability and keep the covariance positive definite in degenerate geometries, the eigenvalues of $\mathbf{A}$ and $\mathbf{C}_{\text{wall}}$ are clamped to a minimum threshold $\lambda_{\text{min}}$.
 
 
-\subsection{Corner Uncertainity}
+\subsubsection{Corner Uncertainity}
 
-While wall segments are represented by their polar parameters, corner landmarks are defined by their Cartesian coordinates $(x_c, y_c)$. In this system, a corner is treated as a derived feature resulting from the intersection of two primary wall landmarks. This section details the propagation of uncertainty from the wall parameter space to the Cartesian corner space.
+While wall segments are represented by their hessian parameters, corner landmarks are defined by their Cartesian coordinates $(x_c, y_c)$. In this system, a corner is treated as a derived feature resulting from the intersection of two primary wall landmarks. This section details the propagation of uncertainty from the wall parameter space to the Cartesian corner space.
 
 \subparagraph{Corner Geometry and Intersection}
 Given two intersecting walls, Wall A $(\rho_a, \alpha_a)$ and Wall B $(\rho_b, \alpha_b)$, the corner position $\mathbf{x} = [x_c, y_c]^\top$ must satisfy the Hessian constraints of both lines simultaneously:
@@ -597,37 +654,74 @@ The existence of a unique intersection depends on the determinant of $\mathbf{A}
 \end{equation}
 To ensure numerical stability, the system rejects corner candidates where $|\text{det}(\mathbf{A})| < 0.1$. This threshold prevents the extraction of corners from parallel or near-parallel walls, where the intersection point becomes ill-defined and highly sensitive to sensor noise.
 
-\subparagraph{First-Order Jacobian Derivation}
-To propagate the wall uncertainties, we determine the sensitivity of the corner position $\mathbf{x}$ to the input parameter vector $\mathbf{\theta} = [\rho_a, \alpha_a, \rho_b, \alpha_b]^\top$. The Jacobian $\mathbf{J} = \frac{\partial \mathbf{x}}{\partial \mathbf{\theta}}$ is derived using implicit differentiation of the system $\mathbf{A}\mathbf{x} = \mathbf{b}$.
+To propagate uncertainty, we compute the Jacobian of the corner position with respect to the wall parameters $\boldsymbol{\theta} = [\rho_a, \alpha_a, \rho_b, \alpha_b]^\top$.
 
-The sensitivities with respect to the distances $\rho$ are linear:
+Starting from $\mathbf{c} = \mathbf{A}^{-1} \mathbf{b}$, we apply the chain rule:
 \begin{equation}
-	\frac{\partial \mathbf{x}}{\partial \rho_a} = \mathbf{A}^{-1} \begin{bmatrix} 1 \\ 0 \end{bmatrix}, \quad \frac{\partial \mathbf{x}}{\partial \rho_b} = \mathbf{A}^{-1} \begin{bmatrix} 0 \\ 1 \end{bmatrix}
+	\frac{\partial \mathbf{c}}{\partial \boldsymbol{\theta}} =
+	\frac{\partial (\mathbf{A}^{-1} \mathbf{b})}{\partial \boldsymbol{\theta}}
 \end{equation}
 
-For the angular parameters $\alpha$, we differentiate the system $\mathbf{A}\mathbf{x} = \mathbf{b}$ with respect to $\alpha_i$:
-\begin{equation}
-	\frac{\partial \mathbf{A}}{\partial \alpha_i} \mathbf{x} + \mathbf{A} \frac{\partial \mathbf{x}}{\partial \alpha_i} = 0 \implies \frac{\partial \mathbf{x}}{\partial \alpha_i} = -\mathbf{A}^{-1} \left( \frac{\partial \mathbf{A}}{\partial \alpha_i} \mathbf{x} \right)
-\end{equation}
-where $\frac{\partial \mathbf{A}}{\partial \alpha_i}$ represents a sparse matrix containing the derivatives of the trigonometric terms for the respective wall.
 
-\subparagraph{Uncertainty Propagation}
-Assuming that the noise in Wall A is independent of the noise in Wall B, the joint input covariance matrix $\mathbf{\Sigma}_\theta \in \mathbb{R}^{4 \times 4}$ is constructed as a block-diagonal matrix:
+\begin{align}
+	\frac{\partial \mathbf{c}}{\partial \rho_a} &= \mathbf{A}^{-1} \begin{bmatrix} 1 \\ 0 \end{bmatrix} \\
+	\frac{\partial \mathbf{c}}{\partial \rho_b} &= \mathbf{A}^{-1} \begin{bmatrix} 0 \\ 1 \end{bmatrix} \\
+	\frac{\partial \mathbf{c}}{\partial \alpha_a} &= -\mathbf{A}^{-1} \frac{\partial \mathbf{A}}{\partial \alpha_a} \mathbf{c} \\
+	\frac{\partial \mathbf{c}}{\partial \alpha_b} &= -\mathbf{A}^{-1} \frac{\partial \mathbf{A}}{\partial \alpha_b} \mathbf{c}
+\end{align}
+
+where:
+\begin{align}
+	\frac{\partial \mathbf{A}}{\partial \alpha_a} &=
+	\begin{bmatrix}
+		-\sin \alpha_a & \cos \alpha_a \\
+		0 & 0
+	\end{bmatrix} \\
+	\frac{\partial \mathbf{A}}{\partial \alpha_b} &=
+	\begin{bmatrix}
+		0 & 0 \\
+		-\sin \alpha_b & \cos \alpha_b
+	\end{bmatrix}
+\end{align}
+
+The complete Jacobian matrix is:
 \begin{equation}
-	\mathbf{\Sigma}_\theta = \begin{bmatrix} \mathbf{C}_A & \mathbf{0} \\ \mathbf{0} & \mathbf{C}_B \end{bmatrix}
-\end{equation}
-where $\mathbf{C}_A$ and $\mathbf{C}_B$ are the $2 \times 2$ wall covariances derived via the CRLB. The final Cartesian corner covariance is then computed via the first-order error propagation law:
-\begin{equation}
-	\text{Cov}(x_c, y_c) = \mathbf{J} \mathbf{\Sigma}_\theta \mathbf{J}^\top
+	\mathbf{J} =
+	\begin{bmatrix}
+		\frac{\partial \mathbf{c}}{\partial \rho_a} &
+		\frac{\partial \mathbf{c}}{\partial \alpha_a} &
+		\frac{\partial \mathbf{c}}{\partial \rho_b} &
+		\frac{\partial \mathbf{c}}{\partial \alpha_b}
+	\end{bmatrix}
+	\in \mathbb{R}^{2 \times 4}
 \end{equation}
 
+\subsubsection{Covariance Propagation Formula}
+
+Given the covariances of the two walls:
+\begin{equation}
+	\boldsymbol{\Sigma}_{\boldsymbol{\theta}} =
+	\begin{bmatrix}
+		\mathbf{C}_a & \mathbf{0} \\
+		\mathbf{0} & \mathbf{C}_b
+	\end{bmatrix}
+	\in \mathbb{R}^{4 \times 4}
+\end{equation}
+
+where $\mathbf{C}_a$ and $\mathbf{C}_b$ are the $2 \times 2$ wall covariances.
+
+The first-order uncertainty propagation formula~\cite{thrun2005probabilistic} states:
+\begin{equation}
+	\mathbf{C}_{\text{corner}} = \mathbf{J} \boldsymbol{\Sigma}_{\boldsymbol{\theta}} \mathbf{J}^\top
+	\label{eq:corner_propagation}
+\end{equation}
 
 
 To maintain the physical validity of the result, we enforce symmetry on the resulting matrix and apply eigenvalue clamping to prevent non-positive definite results due to floating-point precision limits. This ensures that the corner landmarks possess a mathematically consistent uncertainty that reflects the geometric quality of the intersecting walls.
 
-\subsection{ICP uncertainity Estimation}
+\subsubsection{ICP uncertainity Estimation}
 
-The uncertainty of the Iterative Closest Point (ICP) registration is estimated using a closed-form approach derived from the method proposed by Censi. This approach relates the pose covariance to the geometric structure of the environment and the sensor's measurement noise. The fundamental insight is that the covariance of the estimated transformation $\mathbf{x}$ is inversely proportional to the Hessian matrix (or Fisher Information Matrix) of the least-squares objective function.
+The uncertainty of the Iterative Closest Point (ICP) registration is estimated using a closed-form approach derived from the method proposed by Censi\cite{censi}. This approach relates the pose covariance to the geometric structure of the environment and the sensor's measurement noise. The fundamental insight is that the covariance of the estimated transformation $\mathbf{x}$ is inversely proportional to the Hessian matrix (or Fisher Information Matrix) of the least-squares objective function.
 
 \subparagraph{Problem Formulation}
 Given a source point cloud $\mathcal{S} = \{\mathbf{p}_1, \dots, \mathbf{p}_n\}$ and a target map $\mathcal{T}$, the ICP algorithm finds the optimal 2D pose $\mathbf{x} = [t_x, t_y, \theta]^\top$ that minimizes the following error metric:
@@ -639,47 +733,34 @@ Given a source point cloud $\mathcal{S} = \{\mathbf{p}_1, \dots, \mathbf{p}_n\}$
 where $\mathbf{R}(\theta)$ is the 2D rotation matrix and $\mathbf{q}_i \in \mathcal{T}$ is the corresponding match for $\mathbf{p}_i$. We seek to derive the $3 \times 3$ covariance matrix $\mathbf{\Sigma}_{\mathbf{x}}$ characterizing the uncertainty of the solution.
 
 \subparagraph{Jacobian Derivation}
-For each point correspondence $(\mathbf{p}_i, \mathbf{q}_i)$, we compute the Jacobian $\mathbf{J}_i$ by taking the partial derivatives of the transformed point $\mathbf{p}'_i$ with respect to the pose parameters. The transformation is defined as:
+For each point correspondence $(\mathbf{p}_i, \mathbf{q}_i)$, we compute the Jacobian $\mathbf{J}_i$ by taking the partial derivatives of the error function with respect to the pose parameters. The transformation is defined as:
 
 \begin{equation}
-	\mathbf{p}'_i = \begin{bmatrix} \cos \theta & -\sin \theta \\ \sin \theta & \cos \theta \end{bmatrix} \begin{bmatrix} p_x \\ p_y \end{bmatrix} + \begin{bmatrix} t_x \\ t_y \end{bmatrix}
+	\mathbf{e}_i = \begin{bmatrix} \cos \theta & -\sin \theta \\ \sin \theta & \cos \theta \end{bmatrix} \begin{bmatrix} p_x \\ p_y \end{bmatrix} + \begin{bmatrix} t_x \\ t_y \end{bmatrix} - \begin{bmatrix} q_x \\ q_y \end{bmatrix} 
 \end{equation}
 
-The resulting Jacobian matrix $\mathbf{J}_i \in \mathbb{R}^{2 \times 3}$ represents the sensitivity of the point's position to changes in the robot's pose:
+The resulting Jacobian matrix $\mathbf{J}_i \in \mathbb{R}^{2 \times 3}$ represents the sensitivity of the error to changes in the robot's pose:
 
 \begin{equation}
 	\mathbf{J}_i = \frac{\partial \mathbf{p}'_i}{\partial \mathbf{x}} = \begin{bmatrix} 1 & 0 & -p_x \sin \theta - p_y \cos \theta \\ 0 & 1 & p_x \cos \theta - p_y \sin \theta \end{bmatrix}
 \end{equation}
 
 \subparagraph{Hessian Construction and Stabilization}
-The system Hessian $\mathbf{H}$ is constructed using the Gauss-Newton approximation, representing the ``stiffness'' of the geometric match:
+The system Hessian $\mathbf{H}$ is constructed using the Gauss-Newton approximation, representing the stiffness of the geometric match:
 
 \begin{equation}
 	\mathbf{H} = \sum_{i=1}^{n} \mathbf{J}_i^\top \mathbf{J}_i
 \end{equation}
 
 
-
-To ensure numerical stability in feature-poor environments, an eigendecomposition is performed: $\mathbf{H} = \mathbf{V} \mathbf{\Lambda} \mathbf{V}^\top$. The eigenvalues are clamped to a minimum threshold $\epsilon$ to prevent singularities in the inversion process:
-
+To ensure numerical stability in feature-poor environments, an eigen decomposition is performed: $\mathbf{H} = \mathbf{V} \mathbf{\Lambda} \mathbf{V}^\top$. The eigenvalues are clamped to a minimum threshold $\epsilon$ to prevent singularities in the inversion process:
 
 \subparagraph{Covariance Calculation}
 The final covariance is determined by scaling the inverse of the stabilized Hessian by the LiDAR measurement noise variance $\sigma^2$:
 
 \begin{equation}
-	\mathbf{\Sigma}_{\mathbf{x}} = \sigma^2 \mathbf{H}_{stable}^{-1} = \begin{bmatrix} \sigma_x^2 & \sigma_{xy} & \sigma_{x\theta} \\ \sigma_{xy} & \sigma_y^2 & \sigma_{y\theta} \\ \sigma_{x\theta} & \sigma_{y\theta} & \sigma_{\theta}^2 \end{bmatrix}
+	\mathbf{\Sigma}_{\mathbf{x}} = \sigma^2 \mathbf{H}_{stable}^{-1}
 \end{equation}
-
-The resulting matrix $\mathbf{\Sigma}_{\mathbf{x}}$ captures the directional uncertainty of the robot's pose. The eigenvectors of this matrix correspond to the principal axes of the uncertainty ellipse, accurately reflecting the geometric constraints of the local environment.
-
-
-
-
-
-
-
-
-
 
 
 \section{MAPPING MODULE}
@@ -809,6 +890,16 @@ where $\mathbf{S}$ is the innovation covariance and H is a sparse jacobian matri
 We apply a \textbf{$\chi^2$ gate} at the 95\% confidence level ($D_M^2 < 5.99$). This allows the system to be flexible when landmark uncertainty is high (e.g., during initialization) but strict when the map is well-established.
 
 \subsubsection{Observation Model}
+
+Unlike classical EKF-SLAM formulations where the observation vector $z_t$ consists 
+of raw range-bearing measurements $(r_j, \phi_j)$, the observation vector in this 
+system consists of extracted geometric features --- specifically, wall parameters 
+$(\rho_r, \alpha_r)$ in the robot frame, and corner positions $(x_r, y_r)$ in the 
+robot frame. The raw LiDAR point cloud $\{(r_j, \phi_j)\}_{j=1}^{M}$ is first 
+passed through the feature extraction pipeline described in previous Section, 
+which applies incremental line fitting, Hessian parameterization, and corner 
+intersection to produce a set of geometric observations. These extracted features 
+form the measurement input $z_t$ to the EKF update step. 
 
 \subparagraph{Wall observation}
 
@@ -1473,7 +1564,7 @@ This offsetting prevents frontier selection in regions where:
 \begin{enumerate}[noitemsep]
 	\item The robot cannot physically fit due to its size
 	\item Obstacles may exist at the exact map boundary
-	\item Localization errors could place the robot in collision
+	\item Localization errors could place the robot close to the obstacle without it realising it.
 \end{enumerate}
 
 \subsubsection{Step 4: Frontier Sampling \& Validation}
@@ -1555,7 +1646,7 @@ To determine if the path along $\mathbf{r}_i$ is obstacle-free, the ray is discr
 
 \paragraph{Acceptance Criterion}
 
-The frontier candidate $\mathbf{p}$ is accepted if at least two of the five probe directions are obstacle-free.
+The frontier candidate $\mathbf{p}$ is accepted if at least three of the five probe directions are obstacle-free.
 
 \paragraph{Algorithm Summary}
 
@@ -1637,7 +1728,7 @@ Table~\ref{tab:detector_methods} summarizes the principal methods of the \texttt
 
 \subsubsection{Step 5: Spatial Clustering}
 
-After validation, frontier candidates are grouped into spatial clusters to reduce redundancy by representing nearby frontiers as single exploration targets. Density-Based Spatial Clustering of Applications with Noise (DBSCAN)~\cite{ester1996density}, a density-based clustering algorithm is used that groups points based on spatial proximity without requiring a predefined number of clusters.
+After validation, frontier candidates are grouped into spatial clusters to reduce redundancy by representing nearby frontiers as single exploration targets. Density-Based Spatial Clustering of Applications with Noise (DBSCAN), a density-based clustering algorithm is used that groups points based on spatial proximity without requiring a predefined number of clusters.
 
 Unlike other clustering algorithms like K-means or hierarchial clustering, DBSCAN automatically determines the number of clusters based on the density of the cluster. It also produces consistent clustering results for a given parameter. DBSCAN module is used for the implementation of the clustering which is a part of the the sklearn.cluster module. 
 
@@ -2485,9 +2576,35 @@ All design parameters are chosen conservatively to reduce the risk of missing tr
 		\texttt{wall\_angle\_tolerance} & 0.349 rad &  tolerance for parallel wall matching \\
 		\texttt{wall\_rho\_tolerance} & 0.5 m & Distance tolerance for wall matching \\
 		\texttt{max\_gap\_ext} & 1.0 m & Minimum gap between collinear walls to be associated as different wall landmarks. \\
+		$\sigma_d^2$ & $8\times10^{-6}$ & Process noise variance for odometry distance (m$^2$) \\
+		$\sigma_\theta^2$ & $2\times10^{-5}$ & Process noise variance for odometry rotation (rad$^2$) \\
+		
 		\bottomrule
 	\end{tabular}
 \end{table}
+
+\paragraph{Process Noise Estimation from Ground Truth and Odometry}
+
+Process noise matrix $\mathbf{Q}$ is estimated directly from ground‑truth and odometry by analyzing incremental motion errors. For each time step $t$, compute the incremental displacement and rotation from odometry and ground truth:
+\begin{align}
+	\Delta d_t &= \sqrt{(x_t - x_{t-1})^2 + (y_t - y_{t-1})^2}, \\
+	\Delta \theta_t &= \mathrm{wrap}(\theta_t - \theta_{t-1}).
+\end{align}
+Define the residuals between odometry and ground truth:
+\begin{align}
+	e_{d,t} &= \Delta d_t^{\text{odom}} - \Delta d_t^{\text{gt}}, \\
+	e_{\theta,t} &= \mathrm{wrap}\!\left(\Delta \theta_t^{\text{odom}} - \Delta \theta_t^{\text{gt}}\right).
+\end{align}
+Assuming zero‑mean errors, the process noise variances are estimated as:
+\begin{align}
+	\sigma_d^2 &= \mathrm{Var}(e_{d,t}), \\
+	\sigma_\theta^2 &= \mathrm{Var}(e_{\theta,t}),
+\end{align}
+and the process noise covariance is set to:
+\begin{equation}
+	\mathbf{Q} = \mathrm{diag}(\sigma_d^2, \sigma_\theta^2).
+\end{equation}
+
 
 The chi-square gate threshold of 5.99 corresponds to the 95\% confidence level for a 2-DOF $\chi^2$ distribution, providing robust data association. Wall features additionally use geometric constraints: parallel walls must have angles within 20° and perpendicular distances within 0.5m for matching. The values are chosen a bit conservatively after trial and error method.
 
@@ -2598,35 +2715,94 @@ The map shown in Figure 6 uses white point clouds to depict the final stitched g
 \subsection{Results}
 \label{sec:quantitative_results}
 
+\subsubsection{Sensitivity Analysis via Noise-Model Perturbation}
+\label{sec:sensitivity_noise}
+
+To evaluate the robustness of the EKF-SLAM pipeline to noise-model assumptions, we conducted a sensitivity analysis by perturbing the assumed process and measurement uncertainties while keeping all other settings, datasets, and initial conditions fixed. The analysis compares three cases: (1) a baseline configuration with nominal noise parameters, (2) increased process uncertainty, and (3) increased LiDAR measurement uncertainty.
+
+The process uncertainty is controlled by the covariance matrix $\mathbf{Q}$ in the prediction step, so increasing $\mathbf{Q}$ explicitly models a less reliable motion model and increases the predicted covariance. The measurement uncertainty is controlled by the LiDAR noise variance $\sigma^2$ (or the measurement covariance $\mathbf{R}$), which scales feature and ICP covariances (e.g., $\mathbf{C}_{\text{wall}} = \sigma^2 \mathbf{A}^{-1}$ and $\boldsymbol{\Sigma}_{\mathbf{x}} = \sigma^2 \mathbf{H}^{-1}$). Increasing $\sigma^2$ therefore decreases measurement confidence and reduces the Kalman gain, leading to more conservative updates.
+
+Importantly, these experiments modify the \emph{assumed} noise models used by the filter rather than the raw sensor data, isolating the EKF’s sensitivity to noise-model tuning. Performance is evaluated using identical metrics (e.g., positional error and covariance evolution) to attribute changes in accuracy and consistency directly to the altered uncertainty assumptions.
+
+\begin{enumerate}
+	\item \textbf{Case 1 (Baseline):} Nominal process noise covariance $\mathbf{Q}$ and nominal LiDAR measurement noise variance $\sigma^2$ 
+	\item \textbf{Case 2 (Increased Process Uncertainty):} $\mathbf{Q}$ increased relative to the baseline, while LiDAR noise $\sigma^2$ is unchanged. 
+	\item \textbf{Case 3 (Increased LiDAR Uncertainty):} LiDAR measurement variance $\sigma^2$ increased relative to the baseline, while $\mathbf{Q}$ is unchanged.
+\end{enumerate}
+
+
 \subsubsection{Comparison between Robot estimated Pose and Ground Truth}
 
-The EKF vs. ground‑truth plot shows close agreement over the full trajectory, indicating that the filter tracks the true motion well. A small, consistent offset appears in the middle segment, which is consistent with a feature‑sparse corridor: the robot can constrain its position perpendicular to the wall but remains uncertain along the wall direction. There is no catastrophic divergence, and overall the EKF remains stable relative to ground truth.
+Across the three cases, the EKF trajectory departs progressively from ground truth. 
+In the baseline case, the estimated path closely overlaps the reference. 
+With increased process uncertainty, small deviations appear, particularly after the turning segment. 
+With increased LiDAR uncertainty, the separation is largest and a sustained bias develops along the trajectory, consistent with reduced measurement influence and accumulating drift. as shown in figure~7.
+
 
 \subparagraph{Abosulte Trajectory Error}
-Absolute Trajectory Error (ATE) measures the deviation between the estimated trajectory and ground truth. It is typically summarized using the root mean square error (RMSE), which provides a single scalar for overall trajectory accuracy; lower RMSE indicates closer agreement. For the collected data, the RMSE is 0.14 m, corresponding to an average positional error of about 14 cm between the EKF estimate and ground truth.
+Absolute Trajectory Error (ATE) measures the deviation between the estimated trajectory and ground truth. It is typically summarized using the root mean square error (RMSE), which provides a single scalar for overall trajectory accuracy; lower RMSE indicates closer agreement.
+
+\paragraph{ATE Comparison}
+The baseline configuration (Case 1) yields the lowest ATE (0.14), as the EKF noise models are consistent with the nominal sensor and motion characteristics. Increasing process uncertainty (Case 2, ATE 0.35) inflates the predicted covariance and increases the Kalman gain, making the filter rely more on measurements; this typically introduces moderate error growth when measurements are imperfect, hence the observed increase. Increasing LiDAR measurement uncertainty (Case 3, ATE 0.99) reduces measurement trust and shifts the filter toward odometry prediction, causing drift to accumulate and producing the largest trajectory error. The monotonic ATE increase across cases is therefore consistent with the EKF’s dependence on the assumed noise balance between prediction and measurement.
+ 
+The ATE achieved in case 1 of 0.14\,m, is competitive with common ROS~2 SLAM baselines; comparative studies with SLAM Toolbox and Google Cartographer in indoor simulation report ATE values of 0.13 and 0.21\,m respectively.\cite{Ince}
 
 \begin{figure}[htbp]
 	\centering
-	\includegraphics[width=0.75\textwidth]{../thesis_ws/images/ekf_vs_groundtruth.png}
-	\caption{Comparison between Ekf trajectory and actual ground truth from the simulation.}
-	\label{fig:ATE}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/ekf_vs_groundtruth.png}
+		\caption{Baseline process and lidar noise}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/ekf_vs_groundtruth_odom.png}
+		\caption{With Increased Process Uncertainity}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/ekf_vs_groundtruth_lidar.png}
+		\caption{With Increased Lidar uncertainity}
+	\end{subfigure}
+	\caption{EKF Position vs Ground Truth of the robot in three different uncertainity condition}
+	\label{fig:EKFvsGT}
 \end{figure}
 
 \subsubsection{Uncertainity in robot Pose}
 \begin{figure}[htbp]
 	\centering
-	\includegraphics[width=0.75\textwidth]{../thesis_ws/images/uncertainity_in_robot_position.png}
-	\caption{EKF position covariance across submaps, showing variance in the x and y directions}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/uncertainity_in_robot_position.png}
+		\caption{Baseline process and lidar noise}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/uncertainity_in_robot_position_odom.png}
+		\caption{With Increased Process Uncertainity}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/uncertainity_in_robot_position_lidar.png}
+		\caption{With Increased Lidar uncertainity}
+	\end{subfigure}
+	\caption{EKF position covariance across submaps, showing variance in x and y direction}
 	\label{fig:Variance}
 \end{figure}
-The uncertainty plot shown in figure$~$\ref{fig:Variance} shows the EKF’s positional variance in x and y direction across submaps. Periods where the variance is strongly anisotropic (one axis higher than the other) indicate directional ambiguity: the filter is well‑constrained perpendicular to the corridor wall direction but less certain along the corridor axis. This supports the earlier interpretation that the small mid‑segment offset arises from feature‑sparse corridor geometry, which provides limited constraints in the along‑wall direction.
+
+Overall, the uncertainty plots shown in figure$~$\ref{fig:Variance} reflect the expected sensitivity to the noise models. In the baseline case, the variance remains low, peaking near $0.007$, indicating stable confidence under nominal assumptions. When process uncertainty is increased, the predicted covariance inflates substantially and the peak reaches about $0.12$, showing that the filter quickly becomes less confident in its motion model. In the high LiDAR‑uncertainty case, the variance peaks around $0.01$ and decays more slowly, because measurements are de‑weighted and the Kalman gain is reduced, so the filter takes longer to recover confidence. The initial peak in the middle submaps aligns with the featureless corridor, where limited geometric constraints reduce observability and further slow uncertainty reduction.  In that corridor, uncertainty in $x$ exceeds $y$ because motion and drift are less constrained along the corridor axis, while the lateral direction remains better observed. 
 
 \subsubsection{Submap Confidence Evolution}
 
 \begin{figure}[htbp]
 	\centering
-	\includegraphics[width=0.75\textwidth]{../thesis_ws/images/submap_confidence_2.png}
-	\caption{Confidence value for each submap generated}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/submap_confidence_2.png}
+		\caption{Baseline process and lidar noise}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/submap_confidence_odom.png}
+		\caption{With Increased Process Uncertainity}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.32\textwidth}
+		\includegraphics[width=\linewidth]{../thesis_ws/images/submap_confidence_lidar.png}
+		\caption{With Increased Lidar uncertainity}
+	\end{subfigure}
+	\caption{Confidence value for each submap generated for all 3 cases}
 	\label{fig:submap_confidence}
 \end{figure}
 
@@ -2636,9 +2812,17 @@ The confidence metric is computed as:
 \end{equation}
 where $I_{\text{landmarks}}$ is the sum of landmark information (trace of inverse variance) and $\tau = 10^6$ is a normalization constant.
 
-The submap‑confidence plot in Figure~\ref{fig:submap_confidence} shows how the EKF confidence metric evolves across submaps. It begins near zero for the first submap, then rises quickly and stabilizes around 0.8–1.0 as more reliable landmarks are incorporated. The initial dip around submap 3 to 8 correspond to the long corridor section, which yields fewer informative features and lowers the summed information. Overall, the trend indicates that the estimator reaches and sustains high confidence once the environment becomes feature‑rich in all directions.
+Figure~\ref{fig:submap_confidence} summarizes how the EKF confidence score changes across submaps for the three noise settings. In the baseline case, confidence rises rapidly and stays near its ceiling, indicating stable estimation under nominal assumptions. When process uncertainty is increased, confidence becomes more volatile and drops sharply in later submaps, which is consistent with a less trusted motion model and a larger predicted covariance. When LiDAR uncertainty is increased, confidence grows more slowly and levels off below the baseline, reflecting reduced measurement influence and more conservative updates.
 
-\section{Conclusion and Future Works}
+From the plot, the baseline confidence stays roughly between \(0.7\) and \(1.0\), with most points near \(0.9\). 
+With increased process uncertainty, confidence spans about \(0.3\) to \(1.0\) and drops to around \(0.3\) near the end. 
+With increased LiDAR uncertainty, confidence ranges from about \(0.1\) to \(0.95\), rises gradually, and then fluctuates around \(0.7\)–\(0.9\).
+
+
+
+\section{CONCLUSION AND FUTURE WORK}
+
+\subsection{Conclusion}
 
 This thesis presents a comprehensive feature-based EKF-SLAM system for autonomous indoor exploration that addresses the fundamental challenge of probabilistic mapping and localization in GPS-denied environments. The work demonstrates rigorous uncertainty modeling, and using it for sensor fusion. It also presents a frontier based navigation algorithm for a point cloud based map using convex hull to differentiate between explored and unexplored reigon.
 
@@ -2648,7 +2832,7 @@ Walls are represented using Hessian parameters $(\rho, \alpha)$ which provides a
 
 The submap stitching module employs point-to-point ICP alignment with uncertainty quantification. By extracting point correspondences and building the Fisher Information Matrix from the alignment Jacobian, the system produces a 3×3 pose correction covariance that captures the quality of the alignment. The navigation module introduces a grid-free frontier detection strategy that operates directly on the point cloud map. By computing the convex hull of observed free space and sampling along the buffered boundary, the system generates exploration targets without the discretization used in occupancy grid methods.
 
-\subparagraph{Future Work}
+\subsection{Future Work}
 
 In this work, there are a lot of areas which can be improved to obtain a more robust algorithm for feature based SLAM.
 
@@ -2663,6 +2847,9 @@ While the EKF provides real-time estimates, it suffers from linearization errors
 The current system relies on hand-tuned parameters for feature extraction, data association, and navigation. Future work could incorporate adaptive or learning-based parameter adjustment. Submap confidence metric can be used to determine the next frontier by reexploring sections with low confidence values.
 
 These future works collectively represent a roadmap toward a fully autonomous, robust, and scalable SLAM system capable of operating in diverse real-world environments.
+
+
+
 
 
 \begin{thebibliography}{9}
@@ -2680,6 +2867,19 @@ These future works collectively represent a roadmap toward a fully autonomous, r
 	\emph{IEEE Robotics \& Automation Magazine},
 	vol.~13, no.~2, pp.~99--110, 2006.
 	
+	\bibitem{cadena2016past}
+	Cesar Cadena, Luca Carlone, Henry Carrillo, Yasir Latif, Davide Scaramuzza, Jose Neira, Ian Reid, John J. Leonard,
+	``Past, Present, and Future of Simultaneous Localization And Mapping: Towards the
+	Robust-Perception Age''
+	\emph{IEEE Transactions on Robotics},
+	vol.~32, no.~6, pp.~1309-1332, 2016.
+	
+	\bibitem{yue2023lidar_slam_survey}
+	Yongjun Zhang, Pengcheng Shi, Jiayuan Li,
+	``3D LiDAR SLAM: A survey'',
+	\emph{Remote Sensing and Photogrammetry Society and John Wiley \& Sons Ltd},
+	DOI: 10.1111/phor.12497.
+	
 	\bibitem{Shuien2020}
 	Shuien Yu, Chunyun Fu, Amirali K. Gostar and Minghui Hu,
 	``A Review on Map-Merging Methods for Typical Map Types in Multiple-Ground-Robot SLAM Solutions,''
@@ -2691,6 +2891,12 @@ These future works collectively represent a roadmap toward a fully autonomous, r
 	``A solution to the simultaneous localisation and map building (SLAM) problem,'' 
 	\emph{IEEE Transactions on Robotics and Automation}, vol. 17, no. 3, 
 	June 2001.
+	
+	\bibitem{yang2024nerf_slam_survey}
+	Kaiyun Yang, Yunqi Cheng, Zonghai Chen and Jikai Wang,
+	``SLAM Meets NeRF: A Survey of Implicit SLAM Methods``,
+	\emph{World Electric Vehicle Journal},
+	doi.org/10.3390/wevj15030085
 	
 	\bibitem{kim2018scan}
 	G.~Kim and A.~Kim,
@@ -2723,6 +2929,21 @@ These future works collectively represent a roadmap toward a fully autonomous, r
 	\emph{The International Journal of Robotics Research}, 
 	vol.~30, no.~7, pp.~846--894, 2011.
 	
+	\bibitem{Besl}
+	P. J. Besl and N. D. McKay, 
+	``A method for registration of 3D shapes,''
+	\emph{IEEE Transactions on Pattern Analysis and Machine Intelligence}, 
+	14(2):239–256,
+	1992. doi: 10.1109/34.121791.
+	
+	
+	\bibitem{censi}
+	Andrea Censi, 
+	``An accurate closed-form estimate of ICP’s covariance,''
+	\emph{ Proceedings 2007 IEEE International Conference on Robotics and Automation}, 
+	2007.
+	
+	
 	\bibitem{barber1996quickhull}
 	C.~B.~Barber, D.~P.~Dobkin, and H.~Huhdanpaa,
 	``The quickhull algorithm for convex hulls,''
@@ -2732,7 +2953,7 @@ These future works collectively represent a roadmap toward a fully autonomous, r
 	\bibitem{coulter1992}
 	R. C. Coulter,
 	``Implementation of the Pure Pursuit Path Tracking Algorithm,''
-	\textit{Technical Report CMU-RI-TR-92-01},
+	\emph{Technical Report CMU-RI-TR-92-01},
 	Robotics Institute, Carnegie Mellon University, 1992.
 	
 	\bibitem{ekf_practice}
@@ -2783,6 +3004,14 @@ These future works collectively represent a roadmap toward a fully autonomous, r
 	Q.-Y. Zhou, J. Park, and V. Koltun,
 	``Open3D: A Modern Library for 3D Data Processing,''
 	\textit{arXiv:1801.09847}, 2018.
+	
+	\bibitem{Ince}
+	Ibrahim Ince , Derya Yiltas-Kaplan, and Fatih Kele¸s,
+	``From Simulation to Reality: Comparative Performance Analysis
+	of SLAM Toolbox and Cartographer in ROS 2``
+	\emph{Electronics},
+	doi.org/10.3390/electronics14244822
+	
 	
 	\bibitem{dellaert2012gtsam}
 	F. Dellaert,

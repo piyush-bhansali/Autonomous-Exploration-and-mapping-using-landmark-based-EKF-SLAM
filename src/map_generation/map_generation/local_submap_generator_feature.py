@@ -129,7 +129,6 @@ class LocalSubmapGeneratorFeature(Node):
         gt_csv_path = os.path.join(self.save_dir, 'ground_truth_comparison.csv')
         self.gt_csv_file, self.gt_csv_writer = init_groundtruth_csv(gt_csv_path)
 
-        # Ground truth initial position (for offsetting to match EKF starting at 0,0)
         self.gt_initial_pose = None
         self.gt_last_log_time = None  # For 1 Hz logging throttle
 
