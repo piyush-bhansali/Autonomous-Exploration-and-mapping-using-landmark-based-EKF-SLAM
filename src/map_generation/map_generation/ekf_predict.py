@@ -10,7 +10,7 @@ class BaseEKF:
               
         self.state = np.zeros(3)
       
-        self.P = np.eye(3) * 0.001
+        self.P = np.eye(3) * 0.01
        
         self.Q = np.diag([
             0.000008,    # Distance noise
