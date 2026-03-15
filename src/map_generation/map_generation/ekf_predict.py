@@ -101,9 +101,5 @@ class BaseEKF:
         }
 
     def get_robot_covariance(self) -> np.ndarray:
-        """Get the robot pose covariance (3x3).
-
-        Returns:
-            3x3 covariance matrix for [x, y, theta]
-        """
+        
         return self.P[0:3, 0:3].copy()
